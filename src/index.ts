@@ -6,8 +6,9 @@ import { runPowerShell } from "./powershell.js";
 import { formatResult } from "./format.js";
 import { runSsh, formatSsh } from "./ssh.js";
 import { runWinRm } from "./winrm.js";
+import { runSftp, formatSftp } from "./sftp.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
 
 const server = new McpServer({ name: "powershell-mcp", version: VERSION });
 
@@ -97,10 +98,12 @@ server.tool(
     privateKeyPath: z.string().optional().describe("Path to a private key file on this Windows host, e.g. C:\\\\Users\\\\isak\\\\.ssh\\\\id_ed25519."),
     passphrase: z.string().optional().describe("Passphrase for the private key, if any."),
     password: z.string().optional().describe("Password auth (used if no key)."),
-    timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000)."),
+    timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000). Also bounds the connection handshake."),
+    maxOutputBytes: z.number().int().positive().max(8_388_608).optional().describe("Cap captured stdout/stderr per stream (bytes, default 1 MiB)."),
+    tail: z.boolean().optional().describe("Keep the LAST maxOutputBytes instead of the first (tail) — useful for long logs."),
   },
-  async ({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs }) => {
-    const r = await runSsh({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs });
+  async ({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs, maxOutputBytes, tail }) => {
+    const r = await runSsh({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs, maxOutputBytes, tail });
     return {
       content: [{ type: "text", text: formatSsh(`${username}@${host}`, r) }],
       isError: r.timedOut || !!r.error || (r.exitCode ?? 0) !== 0,
@@ -123,6 +126,40 @@ server.tool(
   async ({ computerName, command, username, password, useSsl, authentication, timeoutMs }) => {
     const r = await runWinRm({ computerName, command, username, password, useSsl, authentication, timeoutMs });
     return { content: [{ type: "text", text: formatResult(r) }], isError: r.timedOut || (r.exitCode ?? 0) !== 0 };
+  },
+);
+
+const sftpAuth = {
+  host: z.string().describe("Remote host or IP."),
+  username: z.string().describe("SSH username."),
+  port: z.number().int().positive().max(65535).optional().describe("SSH port (default 22)."),
+  privateKeyPath: z.string().optional().describe("Path to a private key file on this Windows host."),
+  passphrase: z.string().optional().describe("Passphrase for the private key, if any."),
+  password: z.string().optional().describe("Password auth (used if no key)."),
+  timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 120000)."),
+};
+
+server.tool(
+  "sftp_upload",
+  "Upload a local file to a remote host over SFTP, in-process (ssh2 — no scp.exe, no WSL, headless). Use to deploy scripts/configs to Linux hosts.",
+  { localPath: z.string().describe("Local file path on this Windows host."),
+    remotePath: z.string().describe("Destination path on the remote host."), ...sftpAuth },
+  async ({ localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, timeoutMs }) => {
+    const o = { direction: "upload" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, timeoutMs };
+    const r = await runSftp(o);
+    return { content: [{ type: "text", text: formatSftp(o, r) }], isError: !r.ok };
+  },
+);
+
+server.tool(
+  "sftp_download",
+  "Download a file from a remote host to this Windows host over SFTP, in-process (ssh2 — no scp.exe, no WSL, headless).",
+  { remotePath: z.string().describe("Source path on the remote host."),
+    localPath: z.string().describe("Destination path on this Windows host."), ...sftpAuth },
+  async ({ remotePath, localPath, host, username, port, privateKeyPath, passphrase, password, timeoutMs }) => {
+    const o = { direction: "download" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, timeoutMs };
+    const r = await runSftp(o);
+    return { content: [{ type: "text", text: formatSftp(o, r) }], isError: !r.ok };
   },
 );
 

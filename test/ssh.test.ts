@@ -3,15 +3,20 @@ import { runSsh, formatSsh, type SshResult } from "../src/ssh.js";
 
 describe("formatSsh", () => {
   it("renders a successful result", () => {
-    const r: SshResult = { stdout: "hello\n", stderr: "", exitCode: 0, timedOut: false, durationMs: 12 };
+    const r: SshResult = { stdout: "hello\n", stderr: "", exitCode: 0, timedOut: false, truncated: false, durationMs: 12 };
     const out = formatSsh("isak@nuc", r);
     expect(out).toContain("$ ssh isak@nuc");
     expect(out).toContain("exit=0");
     expect(out).toContain("hello");
   });
 
+  it("flags truncated output", () => {
+    const r: SshResult = { stdout: "x", stderr: "", exitCode: 0, timedOut: false, truncated: true, durationMs: 3 };
+    expect(formatSsh("u@h", r)).toContain("TRUNCATED");
+  });
+
   it("surfaces errors and non-zero exit", () => {
-    const r: SshResult = { stdout: "", stderr: "boom", exitCode: 1, timedOut: false, error: "connection error", durationMs: 5 };
+    const r: SshResult = { stdout: "", stderr: "boom", exitCode: 1, timedOut: false, truncated: false, error: "connection error", durationMs: 5 };
     const out = formatSsh("u@h", r);
     expect(out).toContain("[error] connection error");
     expect(out).toContain("[stderr]");

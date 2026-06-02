@@ -22,6 +22,8 @@ Most tools that let an agent run Windows commands spawn a visible console window
 | `system_info` | OS, CPU, memory, and per-drive disk summary. |
 | `ssh_exec` | Run a command on a remote host over SSH, **fully in-process** (no `ssh.exe`, no WSL — works headless). `{ host, username, command, port?, privateKeyPath?, passphrase?, password?, timeoutMs? }` |
 | `winrm_exec` | Run a command on a remote **Windows** host via PowerShell Remoting (WinRM / `Invoke-Command`). No SSH server or agent needed on the target. `{ computerName, command, username?, password?, useSsl?, authentication?, timeoutMs? }` |
+| `sftp_upload` | Upload a local file to a remote host over SFTP, in-process (ssh2 — no scp.exe/WSL, headless). `{ localPath, remotePath, host, username, port?, privateKeyPath?, passphrase?, password?, timeoutMs? }` |
+| `sftp_download` | Download a remote file to this host over SFTP, in-process. Same params as `sftp_upload`. |
 
 ## Remote operations
 

@@ -10,6 +10,10 @@ export interface SshOptions {
   passphrase?: string;
   password?: string;
   timeoutMs?: number;
+  /** Cap captured stdout/stderr per stream (bytes, default 1 MiB). */
+  maxOutputBytes?: number;
+  /** When true, keep the LAST maxOutputBytes instead of the first (tail). */
+  tail?: boolean;
 }
 
 export interface SshResult {
@@ -18,11 +22,12 @@ export interface SshResult {
   exitCode: number | null;
   signal?: string;
   timedOut: boolean;
+  truncated: boolean;
   error?: string;
   durationMs: number;
 }
 
-const OUTPUT_CAP = 1_048_576; // 1 MiB per stream
+const DEFAULT_OUTPUT_CAP = 1_048_576; // 1 MiB per stream
 
 /**
  * Run a single command on a remote host over SSH, fully in-process (no ssh.exe,
@@ -30,11 +35,13 @@ const OUTPUT_CAP = 1_048_576; // 1 MiB per stream
  */
 export function runSsh(opts: SshOptions): Promise<SshResult> {
   const timeoutMs = opts.timeoutMs ?? 60_000;
+  const cap = opts.maxOutputBytes ?? DEFAULT_OUTPUT_CAP;
   const started = Date.now();
   return new Promise<SshResult>((resolve) => {
     const conn = new Client();
     let stdout = "";
     let stderr = "";
+    let truncated = false;
     let settled = false;
 
     const finish = (r: Partial<SshResult>) => {
@@ -43,7 +50,7 @@ export function runSsh(opts: SshOptions): Promise<SshResult> {
       clearTimeout(timer);
       try { conn.end(); } catch { /* ignore */ }
       resolve({
-        stdout, stderr, exitCode: null, timedOut: false,
+        stdout, stderr, exitCode: null, timedOut: false, truncated,
         durationMs: Date.now() - started, ...r,
       });
     };
@@ -52,7 +59,10 @@ export function runSsh(opts: SshOptions): Promise<SshResult> {
 
     const append = (cur: string, chunk: Buffer) => {
       const next = cur + chunk.toString("utf8");
-      return next.length > OUTPUT_CAP ? next.slice(0, OUTPUT_CAP) : next;
+      if (next.length <= cap) return next;
+      truncated = true;
+      // tail: keep the most recent bytes; otherwise keep the first cap bytes.
+      return opts.tail ? next.slice(next.length - cap) : next.slice(0, cap);
     };
 
     conn.on("ready", () => {
@@ -73,7 +83,7 @@ export function runSsh(opts: SshOptions): Promise<SshResult> {
       host: opts.host,
       port: opts.port ?? 22,
       username: opts.username,
-      readyTimeout: Math.min(timeoutMs, 30_000),
+      readyTimeout: Math.min(timeoutMs, 120_000),
       keepaliveInterval: 0,
     };
 
@@ -95,7 +105,7 @@ export function runSsh(opts: SshOptions): Promise<SshResult> {
 }
 
 export function formatSsh(target: string, r: SshResult): string {
-  const head = `$ ssh ${target}  (exit=${r.exitCode ?? "n/a"}${r.timedOut ? ", TIMED OUT" : ""}, ${r.durationMs}ms)`;
+  const head = `$ ssh ${target}  (exit=${r.exitCode ?? "n/a"}${r.timedOut ? ", TIMED OUT" : ""}${r.truncated ? ", TRUNCATED" : ""}, ${r.durationMs}ms)`;
   const parts = [head];
   if (r.error) parts.push(`[error] ${r.error}`);
   if (r.stdout.trim()) parts.push(r.stdout.trimEnd());
