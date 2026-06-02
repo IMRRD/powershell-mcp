@@ -1,6 +1,7 @@
 {
   "name": "powershell-mcp",
-  "version": "0.3.0",
+  "version": "0.3.1",
+  "mcpName": "io.github.IMRRD/powershell-mcp",
   "description": "A Model Context Protocol (MCP) server for Windows PowerShell — runs commands in a hidden process (no popup windows), with structured output, timeouts, and service/system management. Built for AI agents that need real Windows access.",
   "type": "module",
   "bin": {
