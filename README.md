@@ -25,6 +25,23 @@ Most tools that let an agent run Windows commands spawn a visible console window
 | `sftp_upload` | Upload a local file to a remote host over SFTP, in-process (ssh2 — no scp.exe/WSL, headless). `{ localPath, remotePath, host, username, port?, privateKeyPath?, passphrase?, password?, timeoutMs? }` |
 | `sftp_download` | Download a remote file to this host over SFTP, in-process. Same params as `sftp_upload`. |
 
+## See it work
+
+Real calls, real output — headless, no console window, structured results:
+
+```text
+# ssh_exec — run a command on a Linux box, in-process (no ssh.exe, no WSL)
+> ssh_exec  host=192.168.0.5  username=isak  command="uptime; systemctl is-active app"
+$ ssh isak@192.168.0.5  (exit=0, 818ms)
+ 2 days, 23:53,  load average: 0.00, 0.01, 0.04
+active
+
+# sftp_upload — deploy a file, in-process (no scp.exe)
+> sftp_upload  localPath=C:\deploy\app.py  remotePath=/home/isak/app.py  host=192.168.0.5 ...
+sftp upload: C:\deploy\app.py → isak@192.168.0.5:/home/isak/app.py
+OK (9129 bytes, 714ms)
+```
+
 ## Remote operations
 
 `powershell-mcp` manages more than the local box. Windows' own `ssh.exe` produces no capturable output when run from a windowless/background process, and shipping WSL to every server doesn't scale — so remote exec is built in:
@@ -66,4 +83,4 @@ CI runs build + tests on both `windows-latest` and `ubuntu-latest`.
 
 ## License
 
-MIT © iaLogics / Isak du Plessis
+MIT © IMR Research & Development (UK)
