@@ -4,8 +4,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { runPowerShell } from "./powershell.js";
 import { formatResult } from "./format.js";
+import { runSsh, formatSsh } from "./ssh.js";
+import { runWinRm } from "./winrm.js";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.0";
 
 const server = new McpServer({ name: "powershell-mcp", version: VERSION });
 
@@ -81,6 +83,46 @@ server.tool(
     ].join("\n");
     const r = await runPowerShell(script, { timeoutMs: 30_000 });
     return { content: [{ type: "text", text: formatResult(r) }], isError: (r.exitCode ?? 0) !== 0 };
+  },
+);
+
+server.tool(
+  "ssh_exec",
+  "Run a command on a remote host over SSH, fully in-process (no ssh.exe, no WSL — works headless). Use for Linux hosts or any OpenSSH target. Auth via privateKeyPath or password. Returns stdout, stderr, exit code.",
+  {
+    host: z.string().describe("Remote host or IP."),
+    username: z.string().describe("SSH username."),
+    command: z.string().describe("Command to run on the remote host."),
+    port: z.number().int().positive().max(65535).optional().describe("SSH port (default 22)."),
+    privateKeyPath: z.string().optional().describe("Path to a private key file on this Windows host, e.g. C:\\\\Users\\\\isak\\\\.ssh\\\\id_ed25519."),
+    passphrase: z.string().optional().describe("Passphrase for the private key, if any."),
+    password: z.string().optional().describe("Password auth (used if no key)."),
+    timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000)."),
+  },
+  async ({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs }) => {
+    const r = await runSsh({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs });
+    return {
+      content: [{ type: "text", text: formatSsh(`${username}@${host}`, r) }],
+      isError: r.timedOut || !!r.error || (r.exitCode ?? 0) !== 0,
+    };
+  },
+);
+
+server.tool(
+  "winrm_exec",
+  "Run a command on a remote Windows host via PowerShell Remoting (WinRM / Invoke-Command). Native to Windows Server — no SSH server or agent needed on the target, only WinRM enabled. Output captured in-process (no console window).",
+  {
+    computerName: z.string().describe("Remote Windows host name or IP."),
+    command: z.string().describe("PowerShell command/scriptblock body to run remotely."),
+    username: z.string().optional().describe("Credential username (DOMAIN\\\\user or host\\\\user). Omit to use the host process identity."),
+    password: z.string().optional().describe("Credential password."),
+    useSsl: z.boolean().optional().describe("Use HTTPS/5986 WinRM."),
+    authentication: z.enum(["Default", "Negotiate", "Kerberos", "Basic", "CredSSP"]).optional().describe("WinRM auth mechanism."),
+    timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 120000)."),
+  },
+  async ({ computerName, command, username, password, useSsl, authentication, timeoutMs }) => {
+    const r = await runWinRm({ computerName, command, username, password, useSsl, authentication, timeoutMs });
+    return { content: [{ type: "text", text: formatResult(r) }], isError: r.timedOut || (r.exitCode ?? 0) !== 0 };
   },
 );
 
