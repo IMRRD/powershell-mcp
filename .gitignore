@@ -6,3 +6,4 @@ coverage/
 *.tsbuildinfo
 *.bat
 *.ps1
+tidy_done.txt

@@ -20,6 +20,15 @@ Most tools that let an agent run Windows commands spawn a visible console window
 | `get_service` | Detailed status of one service by name. |
 | `control_service` | `start` / `stop` / `restart` / `status` a service. |
 | `system_info` | OS, CPU, memory, and per-drive disk summary. |
+| `ssh_exec` | Run a command on a remote host over SSH, **fully in-process** (no `ssh.exe`, no WSL — works headless). `{ host, username, command, port?, privateKeyPath?, passphrase?, password?, timeoutMs? }` |
+| `winrm_exec` | Run a command on a remote **Windows** host via PowerShell Remoting (WinRM / `Invoke-Command`). No SSH server or agent needed on the target. `{ computerName, command, username?, password?, useSsl?, authentication?, timeoutMs? }` |
+
+## Remote operations
+
+`powershell-mcp` manages more than the local box. Windows' own `ssh.exe` produces no capturable output when run from a windowless/background process, and shipping WSL to every server doesn't scale — so remote exec is built in:
+
+- **`ssh_exec`** uses the pure-JS [`ssh2`](https://github.com/mscdex/ssh2) client (no external binary), so it works headless and needs nothing on the target beyond an SSH server. Ideal for Linux hosts.
+- **`winrm_exec`** uses native PowerShell Remoting, so a Windows fleet needs only WinRM enabled — no per-server install.
 
 ## Install
 
