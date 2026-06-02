@@ -1,0 +1,35 @@
+{
+  "name": "powershell-mcp",
+  "version": "0.1.0",
+  "description": "A Model Context Protocol (MCP) server for Windows PowerShell — runs commands in a hidden process (no popup windows), with structured output, timeouts, and service/system management. Built for AI agents that need real Windows access.",
+  "type": "module",
+  "bin": {
+    "powershell-mcp": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "keywords": ["mcp", "model-context-protocol", "powershell", "windows", "ai-agents", "claude", "automation"],
+  "license": "MIT",
+  "author": "iaLogics / Isak du Plessis",
+  "repository": { "type": "git", "url": "https://github.com/isak-ialogics/powershell-mcp" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

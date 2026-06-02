@@ -1,0 +1,12 @@
+{
+  "//": "Add this to your Claude desktop MCP config (claude_desktop_config.json). Adjust the path to the built dist/index.js.",
+  "mcpServers": {
+    "powershell": {
+      "command": "node",
+      "args": ["C:\\Projects\\powershell-mcp\\dist\\index.js"],
+      "env": {
+        "PWSH_MCP_EXE": "powershell.exe"
+      }
+    }
+  }
+}
