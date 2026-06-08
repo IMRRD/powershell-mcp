@@ -4,6 +4,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { runPowerShell } from "./powershell.js";
 import { formatResult } from "./format.js";
+import { runProgram } from "./program.js";
 import { runSsh, formatSsh } from "./ssh.js";
 import { runWinRm } from "./winrm.js";
 import { runSftp, formatSftp } from "./sftp.js";
@@ -169,6 +170,20 @@ server.tool(
   },
 );
 
+server.tool(
+  "run_program",
+  "Run a native executable DIRECTLY (no shell) in a hidden process and capture clean stdout/stderr + exit code. Use this for console programs like gh, git, docker, node, python, etc. -- their output is captured reliably, unlike when the same program is run inside run_powershell (where a hidden PowerShell swallows native stdout). Provide the program and an args array (no shell quoting needed).",
+  {
+    program: z.string().describe("Executable name on PATH or a full path, e.g. 'git' or 'C:\\Program Files\\GitHub CLI\\gh.exe'."),
+    args: z.array(z.string()).optional().describe("Arguments as an array; each element is passed verbatim (no shell quoting)."),
+    cwd: z.string().optional().describe("Working directory."),
+    timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000)."),
+  },
+  async ({ program, args, cwd, timeoutMs }) => {
+    const r = await runProgram(program, args ?? [], { cwd, timeoutMs });
+    return { content: [{ type: "text", text: formatResult(r) }], isError: r.timedOut || (r.exitCode ?? 0) !== 0 };
+  },
+);
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -180,3 +195,4 @@ main().catch((err) => {
   process.stderr.write(`fatal: ${err?.stack || err}\n`);
   process.exit(1);
 });
+
