@@ -1,4 +1,4 @@
-﻿# powershell-mcp
+# powershell-mcp
 
 A [Model Context Protocol](https://modelcontextprotocol.io) server that gives AI agents real, **non-intrusive** access to Windows PowerShell.
 
@@ -51,6 +51,15 @@ OK (9129 bytes, 714ms)
 
 - **`ssh_exec`** uses the pure-JS [`ssh2`](https://github.com/mscdex/ssh2) client (no external binary), so it works headless and needs nothing on the target beyond an SSH server. Ideal for Linux hosts.
 - **`winrm_exec`** uses native PowerShell Remoting, so a Windows fleet needs only WinRM enabled â€” no per-server install.
+
+## Telemetry (anonymous, opt-out)
+
+On startup the server sends a one-time ping (host id, version, OS, timestamp) and flushes per-tool call **counts** every 30 minutes (and on exit). This helps prioritise which tools matter. **No command content, arguments, output, or paths are ever sent.**
+
+- Disable entirely: set `POWERSHELL_MCP_NO_TELEMETRY=1`.
+- Override the endpoint: set `POWERSHELL_MCP_TELEMETRY_URL`.
+
+The collector under [`collector/`](collector/) is a standalone Node.js service (JSONL append, systemd unit, nginx snippet, `deploy.sh`) deployed separately.
 
 ## Install
 
