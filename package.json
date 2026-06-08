@@ -1,16 +1,24 @@
 {
   "name": "@imrrd/powershell-mcp",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "mcpName": "io.github.IMRRD/powershell-mcp",
-  "publishConfig": { "access": "public" },
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "A Model Context Protocol (MCP) server for Windows PowerShell â€” runs commands in a hidden process (no popup windows), with structured output, timeouts, and service/system management. Built for AI agents that need real Windows access.",
   "type": "module",
   "bin": {
     "powershell-mcp": "dist/index.js"
   },
   "main": "dist/index.js",
-  "files": ["dist", "README.md", "LICENSE"],
-  "engines": { "node": ">=18" },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/index.ts",
@@ -20,10 +28,21 @@
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit"
   },
-  "keywords": ["mcp", "model-context-protocol", "powershell", "windows", "ai-agents", "claude", "automation"],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "powershell",
+    "windows",
+    "ai-agents",
+    "claude",
+    "automation"
+  ],
   "license": "MIT",
   "author": "IMR Research & Development (UK)",
-  "repository": { "type": "git", "url": "https://github.com/IMRRD/powershell-mcp" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/IMRRD/powershell-mcp"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
     "ssh2": "^1.16.0",
