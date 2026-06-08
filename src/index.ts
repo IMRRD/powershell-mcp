@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env node
+#!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -8,6 +8,7 @@ import { runProgram } from "./program.js";
 import { runSsh, formatSsh } from "./ssh.js";
 import { runWinRm } from "./winrm.js";
 import { runSftp, formatSftp } from "./sftp.js";
+import { startupPing, incrementTool, startFlushTimer } from "./telemetry.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -28,6 +29,7 @@ server.tool(
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000)."),
   },
   async ({ script, cwd, timeoutMs }) => {
+    incrementTool("run_powershell");
     const r = await runPowerShell(script, { cwd, timeoutMs });
     return { content: [{ type: "text", text: formatResult(r) }], isError: r.timedOut || (r.exitCode ?? 0) !== 0 };
   },
@@ -38,6 +40,7 @@ server.tool(
   "List Windows services, optionally filtered by a name pattern. Returns Name, DisplayName, Status.",
   { filter: z.string().optional().describe("Wildcard name filter, e.g. 'Sql*' or '*backup*'.") },
   async ({ filter }) => {
+    incrementTool("list_services");
     const f = filter ? `-Name '${filter.replace(/'/g, "''")}'` : "";
     const script = `Get-Service ${f} | Select-Object Name,DisplayName,Status | Sort-Object Name | Format-Table -AutoSize | Out-String -Width 200`;
     const r = await runPowerShell(script, { timeoutMs: 30_000 });
@@ -50,6 +53,7 @@ server.tool(
   "Get detailed status of one Windows service by name.",
   { name: z.string().describe("Exact service name (not display name).") },
   async ({ name }) => {
+    incrementTool("get_service");
     const n = name.replace(/'/g, "''");
     const script = `Get-Service -Name '${n}' | Select-Object Name,DisplayName,Status,StartType,CanStop,CanPauseAndContinue | Format-List | Out-String -Width 200`;
     const r = await runPowerShell(script, { timeoutMs: 30_000 });
@@ -65,6 +69,7 @@ server.tool(
     action: z.enum(["start", "stop", "restart", "status"]).describe("Action to perform."),
   },
   async ({ name, action }) => {
+    incrementTool("control_service");
     const n = name.replace(/'/g, "''");
     const verb = { start: "Start-Service", stop: "Stop-Service", restart: "Restart-Service", status: "Get-Service" }[action];
     const script = `${verb} -Name '${n}' -ErrorAction Stop; Get-Service -Name '${n}' | Select-Object Name,Status | Format-List | Out-String -Width 200`;
@@ -78,6 +83,7 @@ server.tool(
   "Return OS, CPU, memory and disk summary for this Windows host.",
   {},
   async () => {
+    incrementTool("system_info");
     const script = [
       "$os = Get-CimInstance Win32_OperatingSystem;",
       "$cs = Get-CimInstance Win32_ComputerSystem;",
@@ -110,6 +116,7 @@ server.tool(
     tail: z.boolean().optional().describe("Keep the LAST maxOutputBytes instead of the first (tail) â€” useful for long logs."),
   },
   async ({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs, maxOutputBytes, tail }) => {
+    incrementTool("ssh_exec");
     const r = await runSsh({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs, maxOutputBytes, tail });
     return {
       content: [{ type: "text", text: formatSsh(`${username}@${host}`, r) }],
@@ -131,6 +138,7 @@ server.tool(
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 120000)."),
   },
   async ({ computerName, command, username, password, useSsl, authentication, timeoutMs }) => {
+    incrementTool("winrm_exec");
     const r = await runWinRm({ computerName, command, username, password, useSsl, authentication, timeoutMs });
     return { content: [{ type: "text", text: formatResult(r) }], isError: r.timedOut || (r.exitCode ?? 0) !== 0 };
   },
@@ -152,6 +160,7 @@ server.tool(
   { localPath: z.string().describe("Local file path on this Windows host."),
     remotePath: z.string().describe("Destination path on the remote host."), ...sftpAuth },
   async ({ localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, timeoutMs }) => {
+    incrementTool("sftp_upload");
     const o = { direction: "upload" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, timeoutMs };
     const r = await runSftp(o);
     return { content: [{ type: "text", text: formatSftp(o, r) }], isError: !r.ok };
@@ -164,6 +173,7 @@ server.tool(
   { remotePath: z.string().describe("Source path on the remote host."),
     localPath: z.string().describe("Destination path on this Windows host."), ...sftpAuth },
   async ({ remotePath, localPath, host, username, port, privateKeyPath, passphrase, password, timeoutMs }) => {
+    incrementTool("sftp_download");
     const o = { direction: "download" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, timeoutMs };
     const r = await runSftp(o);
     return { content: [{ type: "text", text: formatSftp(o, r) }], isError: !r.ok };
@@ -180,6 +190,7 @@ server.tool(
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000)."),
   },
   async ({ program, args, cwd, timeoutMs }) => {
+    incrementTool("run_program");
     const r = await runProgram(program, args ?? [], { cwd, timeoutMs });
     return { content: [{ type: "text", text: formatResult(r) }], isError: r.timedOut || (r.exitCode ?? 0) !== 0 };
   },
@@ -189,6 +200,9 @@ async function main() {
   await server.connect(transport);
   // stderr is safe for logs (stdout is the MCP channel).
   process.stderr.write(`powershell-mcp v${VERSION} ready (stdio)\n`);
+  // Telemetry: fire startup ping then arm the 30-min counter flush.
+  startupPing(VERSION);
+  startFlushTimer(VERSION);
 }
 
 main().catch((err) => {
