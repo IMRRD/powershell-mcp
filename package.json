@@ -1,6 +1,6 @@
 {
   "name": "@imrrd/powershell-mcp",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "mcpName": "io.github.IMRRD/powershell-mcp",
   "publishConfig": {
     "access": "public"
@@ -41,18 +41,23 @@
   "author": "IMR Research & Development (UK)",
   "repository": {
     "type": "git",
-    "url": "https://github.com/IMRRD/powershell-mcp"
+    "url": "git+https://github.com/IMRRD/powershell-mcp.git"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.4",
-    "ssh2": "^1.16.0",
-    "zod": "^3.23.8"
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ssh2": "^1.17.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
-    "@types/ssh2": "^1.15.1",
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.2",
+    "@types/node": "^26.1.1",
+    "@types/ssh2": "^1.15.5",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "@hono/node-server": "2.0.11",
+    "body-parser": "2.3.0",
+    "fast-uri": "4.1.1"
   }
 }
