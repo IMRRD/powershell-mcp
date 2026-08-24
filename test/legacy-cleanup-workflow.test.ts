@@ -4,10 +4,12 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const workflowText = () =>
+  readFileSync(resolve(root, ".github/workflows/retire-legacy-npm.yml"), "utf8").replace(/\r\n/g, "\n");
 
 describe("one-shot legacy npm cleanup", () => {
   it("is manually gated and uses only the package-scoped secret", () => {
-    const workflow = readFileSync(resolve(root, ".github/workflows/retire-legacy-npm.yml"), "utf8");
+    const workflow = workflowText();
 
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).not.toContain("pull_request:");
@@ -19,7 +21,7 @@ describe("one-shot legacy npm cleanup", () => {
   });
 
   it("publishes the exact forwarder once, deprecates every legacy version, and verifies both states", () => {
-    const workflow = readFileSync(resolve(root, ".github/workflows/retire-legacy-npm.yml"), "utf8");
+    const workflow = workflowText();
 
     expect(workflow).toContain("powershell-mcp@0.3.2");
     expect(workflow).toContain("npm publish --access public");
