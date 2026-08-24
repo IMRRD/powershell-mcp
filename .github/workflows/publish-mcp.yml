@@ -1,0 +1,64 @@
+name: Publish to MCP Registry
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: powershell-mcp-registry-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out exact server manifest
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js for npm registry verification
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.15.0
+          registry-url: https://registry.npmjs.org
+
+      - name: Wait for the declared npm package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="$(node -p "require('./server.json').packages[0].identifier")"
+          version="$(node -p "require('./server.json').packages[0].version")"
+          for attempt in $(seq 1 30); do
+            observed="$(npm view "${package}@${version}" version 2>/dev/null || true)"
+            if [[ "$observed" == "$version" ]]; then
+              exit 0
+            fi
+            sleep 5
+          done
+          printf 'Declared npm package %s@%s is unavailable\n' "$package" "$version" >&2
+          exit 1
+
+      - name: Install pinned MCP publisher
+        shell: bash
+        run: |
+          set -euo pipefail
+          url='https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz'
+          curl -fsSL --retry 3 --retry-all-errors "$url" -o /tmp/mcp-publisher.tar.gz
+          printf '%s  %s\n' \
+            'a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc' \
+            '/tmp/mcp-publisher.tar.gz' | sha256sum --check --strict
+          tar -xzf /tmp/mcp-publisher.tar.gz mcp-publisher
+          chmod 0755 mcp-publisher
+
+      - name: Validate server manifest
+        run: ./mcp-publisher validate
+
+      - name: Authenticate to MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish canonical server metadata
+        run: ./mcp-publisher publish
