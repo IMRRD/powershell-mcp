@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { execSync } from "node:child_process";
 import os from "node:os";
-import { resolvePowerShellExe, buildArgs, runPowerShell } from "../src/powershell.js";
+import { resolvePowerShellCandidates, resolvePowerShellExe, buildArgs, runPowerShell } from "../src/powershell.js";
 import { formatResult } from "../src/format.js";
 
 // Detect whether a PowerShell is available so integration tests can run
@@ -36,10 +36,30 @@ describe("resolvePowerShellExe", () => {
     process.env.PWSH_MCP_EXE = "myshell";
     expect(resolvePowerShellExe()).toBe("myshell");
   });
-  it("defaults to a platform-appropriate shell", () => {
+  it("defaults to modern pwsh", () => {
     delete process.env.PWSH_MCP_EXE;
-    const def = resolvePowerShellExe();
-    expect(["pwsh", "powershell.exe"]).toContain(def);
+    expect(resolvePowerShellExe()).toBe("pwsh");
+  });
+});
+
+describe("resolvePowerShellCandidates", () => {
+  it("prefers pwsh then Windows PowerShell on win32", () => {
+    expect(resolvePowerShellCandidates(undefined, "win32", undefined)).toEqual([
+      "pwsh",
+      "powershell.exe",
+    ]);
+  });
+
+  it("does not add fallbacks to an explicit executable", () => {
+    expect(resolvePowerShellCandidates(" /custom/pwsh ", "win32", undefined)).toEqual([
+      "/custom/pwsh",
+    ]);
+  });
+
+  it("does not add fallbacks to the configured environment executable", () => {
+    expect(resolvePowerShellCandidates(undefined, "win32", " configured-pwsh ")).toEqual([
+      "configured-pwsh",
+    ]);
   });
 });
 
