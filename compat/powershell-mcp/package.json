@@ -1,0 +1,38 @@
+{
+  "name": "powershell-mcp",
+  "version": "0.3.2",
+  "description": "Compatibility forwarder for the canonical @imrrd/powershell-mcp package.",
+  "type": "module",
+  "bin": {
+    "powershell-mcp": "bin/powershell-mcp.js"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@imrrd/powershell-mcp": "^0.5.2"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IMRRD/powershell-mcp.git"
+  },
+  "homepage": "https://www.npmjs.com/package/@imrrd/powershell-mcp",
+  "bugs": {
+    "url": "https://github.com/IMRRD/powershell-mcp/issues"
+  },
+  "license": "MIT",
+  "author": "IMR Research & Development (UK)",
+  "keywords": [
+    "mcp",
+    "powershell",
+    "migration"
+  ]
+}
