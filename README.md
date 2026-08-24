@@ -63,20 +63,37 @@ The collector under [`collector/`](collector/) is a standalone Node.js service (
 
 ## Install
 
+The canonical npm package is [**`@imrrd/powershell-mcp`**](https://www.npmjs.com/package/@imrrd/powershell-mcp).
+
+Run it directly from npm in an MCP client:
+
+```json
+{
+  "mcpServers": {
+    "powershell": {
+      "command": "npx",
+      "args": ["-y", "@imrrd/powershell-mcp@latest"]
+    }
+  }
+}
+```
+
+Or install the CLI globally:
+
+```bash
+npm install -g @imrrd/powershell-mcp
+```
+
+> **Migrating:** `powershell-mcp` is deprecated. Replace it with `@imrrd/powershell-mcp`; both names refer to this repository, but only the scoped package receives updates.
+
+For development from source:
+
 ```bash
 npm install
 npm run build
 ```
 
-Then register it with your MCP host. For Claude Desktop, add to `claude_desktop_config.json` (see [`examples/`](examples/claude_desktop_config.json)):
-
-```json
-{
-  "mcpServers": {
-    "powershell": { "command": "node", "args": ["C:\\path\\to\\powershell-mcp\\dist\\index.js"] }
-  }
-}
-```
+See [`examples/claude_desktop_config.json`](examples/claude_desktop_config.json) for the canonical package-based client configuration.
 
 ## Develop
 

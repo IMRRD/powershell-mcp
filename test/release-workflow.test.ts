@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-describe("v0.5.1 release contract", () => {
+describe("v0.5.2 release contract", () => {
   it("pins a trusted-publishing-compatible Node and npm toolchain", () => {
     const workflow = readFileSync(resolve(root, ".github/workflows/publish.yml"), "utf8");
 
@@ -20,8 +20,8 @@ describe("v0.5.1 release contract", () => {
     const manifest = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
     const lockfile = JSON.parse(readFileSync(resolve(root, "package-lock.json"), "utf8"));
 
-    expect(manifest.version).toBe("0.5.1");
-    expect(lockfile.version).toBe("0.5.1");
-    expect(lockfile.packages[""].version).toBe("0.5.1");
+    expect(manifest.version).toBe("0.5.2");
+    expect(lockfile.version).toBe("0.5.2");
+    expect(lockfile.packages[""].version).toBe("0.5.2");
   });
 });
