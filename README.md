@@ -84,7 +84,7 @@ Or install the CLI globally:
 npm install -g @imrrd/powershell-mcp
 ```
 
-> **Migrating:** `powershell-mcp` is deprecated. Replace it with `@imrrd/powershell-mcp`; both names refer to this repository, but only the scoped package receives updates.
+> **Migrating:** `powershell-mcp` is deprecated and will not receive a patched legacy release. Remove it and install `@imrrd/powershell-mcp@0.5.3` or later.
 
 For development from source:
 

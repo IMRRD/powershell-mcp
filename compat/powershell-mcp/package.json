@@ -1,6 +1,6 @@
 {
   "name": "powershell-mcp",
-  "version": "0.3.3",
+  "version": "0.3.2",
   "description": "Compatibility forwarder for the canonical @imrrd/powershell-mcp package.",
   "type": "module",
   "bin": {
@@ -15,7 +15,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@imrrd/powershell-mcp": "^0.5.3"
+    "@imrrd/powershell-mcp": "^0.5.2"
   },
   "publishConfig": {
     "access": "public"

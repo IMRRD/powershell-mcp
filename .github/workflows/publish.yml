@@ -1,12 +1,10 @@
 name: Publish to npm
 
-# Publishes @imrrd/powershell-mcp when a GitHub Release is published,
+# Publishes @imrrd/powershell-mcp from an immutable version tag,
 # or manually via the Actions tab. Auth uses npm Trusted Publishing (OIDC) -
 # no NPM_TOKEN secret, and OIDC publishes are exempt from npm's 2FA prompt.
 
 on:
-  release:
-    types: [published]
   push:
     tags: ['v*.*.*']
   workflow_dispatch:
