@@ -14,6 +14,8 @@ describe("v0.5.3 release contract", () => {
     expect(workflow).not.toContain("npm@latest");
     expect(workflow).toContain("id-token: write");
     expect(workflow).toContain("npm publish --access public --provenance");
+    expect(workflow).toContain("tags: ['v*.*.*']");
+    expect(workflow).not.toContain("release:");
   });
 
   it("keeps package and lockfile versions aligned", () => {
