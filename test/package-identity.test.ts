@@ -12,7 +12,7 @@ describe("canonical package identity", () => {
     const server = JSON.parse(text("server.json"));
 
     expect(pkg.name).toBe("@imrrd/powershell-mcp");
-    expect(pkg.version).toBe("0.5.2");
+    expect(pkg.version).toBe("0.5.3");
     expect(server.name).toBe(pkg.mcpName);
     expect(server.version).toBe(pkg.version);
     expect(server.description.length).toBeLessThanOrEqual(100);
@@ -42,6 +42,21 @@ describe("canonical package identity", () => {
     expect(powershell.command).toBe("npx");
     expect(powershell.args).toEqual(["-y", "@imrrd/powershell-mcp@latest"]);
     expect(powershell.env?.PWSH_MCP_EXE).toBeUndefined();
+  });
+
+  it("keeps the legacy forwarder on the fixed canonical release line", () => {
+    const legacy = JSON.parse(text("compat/powershell-mcp/package.json"));
+
+    expect(legacy.version).toBe("0.3.3");
+    expect(legacy.dependencies).toEqual({ "@imrrd/powershell-mcp": "^0.5.3" });
+  });
+
+  it("publishes a private security reporting policy", () => {
+    const policy = text("SECURITY.md");
+
+    expect(policy).toContain("privately report a vulnerability");
+    expect(policy).toContain("security/advisories/new");
+    expect(policy).not.toContain("open a public issue");
   });
 
   it("pins the official MCP publisher and uses GitHub OIDC", () => {

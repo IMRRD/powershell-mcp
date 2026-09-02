@@ -1,6 +1,6 @@
 {
   "name": "@imrrd/powershell-mcp",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "mcpName": "io.github.IMRRD/powershell-mcp",
   "publishConfig": {
     "access": "public"

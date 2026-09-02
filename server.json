@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.IMRRD/powershell-mcp",
   "description": "Headless Windows ops over MCP: hidden PowerShell plus in-process SSH, WinRM and SFTP.",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "repository": {
     "url": "https://github.com/IMRRD/powershell-mcp",
     "source": "github"
@@ -11,7 +11,7 @@
     {
       "registryType": "npm",
       "identifier": "@imrrd/powershell-mcp",
-      "version": "0.5.2",
+      "version": "0.5.3",
       "transport": { "type": "stdio" }
     }
   ]

@@ -24,6 +24,8 @@ export interface RunOptions {
   exe?: string;
   /** Extra environment variables. */
   env?: Record<string, string>;
+  /** Optional data written to the child only after it has spawned. */
+  stdin?: string;
   /** Cap captured stdout+stderr (bytes each, default 1 MiB). */
   maxOutputBytes?: number;
 }
@@ -100,7 +102,7 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
           cwd: opts.cwd,
           env: { ...process.env, ...(opts.env ?? {}) },
           windowsHide: true, // <-- no popup window, ever
-          stdio: ["ignore", "pipe", "pipe"],
+          stdio: [opts.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
         });
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code === "ENOENT" && candidateIndex + 1 < candidates.length) {
@@ -119,6 +121,11 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
       let truncated = false;
       let timedOut = false;
       let attemptFinished = false;
+
+      if (opts.stdin !== undefined) {
+        child.stdin?.on("error", () => { /* child error/close owns the result */ });
+        child.once("spawn", () => child.stdin?.end(opts.stdin));
+      }
 
       const append = (buf: Buffer, which: "out" | "err") => {
         if (which === "out") {

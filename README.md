@@ -107,6 +107,7 @@ CI runs build + tests on both `windows-latest` and `ubuntu-latest`.
 
 ## Security notes
 
+- `winrm_exec` sends caller-controlled connection details to the local PowerShell child over stdin; credentials are not placed in process arguments or environment variables.
 - `control_service` and many commands require the MCP host process to run with sufficient privileges.
 - The server runs whatever script it's given â€” run it only in environments you trust, behind a host (like Claude) that you control. A future release will add an optional allow/deny policy and confirmation gating.
 
