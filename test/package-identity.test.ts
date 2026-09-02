@@ -44,11 +44,17 @@ describe("canonical package identity", () => {
     expect(powershell.env?.PWSH_MCP_EXE).toBeUndefined();
   });
 
-  it("keeps the legacy forwarder on the fixed canonical release line", () => {
+  it("freezes the deprecated legacy source and directs users to the canonical fix", () => {
     const legacy = JSON.parse(text("compat/powershell-mcp/package.json"));
+    const legacyReadme = text("compat/powershell-mcp/README.md");
+    const readme = text("README.md");
 
-    expect(legacy.version).toBe("0.3.3");
-    expect(legacy.dependencies).toEqual({ "@imrrd/powershell-mcp": "^0.5.3" });
+    expect(legacy.version).toBe("0.3.2");
+    expect(legacy.dependencies).toEqual({ "@imrrd/powershell-mcp": "^0.5.2" });
+    expect(legacyReadme).toContain("receives no further releases");
+    expect(legacyReadme).toContain("@imrrd/powershell-mcp@0.5.3");
+    expect(readme).toContain("will not receive a patched legacy release");
+    expect(readme).toContain("@imrrd/powershell-mcp@0.5.3");
   });
 
   it("publishes a private security reporting policy", () => {

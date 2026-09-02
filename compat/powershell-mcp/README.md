@@ -9,4 +9,4 @@ npm uninstall -g powershell-mcp
 npm install -g @imrrd/powershell-mcp
 ```
 
-This final compatibility release forwards the `powershell-mcp` executable to the canonical scoped dependency so existing installations continue to start while users migrate. All future fixes and releases are published only under `@imrrd/powershell-mcp`.
+This deprecated compatibility package receives no further releases, including security fixes. Remove it and install `@imrrd/powershell-mcp@0.5.3` or later; all future fixes and releases are published only under the scoped package.
