@@ -24,4 +24,19 @@ describe("v0.5.3 release contract", () => {
     expect(lockfile.version).toBe("0.5.3");
     expect(lockfile.packages[""].version).toBe("0.5.3");
   });
+
+  it("bounds the one-shot legacy security release", () => {
+    const workflow = readFileSync(
+      resolve(root, ".github/workflows/publish-legacy-security.yml"),
+      "utf8",
+    );
+
+    expect(workflow).toContain("workflow_dispatch:");
+    expect(workflow).toContain("github.repository == 'IMRRD/powershell-mcp'");
+    expect(workflow).toContain("github.ref == 'refs/heads/main'");
+    expect(workflow).toContain("secrets.NPM_LEGACY_TOKEN");
+    expect(workflow).toContain("@imrrd/powershell-mcp version)\" = '0.5.3'");
+    expect(workflow).toContain("powershell-mcp@0.3.3");
+    expect(workflow).toContain("@imrrd/powershell-mcp@0.5.3");
+  });
 });
