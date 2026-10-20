@@ -20,6 +20,10 @@ const pkg = JSON.parse(
 const VERSION = pkg.version;
 
 const server = new McpServer({ name: "powershell-mcp", version: VERSION });
+const outputOptions = {
+  maxOutputBytes: z.number().int().positive().max(8_388_608).optional().describe("Raw UTF-8 bytes per stream (default 1 MiB)."),
+  tail: z.boolean().optional().describe("Keep last bytes rather than first; incomplete UTF-8 boundary scalars are omitted."),
+};
 
 server.registerTool(
   "run_powershell",
@@ -28,10 +32,11 @@ server.registerTool(
     cwd: z.string().optional().describe("Working directory."),
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000)."),
     errorPolicy: z.enum(["legacy", "strict"]).optional().describe("Default legacy raw script; strict detects unhandled PowerShell ErrorRecords. Check native exits immediately in the script."),
+    ...outputOptions,
   } },
-  async ({ script, cwd, timeoutMs, errorPolicy }) => {
+  async ({ script, cwd, timeoutMs, errorPolicy, maxOutputBytes, tail }) => {
     incrementTool("run_powershell");
-    const r = await runPowerShell(script, { cwd, timeoutMs, errorPolicy });
+    const r = await runPowerShell(script, { cwd, timeoutMs, errorPolicy, maxOutputBytes, tail });
     return toolResult(fromProcess(r, "powershell", "local"), formatResult(r));
   },
 );
@@ -136,10 +141,11 @@ server.registerTool(
     useSsl: z.boolean().optional().describe("Use HTTPS/5986 WinRM."),
     authentication: z.enum(["Default", "Negotiate", "Kerberos", "Basic", "CredSSP"]).optional().describe("WinRM auth mechanism."),
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 120000)."),
+    ...outputOptions,
   } },
-  async ({ computerName, command, username, password, useSsl, authentication, timeoutMs }) => {
+  async ({ computerName, command, username, password, useSsl, authentication, timeoutMs, maxOutputBytes, tail }) => {
     incrementTool("winrm_exec");
-    const r = await runWinRm({ computerName, command, username, password, useSsl, authentication, timeoutMs });
+    const r = await runWinRm({ computerName, command, username, password, useSsl, authentication, timeoutMs, maxOutputBytes, tail });
     return toolResult(fromProcess(r, "winrm", computerName), formatResult(r));
   },
 );
@@ -185,10 +191,11 @@ server.registerTool(
     args: z.array(z.string()).optional().describe("Arguments as an array; each element is passed verbatim (no shell quoting)."),
     cwd: z.string().optional().describe("Working directory."),
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000)."),
+    ...outputOptions,
   } },
-  async ({ program, args, cwd, timeoutMs }) => {
+  async ({ program, args, cwd, timeoutMs, maxOutputBytes, tail }) => {
     incrementTool("run_program");
-    const r = await runProgram(program, args ?? [], { cwd, timeoutMs });
+    const r = await runProgram(program, args ?? [], { cwd, timeoutMs, maxOutputBytes, tail });
     return toolResult(fromProcess(r, "program", program), formatResult(r));
   },
 );

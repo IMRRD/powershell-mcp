@@ -58,6 +58,8 @@ describe("WinRM credential transport", () => {
       password,
       useSsl: true,
       authentication: "Negotiate",
+      outputLimit: 1_048_576,
+      outputTail: false,
     });
   });
 

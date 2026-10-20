@@ -33,16 +33,35 @@ local child exit, otherwise `unknown`; neither status proves descendants or remo
 execution stopped after a timeout. These
 results never include authentication options or credential values.
 
+Execution tools accept `maxOutputBytes` (1–8,388,608, default 1 MiB **per
+stream**) and `tail` (default false: retain the head; true: retain the tail).
+`truncation.stdout` and `.stderr`, when the producer observed stream bytes,
+report `observedBytes`, `capturedBytes`, `omittedBytes`, and `truncated` on the
+original UTF-8 input bytes. `capturedBytes + omittedBytes = observedBytes`;
+these are **not** lengths of pretty-printed text. An incomplete UTF-8 scalar at
+a head/tail cut is omitted and counted as such. Malformed input is displayed
+with replacement characters; its captured count refers to original bytes, not
+the encoded replacement characters. Raw structured `stdout`/`stderr` preserve
+newlines; human-readable formatting may trim whitespace. Wrapper-generated
+diagnostics are not producer bytes and have no invented stream counts. Some
+failed/early remote calls cannot report producer-side byte counts. No full logs
+are persisted by default, and there is currently no protected full-log handle.
+Strict PowerShell and WinRM cap their framed payload *inside* the envelope so
+large successful outputs remain successful, but their existing PowerShell
+pipeline/WinRM remote-side item collection still buffers full command output
+before that cap. The local process drains its two OS pipes with bounded capture;
+this is **not** an end-to-end bounded-memory guarantee for remoting.
+
 | Tool | Description |
 |------|-------------|
-| `run_powershell` | Run any PowerShell script/command (hidden). `{ script, cwd?, timeoutMs?, errorPolicy?: "legacy" | "strict" }` |
-| `run_program` | Run a **native executable directly** (no shell) and capture clean stdout/stderr + exit code - for `gh`/`git`/`docker`/`node` and other console binaries whose output a hidden shell swallows. `{ program, args?, cwd?, timeoutMs? }` |
+| `run_powershell` | Run any PowerShell script/command (hidden). `{ script, cwd?, timeoutMs?, errorPolicy?: "legacy" | "strict", maxOutputBytes?, tail? }` |
+| `run_program` | Run a **native executable directly** (no shell) and capture clean stdout/stderr + exit code - for `gh`/`git`/`docker`/`node` and other console binaries whose output a hidden shell swallows. `{ program, args?, cwd?, timeoutMs?, maxOutputBytes?, tail? }` |
 | `list_services` | List services, optional `filter` wildcard. |
 | `get_service` | Detailed status of one service by name. |
 | `control_service` | `start` / `stop` / `restart` / `status` a service. |
 | `system_info` | OS, CPU, memory, and per-drive disk summary. |
-| `ssh_exec` | Run a command on a remote host over SSH, **fully in-process** (no `ssh.exe`, no WSL â€” works headless). `{ host, username, command, port?, privateKeyPath?, passphrase?, password?, timeoutMs? }` |
-| `winrm_exec` | Run a command on a remote **Windows** host via PowerShell Remoting (WinRM / `Invoke-Command`). No SSH server or agent needed on the target. `{ computerName, command, username?, password?, useSsl?, authentication?, timeoutMs? }` |
+| `ssh_exec` | Run a command on a remote host over SSH, **fully in-process** (no `ssh.exe`, no WSL â€” works headless). `{ host, username, command, port?, privateKeyPath?, passphrase?, password?, timeoutMs?, maxOutputBytes?, tail? }` |
+| `winrm_exec` | Run a command on a remote **Windows** host via PowerShell Remoting (WinRM / `Invoke-Command`). No SSH server or agent needed on the target. `{ computerName, command, username?, password?, useSsl?, authentication?, timeoutMs?, maxOutputBytes?, tail? }` |
 | `sftp_upload` | Upload a local file to a remote host over SFTP, in-process (ssh2 â€” no scp.exe/WSL, headless). `{ localPath, remotePath, host, username, port?, privateKeyPath?, passphrase?, password?, timeoutMs? }` |
 | `sftp_download` | Download a remote file to this host over SFTP, in-process. Same params as `sftp_upload`. |
 

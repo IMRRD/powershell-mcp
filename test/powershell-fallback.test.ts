@@ -80,7 +80,7 @@ describe("runPowerShell executable fallback", () => {
     expect(spawnMock).toHaveBeenCalledTimes(2);
     expect(spawnMock.mock.calls.map((call) => call[0])).toEqual(["pwsh", "powershell.exe"]);
     expect(result.shell).toBe("powershell.exe");
-    expect(result.stdout).toBe("fallback-ok");
+    expect(result.stdout).toBe("fallback-ok\n");
     expect(result.exitCode).toBe(0);
   });
 

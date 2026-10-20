@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import os from "node:os";
+import { OutputCollector, captureDiagnostic, type StreamCapture } from "./output-collector.js";
+import { LIMIT_BOOTSTRAP, captureFromEnvelope, FRAME_OUTPUT_LIMIT } from "./envelope-output.js";
 import { randomBytes } from "node:crypto";
 
 export interface ErrorRecordSummary { category: string; fullyQualifiedErrorId: string; exceptionType: string; message: string }
@@ -16,6 +18,9 @@ export interface PsResult {
   shell: string;
   /** True if stdout/stderr was truncated at maxOutputBytes. */
   truncated: boolean;
+  stdoutCapture?: StreamCapture;
+  stderrCapture?: StreamCapture;
+  outputLimitBytes?: number;
   spawnError?: string;
   invocationStatus?: "completed" | "remote_error" | "transport_error";
   errorRecords?: ErrorRecordSummary[];
@@ -37,10 +42,17 @@ export interface RunOptions {
   stdin?: string;
   /** Cap captured stdout+stderr (bytes each, default 1 MiB). */
   maxOutputBytes?: number;
+  tail?: boolean;
+  /** Internal framed transport stderr cap; never a public tool option. */
+  stderrLimitBytes?: number;
+  stderrTail?: boolean;
   errorPolicy?: "legacy" | "strict";
 }
 
 const STRICT_BOOTSTRAP = `
+$payloadLimit = [int]$env:PS_MCP_OUTPUT_LIMIT
+$payloadTail = $env:PS_MCP_OUTPUT_TAIL -eq '1'
+${LIMIT_BOOTSTRAP}
 $source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))
 $items = New-Object System.Collections.ArrayList
 $errors = New-Object System.Collections.ArrayList
@@ -76,23 +88,36 @@ foreach ($entry in @($errors | Select-Object -First 8)) {
     $summaries += @{ category=(LimitText $entry.CategoryInfo.Category); fullyQualifiedErrorId=(LimitText $entry.FullyQualifiedErrorId); exceptionType=(LimitText $entry.Exception.GetType().FullName); message=(LimitText $entry.Exception.Message) }
   } else { $summaries += @{ category=(LimitText $entry.category); fullyQualifiedErrorId=(LimitText $entry.fullyQualifiedErrorId); exceptionType=(LimitText $entry.exceptionType); message=(LimitText $entry.message) } }
 }
-$body = @{ output=[string]($items.ToArray() | Out-String -Width 240); failed=[bool]$failed; records=@($summaries); recordsTruncated=[bool]$limited }
+$bounded = LimitOutput ([string]($items.ToArray() | Out-String -Width 240))
+$body = @{ output=$bounded.output; observedBytes=$bounded.observedBytes; capturedBytes=$bounded.capturedBytes; omittedBytes=$bounded.omittedBytes; truncated=$bounded.truncated; failed=[bool]$failed; records=@($summaries); recordsTruncated=[bool]$limited }
 [Console]::Out.WriteLine('PS-RESULT:' + $env:PS_MCP_FRAME + ':' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Depth 5 -Compress))))
 `;
 
-function decodeStrict(result: PsResult, frame: string): PsResult {
-  if (result.timedOut || result.spawnError) return result;
-  const match = result.stdout.match(/^PS-RESULT:([0-9a-f]{48}):([A-Za-z0-9+/=]+)$/);
-  if (result.truncated || result.exitCode !== 0 || !match || match[1] !== frame) return { ...result, protocolError: true, stderr: `${result.stderr}\nMissing or invalid strict result envelope` };
+function strictFailure(result: PsResult, maxOutput: number, tail: boolean, diagnostic?: string): PsResult {
+  const stderrCapture = diagnostic === undefined ? result.stderrCapture : captureDiagnostic(result.stderrCapture, `\n${diagnostic}`, maxOutput, tail);
+  return { ...result, stdout: "", stdoutCapture: undefined, stderr: stderrCapture?.text ?? "",
+    stderrCapture, truncated: !!stderrCapture?.truncated, outputLimitBytes: maxOutput,
+    ...(diagnostic ? { protocolError: true } : {}) };
+}
+
+function decodeStrict(result: PsResult, frame: string, maxOutput: number, tail: boolean): PsResult {
+  if (result.timedOut || result.spawnError) return strictFailure(result, maxOutput, tail);
+  const match = result.stdout.match(/^PS-RESULT:([0-9a-f]{48}):([A-Za-z0-9+/=]+)\r?\n$/);
+  if (result.stdoutCapture?.truncated || result.exitCode !== 0 || !match || match[1] !== frame) return strictFailure(result, maxOutput, tail, "Missing or invalid strict result envelope");
   try {
     const body = JSON.parse(Buffer.from(match[2], "base64").toString("utf8"));
     if (typeof body.output !== "string" || typeof body.failed !== "boolean" || typeof body.recordsTruncated !== "boolean" || !Array.isArray(body.records) || body.records.length > 8 || body.records.some((r: any) => !r || ["category", "fullyQualifiedErrorId", "exceptionType", "message"].some(k => typeof r[k] !== "string" || Buffer.byteLength(r[k], "utf8") > 1024)) || (body.failed && body.records.length === 0)) throw Error("Invalid strict result");
-    return { ...result, stdout: body.output.trimEnd(), scriptError: body.failed, errorRecords: body.records, errorRecordsTruncated: body.recordsTruncated };
-  } catch { return { ...result, protocolError: true, stderr: `${result.stderr}\nInvalid strict result body` }; }
+    const stdoutCapture = captureFromEnvelope(body, body.output);
+    if (stdoutCapture.capturedBytes > maxOutput) throw Error("Output exceeds limit");
+    return { ...result, stdout: body.output, stdoutCapture, outputLimitBytes: maxOutput,
+      truncated: stdoutCapture.truncated || !!result.stderrCapture?.truncated,
+      scriptError: body.failed, errorRecords: body.records, errorRecordsTruncated: body.recordsTruncated };
+  } catch { return strictFailure(result, maxOutput, tail, "Invalid strict result body"); }
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT = 1024 * 1024;
+
 
 /**
  * Pick the PowerShell executable. Prefers an explicit override, then `pwsh`
@@ -139,7 +164,8 @@ export function buildArgs(script: string): string[] {
 export function runPowerShell(script: string, opts: RunOptions = {}): Promise<PsResult> {
   if (opts.errorPolicy === "strict") {
     const frame = randomBytes(24).toString("hex");
-    return runPowerShell(STRICT_BOOTSTRAP, { ...opts, errorPolicy: "legacy", stdin: Buffer.from(script, "utf8").toString("base64"), env: { ...opts.env, PS_MCP_FRAME: frame } }).then(r => decodeStrict(r, frame));
+    const limit = opts.maxOutputBytes ?? 1_048_576;
+    return runPowerShell(STRICT_BOOTSTRAP, { ...opts, maxOutputBytes: FRAME_OUTPUT_LIMIT, tail: false, stderrLimitBytes: limit, stderrTail: opts.tail, errorPolicy: "legacy", stdin: Buffer.from(script, "utf8").toString("base64"), env: { ...opts.env, PS_MCP_FRAME: frame, PS_MCP_OUTPUT_LIMIT: String(limit), PS_MCP_OUTPUT_TAIL: opts.tail ? "1" : "0" } }).then(r => decodeStrict(r, frame, limit, opts.tail ?? false));
   }
   const candidates = resolvePowerShellCandidates(opts.exe);
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -149,16 +175,21 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
   return new Promise<PsResult>((resolve) => {
     let resolved = false;
 
-    const failedResult = (exe: string, err: unknown): PsResult => ({
+    const failedResult = (exe: string, err: unknown): PsResult => {
+      const stderrCapture = captureDiagnostic(undefined, `Failed to spawn ${exe}: ${(err as Error).message}`, opts.stderrLimitBytes ?? maxOutput, opts.stderrTail ?? opts.tail);
+      return ({
       stdout: "",
-      stderr: `Failed to spawn ${exe}: ${(err as Error).message}`,
+      stderr: stderrCapture.text,
+      stderrCapture,
       exitCode: null,
       timedOut: false,
       durationMs: Date.now() - started,
       shell: exe,
-      truncated: false,
+      truncated: stderrCapture.truncated,
+      outputLimitBytes: maxOutput,
       spawnError: (err as Error).message,
     });
+    };
 
     const attempt = (candidateIndex: number): void => {
       const exe = candidates[candidateIndex];
@@ -180,11 +211,8 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
         return;
       }
 
-      let out = "";
-      let errStr = "";
-      let outBytes = 0;
-      let errBytes = 0;
-      let truncated = false;
+      const out = new OutputCollector(maxOutput, opts.tail);
+      const errOut = new OutputCollector(opts.stderrLimitBytes ?? maxOutput, opts.stderrTail ?? opts.tail);
       let timedOut = false;
       let attemptFinished = false;
 
@@ -193,20 +221,13 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
         child.once("spawn", () => child.stdin?.end(opts.stdin));
       }
 
-      const append = (buf: Buffer, which: "out" | "err") => {
-        if (which === "out") {
-          if (outBytes >= maxOutput) { truncated = true; return; }
-          outBytes += buf.length;
-          out += buf.toString("utf8");
-        } else {
-          if (errBytes >= maxOutput) { truncated = true; return; }
-          errBytes += buf.length;
-          errStr += buf.toString("utf8");
-        }
+      child.stdout?.on("data", (b: Buffer) => out.append(b));
+      child.stderr?.on("data", (b: Buffer) => errOut.append(b));
+      const captures = () => {
+        const stdoutCapture = out.snapshot(), stderrCapture = errOut.snapshot();
+        return { stdout: stdoutCapture.text, stderr: stderrCapture.text, stdoutCapture, stderrCapture,
+          outputLimitBytes: maxOutput, truncated: stdoutCapture.truncated || stderrCapture.truncated };
       };
-
-      child.stdout?.on("data", (b: Buffer) => append(b, "out"));
-      child.stderr?.on("data", (b: Buffer) => append(b, "err"));
 
       const timer = setTimeout(() => {
         timedOut = true;
@@ -229,15 +250,14 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
           return;
         }
         resolved = true;
+        errOut.append(Buffer.from(`\n[spawn error] ${(err as Error).message}`, "utf8"));
         resolve({
-          stdout: out,
-          stderr: errStr + `\n[spawn error] ${(err as Error).message}`,
+          ...captures(),
           spawnError: (err as Error).message,
           exitCode: null,
           timedOut,
           durationMs: Date.now() - started,
           shell: exe,
-          truncated,
         });
       });
 
@@ -247,13 +267,11 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
         clearTimeout(timer);
         resolved = true;
         resolve({
-          stdout: out.trimEnd(),
-          stderr: errStr.trimEnd(),
+          ...captures(),
           exitCode: code,
           timedOut,
           durationMs: Date.now() - started,
           shell: exe,
-          truncated,
         });
       });
     };

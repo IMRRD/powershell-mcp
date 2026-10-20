@@ -1,4 +1,5 @@
 import { Client } from "ssh2";
+import { OutputCollector, type StreamCapture } from "./output-collector.js";
 import { readFileSync } from "node:fs";
 
 export interface SshOptions {
@@ -23,6 +24,9 @@ export interface SshResult {
   signal?: string;
   timedOut: boolean;
   truncated: boolean;
+  stdoutCapture?: StreamCapture;
+  stderrCapture?: StreamCapture;
+  outputLimitBytes?: number;
   error?: string;
   durationMs: number;
 }
@@ -39,9 +43,8 @@ export function runSsh(opts: SshOptions): Promise<SshResult> {
   const started = Date.now();
   return new Promise<SshResult>((resolve) => {
     const conn = new Client();
-    let stdout = "";
-    let stderr = "";
-    let truncated = false;
+    const out = new OutputCollector(cap, opts.tail);
+    const errOut = new OutputCollector(cap, opts.tail);
     let settled = false;
 
     const finish = (r: Partial<SshResult>) => {
@@ -50,20 +53,14 @@ export function runSsh(opts: SshOptions): Promise<SshResult> {
       clearTimeout(timer);
       try { conn.end(); } catch { /* ignore */ }
       resolve({
-        stdout, stderr, exitCode: null, timedOut: false, truncated,
+        stdout: out.snapshot().text, stderr: errOut.snapshot().text,
+        stdoutCapture: out.snapshot(), stderrCapture: errOut.snapshot(), outputLimitBytes: cap,
+        exitCode: null, timedOut: false, truncated: out.snapshot().truncated || errOut.snapshot().truncated,
         durationMs: Date.now() - started, ...r,
       });
     };
 
     const timer = setTimeout(() => finish({ timedOut: true, error: `timed out after ${timeoutMs}ms` }), timeoutMs);
-
-    const append = (cur: string, chunk: Buffer) => {
-      const next = cur + chunk.toString("utf8");
-      if (next.length <= cap) return next;
-      truncated = true;
-      // tail: keep the most recent bytes; otherwise keep the first cap bytes.
-      return opts.tail ? next.slice(next.length - cap) : next.slice(0, cap);
-    };
 
     conn.on("ready", () => {
       conn.exec(opts.command, (err, stream) => {
@@ -71,8 +68,8 @@ export function runSsh(opts: SshOptions): Promise<SshResult> {
         stream
           .on("close", (code: number | null, signal?: string) =>
             finish({ exitCode: code ?? null, signal }))
-          .on("data", (d: Buffer) => { stdout = append(stdout, d); })
-          .stderr.on("data", (d: Buffer) => { stderr = append(stderr, d); });
+          .on("data", (d: Buffer) => { out.append(d); })
+          .stderr.on("data", (d: Buffer) => { errOut.append(d); });
       });
     });
 

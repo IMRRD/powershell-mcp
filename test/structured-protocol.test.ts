@@ -30,6 +30,28 @@ async function check(name: string, args: Record<string, unknown>, status: string
 }
 
 describe("built-artifact stdio structured tool contract", () => {
+  it("advertises bounded output options for each execution transport", async () => {
+    const { tools } = await client.listTools();
+    for (const name of ["run_powershell", "run_program", "winrm_exec", "ssh_exec"]) {
+      const tool = tools.find(t => t.name === name)!;
+      expect(tool.inputSchema.properties).toHaveProperty("maxOutputBytes");
+      expect(tool.inputSchema.properties).toHaveProperty("tail");
+    }
+  });
+  it("returns raw bounded program output and per-stream metrics over stdio", async () => {
+    const data = await check("run_program", { program: process.execPath,
+      args: ["-e", "process.stdout.write('abcdef');process.stderr.write('uvwxyz')"],
+      maxOutputBytes: 2, tail: true }, "completed", false);
+    expect(data).toMatchObject({ stdout: "ef", stderr: "yz", truncation: {
+      truncated: true, limitBytesPerStream: 2,
+      stdout: { observedBytes: 6, capturedBytes: 2, omittedBytes: 4, truncated: true },
+      stderr: { observedBytes: 6, capturedBytes: 2, omittedBytes: 4, truncated: true },
+    } });
+  });
+  it("rejects invalid limits at the MCP boundary", async () => {
+    const response = await client.callTool({ name: "run_program", arguments: { program: process.execPath, maxOutputBytes: 0 } });
+    expect(response.isError).toBe(true);
+  });
   it("advertises a shared output schema on every tool", async () => {
     const { tools } = await client.listTools();
     expect(tools).toHaveLength(10);
