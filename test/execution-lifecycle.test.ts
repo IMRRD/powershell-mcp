@@ -192,6 +192,16 @@ setInterval(()=>{},1000);`);
       expect(spawnSync('icacls.exe', [root], { encoding: 'utf8' }).stdout).toBe(before);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
+  it('inspects a private root under a pwsh-inherited module path without weakening ACL validation', async () => fixture(async root => {
+    if (process.platform !== 'win32' || spawnSync('pwsh', ['-NoProfile', '-Command', '$PSVersionTable.PSVersion.ToString()'], { encoding: 'utf8' }).status !== 0) return;
+    const entry = join(root, '..', 'pwsh-parent.mjs');
+    writeFileSync(entry, `import { ExecutionStore } from ${JSON.stringify(new URL('../src/execution-lifecycle.ts', import.meta.url).href)}; new ExecutionStore(process.argv[2]); new ExecutionStore(process.argv[2]);`);
+    const quote = (value: string) => `'${value.replace(/'/g, "''")}'`;
+    const command = `& ${quote(process.execPath)} --import ${quote(pathToFileURL(join(process.cwd(), 'node_modules/tsx/dist/loader.mjs')).href)} ${quote(entry)} ${quote(root)}; exit $LASTEXITCODE`;
+    const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8' });
+    expect(result.status, result.stderr || result.stdout).toBe(0);
+    expect(() => new ExecutionStore(join(root, '..'))).toThrow(/ACL unsafe: \{.*"current":.*"owner":.*"rules":/i);
+  }));
   it('creates a private Windows root atomically beneath an accessible parent', async () => fixture(async root => {
     if (process.platform !== 'win32') return;
     new ExecutionStore(root);
