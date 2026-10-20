@@ -87,7 +87,7 @@ describe("scoped credential references", () => {
     try {
       const script = join(process.cwd(), "scripts", "provision-credential.ps1");
       const snapshotAcl = () => {
-        const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; (Get-Acl -LiteralPath ([Console]::In.ReadToEnd())).Sddl"],
+        const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1') -ErrorAction Stop; (Get-Acl -LiteralPath ([Console]::In.ReadToEnd())).Sddl"],
           { input: directory, encoding: "utf8", timeout: aclBudgetMs, windowsHide: true });
         expect(result.error).toBeUndefined();
         expect(result.status, result.stderr).toBe(0);
