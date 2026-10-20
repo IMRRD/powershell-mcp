@@ -8,6 +8,7 @@ import { runProgram } from "./program.js";
 import { runSsh, formatSsh } from "./ssh.js";
 import { runWinRm } from "./winrm.js";
 import { runSftp, formatSftp } from "./sftp.js";
+import { resultShape, fromProcess, fromSsh, fromSftp, toolResult } from "./result.js";
 import { startupPing, incrementTool, startFlushTimer } from "./telemetry.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -20,68 +21,71 @@ const VERSION = pkg.version;
 
 const server = new McpServer({ name: "powershell-mcp", version: VERSION });
 
-server.tool(
+server.registerTool(
   "run_powershell",
-  "Run a PowerShell script/command on this Windows host in a hidden process (no console window appears). Returns stdout, stderr and exit code. Use for any Windows command, file, or system task.",
-  {
+  { description: "Run a PowerShell script/command on this Windows host in a hidden process (no console window appears). Returns stdout, stderr and exit code. Use for any Windows command, file, or system task.", outputSchema: resultShape, inputSchema: {
     script: z.string().describe("PowerShell script or command to execute."),
     cwd: z.string().optional().describe("Working directory."),
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000)."),
-  },
+  } },
   async ({ script, cwd, timeoutMs }) => {
     incrementTool("run_powershell");
     const r = await runPowerShell(script, { cwd, timeoutMs });
-    return { content: [{ type: "text", text: formatResult(r) }], isError: r.timedOut || (r.exitCode ?? 0) !== 0 };
+    return toolResult(fromProcess(r, "powershell", "local"), formatResult(r));
   },
 );
 
-server.tool(
+server.registerTool(
   "list_services",
-  "List Windows services, optionally filtered by a name pattern. Returns Name, DisplayName, Status.",
-  { filter: z.string().optional().describe("Wildcard name filter, e.g. 'Sql*' or '*backup*'.") },
+  {
+    description: "List Windows services, optionally filtered by a name pattern. Returns Name, DisplayName, Status.",
+    outputSchema: resultShape,
+    inputSchema: { filter: z.string().optional().describe("Wildcard name filter, e.g. 'Sql*' or '*backup*'.") },
+  },
   async ({ filter }) => {
     incrementTool("list_services");
     const f = filter ? `-Name '${filter.replace(/'/g, "''")}'` : "";
     const script = `Get-Service ${f} | Select-Object Name,DisplayName,Status | Sort-Object Name | Format-Table -AutoSize | Out-String -Width 200`;
     const r = await runPowerShell(script, { timeoutMs: 30_000 });
-    return { content: [{ type: "text", text: formatResult(r) }], isError: (r.exitCode ?? 0) !== 0 };
+    return toolResult(fromProcess(r, "powershell", "local"), formatResult(r));
   },
 );
 
-server.tool(
+server.registerTool(
   "get_service",
-  "Get detailed status of one Windows service by name.",
-  { name: z.string().describe("Exact service name (not display name).") },
+  {
+    description: "Get detailed status of one Windows service by name.",
+    outputSchema: resultShape,
+    inputSchema: { name: z.string().describe("Exact service name (not display name).") },
+  },
   async ({ name }) => {
     incrementTool("get_service");
     const n = name.replace(/'/g, "''");
     const script = `Get-Service -Name '${n}' | Select-Object Name,DisplayName,Status,StartType,CanStop,CanPauseAndContinue | Format-List | Out-String -Width 200`;
     const r = await runPowerShell(script, { timeoutMs: 30_000 });
-    return { content: [{ type: "text", text: formatResult(r) }], isError: (r.exitCode ?? 0) !== 0 };
+    return toolResult(fromProcess(r, "powershell", "local"), formatResult(r));
   },
 );
 
-server.tool(
+server.registerTool(
   "control_service",
-  "Start, stop, or restart a Windows service (requires the MCP host process to have sufficient privileges).",
-  {
+  { description: "Start, stop, or restart a Windows service (requires the MCP host process to have sufficient privileges).", outputSchema: resultShape, inputSchema: {
     name: z.string().describe("Exact service name."),
     action: z.enum(["start", "stop", "restart", "status"]).describe("Action to perform."),
-  },
+  } },
   async ({ name, action }) => {
     incrementTool("control_service");
     const n = name.replace(/'/g, "''");
     const verb = { start: "Start-Service", stop: "Stop-Service", restart: "Restart-Service", status: "Get-Service" }[action];
     const script = `${verb} -Name '${n}' -ErrorAction Stop; Get-Service -Name '${n}' | Select-Object Name,Status | Format-List | Out-String -Width 200`;
     const r = await runPowerShell(script, { timeoutMs: 120_000 });
-    return { content: [{ type: "text", text: formatResult(r) }], isError: r.timedOut || (r.exitCode ?? 0) !== 0 };
+    return toolResult(fromProcess(r, "powershell", "local"), formatResult(r));
   },
 );
 
-server.tool(
+server.registerTool(
   "system_info",
-  "Return OS, CPU, memory and disk summary for this Windows host.",
-  {},
+  { description: "Return OS, CPU, memory and disk summary for this Windows host.", outputSchema: resultShape, inputSchema: {} },
   async () => {
     incrementTool("system_info");
     const script = [
@@ -96,14 +100,13 @@ server.tool(
       "Get-PSDrive -PSProvider FileSystem | Select-Object Name,@{n='UsedGB';e={[math]::Round($_.Used/1GB,1)}},@{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}} | Format-Table -AutoSize | Out-String -Width 200",
     ].join("\n");
     const r = await runPowerShell(script, { timeoutMs: 30_000 });
-    return { content: [{ type: "text", text: formatResult(r) }], isError: (r.exitCode ?? 0) !== 0 };
+    return toolResult(fromProcess(r, "powershell", "local"), formatResult(r));
   },
 );
 
-server.tool(
+server.registerTool(
   "ssh_exec",
-  "Run a command on a remote host over SSH, fully in-process (no ssh.exe, no WSL â€” works headless). Use for Linux hosts or any OpenSSH target. Auth via privateKeyPath or password. Returns stdout, stderr, exit code.",
-  {
+  { description: "Run a command on a remote host over SSH, fully in-process (no ssh.exe, no WSL â€” works headless). Use for Linux hosts or any OpenSSH target. Auth via privateKeyPath or password. Returns stdout, stderr, exit code.", outputSchema: resultShape, inputSchema: {
     host: z.string().describe("Remote host or IP."),
     username: z.string().describe("SSH username."),
     command: z.string().describe("Command to run on the remote host."),
@@ -114,21 +117,17 @@ server.tool(
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000). Also bounds the connection handshake."),
     maxOutputBytes: z.number().int().positive().max(8_388_608).optional().describe("Cap captured stdout/stderr per stream (bytes, default 1 MiB)."),
     tail: z.boolean().optional().describe("Keep the LAST maxOutputBytes instead of the first (tail) â€” useful for long logs."),
-  },
+  } },
   async ({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs, maxOutputBytes, tail }) => {
     incrementTool("ssh_exec");
     const r = await runSsh({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs, maxOutputBytes, tail });
-    return {
-      content: [{ type: "text", text: formatSsh(`${username}@${host}`, r) }],
-      isError: r.timedOut || !!r.error || (r.exitCode ?? 0) !== 0,
-    };
+    return toolResult(fromSsh(r, `${username}@${host}:${port ?? 22}`, maxOutputBytes ?? 1_048_576), formatSsh(`${username}@${host}`, r));
   },
 );
 
-server.tool(
+server.registerTool(
   "winrm_exec",
-  "Run a command on a remote Windows host via PowerShell Remoting (WinRM / Invoke-Command). Native to Windows Server â€” no SSH server or agent needed on the target, only WinRM enabled. Output captured in-process (no console window).",
-  {
+  { description: "Run a command on a remote Windows host via PowerShell Remoting (WinRM / Invoke-Command). Native to Windows Server â€” no SSH server or agent needed on the target, only WinRM enabled. Output captured in-process (no console window).", outputSchema: resultShape, inputSchema: {
     computerName: z.string().describe("Remote Windows host name or IP."),
     command: z.string().describe("PowerShell command/scriptblock body to run remotely."),
     username: z.string().optional().describe("Credential username (DOMAIN\\\\user or host\\\\user). Omit to use the host process identity."),
@@ -136,11 +135,11 @@ server.tool(
     useSsl: z.boolean().optional().describe("Use HTTPS/5986 WinRM."),
     authentication: z.enum(["Default", "Negotiate", "Kerberos", "Basic", "CredSSP"]).optional().describe("WinRM auth mechanism."),
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 120000)."),
-  },
+  } },
   async ({ computerName, command, username, password, useSsl, authentication, timeoutMs }) => {
     incrementTool("winrm_exec");
     const r = await runWinRm({ computerName, command, username, password, useSsl, authentication, timeoutMs });
-    return { content: [{ type: "text", text: formatResult(r) }], isError: r.timedOut || (r.exitCode ?? 0) !== 0 };
+    return toolResult(fromProcess(r, "winrm", computerName), formatResult(r));
   },
 );
 
@@ -154,45 +153,42 @@ const sftpAuth = {
   timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 120000)."),
 };
 
-server.tool(
+server.registerTool(
   "sftp_upload",
-  "Upload a local file to a remote host over SFTP, in-process (ssh2 â€” no scp.exe, no WSL, headless). Use to deploy scripts/configs to Linux hosts.",
-  { localPath: z.string().describe("Local file path on this Windows host."),
-    remotePath: z.string().describe("Destination path on the remote host."), ...sftpAuth },
+  { description: "Upload a local file to a remote host over SFTP, in-process (ssh2 â€” no scp.exe, no WSL, headless). Use to deploy scripts/configs to Linux hosts.", outputSchema: resultShape, inputSchema: { localPath: z.string().describe("Local file path on this Windows host."),
+    remotePath: z.string().describe("Destination path on the remote host."), ...sftpAuth } },
   async ({ localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, timeoutMs }) => {
     incrementTool("sftp_upload");
     const o = { direction: "upload" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, timeoutMs };
     const r = await runSftp(o);
-    return { content: [{ type: "text", text: formatSftp(o, r) }], isError: !r.ok };
+    return toolResult(fromSftp(r, `${username}@${host}:${port ?? 22}:${remotePath}`, "upload"), formatSftp(o, r));
   },
 );
 
-server.tool(
+server.registerTool(
   "sftp_download",
-  "Download a file from a remote host to this Windows host over SFTP, in-process (ssh2 â€” no scp.exe, no WSL, headless).",
-  { remotePath: z.string().describe("Source path on the remote host."),
-    localPath: z.string().describe("Destination path on this Windows host."), ...sftpAuth },
+  { description: "Download a file from a remote host to this Windows host over SFTP, in-process (ssh2 â€” no scp.exe, no WSL, headless).", outputSchema: resultShape, inputSchema: { remotePath: z.string().describe("Source path on the remote host."),
+    localPath: z.string().describe("Destination path on this Windows host."), ...sftpAuth } },
   async ({ remotePath, localPath, host, username, port, privateKeyPath, passphrase, password, timeoutMs }) => {
     incrementTool("sftp_download");
     const o = { direction: "download" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, timeoutMs };
     const r = await runSftp(o);
-    return { content: [{ type: "text", text: formatSftp(o, r) }], isError: !r.ok };
+    return toolResult(fromSftp(r, `${username}@${host}:${port ?? 22}:${remotePath}`, "download"), formatSftp(o, r));
   },
 );
 
-server.tool(
+server.registerTool(
   "run_program",
-  "Run a native executable DIRECTLY (no shell) in a hidden process and capture clean stdout/stderr + exit code. Use this for console programs like gh, git, docker, node, python, etc. -- their output is captured reliably, unlike when the same program is run inside run_powershell (where a hidden PowerShell swallows native stdout). Provide the program and an args array (no shell quoting needed).",
-  {
+  { description: "Run a native executable DIRECTLY (no shell) in a hidden process and capture clean stdout/stderr + exit code. Use this for console programs like gh, git, docker, node, python, etc. -- their output is captured reliably, unlike when the same program is run inside run_powershell (where a hidden PowerShell swallows native stdout). Provide the program and an args array (no shell quoting needed).", outputSchema: resultShape, inputSchema: {
     program: z.string().describe("Executable name on PATH or a full path, e.g. 'git' or 'C:\\Program Files\\GitHub CLI\\gh.exe'."),
     args: z.array(z.string()).optional().describe("Arguments as an array; each element is passed verbatim (no shell quoting)."),
     cwd: z.string().optional().describe("Working directory."),
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000)."),
-  },
+  } },
   async ({ program, args, cwd, timeoutMs }) => {
     incrementTool("run_program");
     const r = await runProgram(program, args ?? [], { cwd, timeoutMs });
-    return { content: [{ type: "text", text: formatResult(r) }], isError: r.timedOut || (r.exitCode ?? 0) !== 0 };
+    return toolResult(fromProcess(r, "program", program), formatResult(r));
   },
 );
 async function main() {

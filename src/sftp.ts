@@ -16,6 +16,7 @@ export interface SftpOptions {
 
 export interface SftpResult {
   ok: boolean;
+  timedOut?: boolean;
   bytes?: number;
   error?: string;
   durationMs: number;
@@ -38,7 +39,7 @@ export function runSftp(o: SftpOptions): Promise<SftpResult> {
       try { conn.end(); } catch { /* ignore */ }
       resolve({ ok: false, durationMs: Date.now() - started, ...r });
     };
-    const timer = setTimeout(() => finish({ error: `timed out after ${timeoutMs}ms` }), timeoutMs);
+    const timer = setTimeout(() => finish({ timedOut: true, error: `timed out after ${timeoutMs}ms` }), timeoutMs);
 
     conn.on("ready", () => {
       conn.sftp((err, sftp) => {

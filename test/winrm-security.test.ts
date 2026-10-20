@@ -49,6 +49,8 @@ describe("WinRM credential transport", () => {
     expect(typeof options.stdin).toBe("string");
 
     const payload = JSON.parse(Buffer.from(options.stdin, "base64").toString("utf8"));
+    expect(payload.frame).toMatch(/^[0-9a-f]{48}$/);
+    delete payload.frame;
     expect(payload).toEqual({
       computerName: "synthetic.invalid",
       command,
