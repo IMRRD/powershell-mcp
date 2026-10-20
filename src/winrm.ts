@@ -1,7 +1,8 @@
 import { runPowerShell, type PsResult } from "./powershell.js";
 import { randomBytes } from "node:crypto";
-import { LIMIT_BOOTSTRAP, captureFromEnvelope, FRAME_OUTPUT_LIMIT } from "./envelope-output.js";
+import { LIMIT_BOOTSTRAP, captureFromEnvelope, frameLimit, payloadLimit, protectedPayload } from "./envelope-output.js";
 import { captureDiagnostic } from "./output-collector.js";
+import { logStore } from "./full-logs.js";
 
 export interface WinRmOptions {
   computerName: string;
@@ -14,6 +15,8 @@ export interface WinRmOptions {
   timeoutMs?: number;
   maxOutputBytes?: number;
   tail?: boolean;
+  logOutput?: boolean;
+  logQuotaBytes?: number;
 }
 
 interface WinRmInput {
@@ -77,7 +80,7 @@ export function buildWinRmInput(opts: WinRmOptions): string {
   }
   if (opts.useSsl !== undefined) input.useSsl = opts.useSsl;
   if (opts.authentication !== undefined) input.authentication = opts.authentication;
-  input.outputLimit = opts.maxOutputBytes ?? 1_048_576;
+  input.outputLimit = payloadLimit(opts.maxOutputBytes ?? 1_048_576, opts.logOutput, opts.logQuotaBytes);
   input.outputTail = opts.tail ?? false;
 
   return Buffer.from(JSON.stringify(input), "utf8").toString("base64");
@@ -90,20 +93,25 @@ export function buildWinRmInput(opts: WinRmOptions): string {
  * captured by the local hidden PowerShell host (no console window).
  */
 export function runWinRm(opts: WinRmOptions): Promise<PsResult> {
+  const reservedLog = opts.logOutput ? logStore.create(opts.logQuotaBytes) : undefined;
   const frame = randomBytes(24).toString("hex");
   const input = JSON.parse(Buffer.from(buildWinRmInput(opts), "base64").toString("utf8"));
   input.frame = frame;
   return runPowerShell(WINRM_BOOTSTRAP, {
     stdin: Buffer.from(JSON.stringify(input), "utf8").toString("base64"),
     timeoutMs: opts.timeoutMs ?? 120_000,
-    maxOutputBytes: FRAME_OUTPUT_LIMIT,
+    maxOutputBytes: frameLimit(payloadLimit(opts.maxOutputBytes ?? 1_048_576, opts.logOutput, opts.logQuotaBytes)),
     stderrLimitBytes: opts.maxOutputBytes ?? 1_048_576,
     stderrTail: opts.tail,
-  }).then((result) => decodeWinRmResult(result, frame, opts.maxOutputBytes ?? 1_048_576, opts.tail));
+  }).then((result) => {
+    const decoded = decodeWinRmResult(result, frame, opts.maxOutputBytes ?? 1_048_576, opts.tail, opts.logOutput, opts.logQuotaBytes, reservedLog);
+    if (reservedLog && !decoded.log) logStore.delete(reservedLog.finish(false).handle);
+    return decoded;
+  }, error => { if (reservedLog) logStore.delete(reservedLog.finish(false).handle); throw error; });
 }
 
 /** Validate the local frame before interpreting remote output as data. */
-export function decodeWinRmResult(result: PsResult, frame: string, maxOutput = 1_048_576, tail = false): PsResult {
+export function decodeWinRmResult(result: PsResult, frame: string, maxOutput = 1_048_576, tail = false, logOutput = false, quota?: number, reservedLog?: ReturnType<typeof logStore.create>): PsResult {
     const failure = (diagnostic?: string): PsResult => {
       const stderrCapture = diagnostic === undefined ? result.stderrCapture : captureDiagnostic(result.stderrCapture, `\n${diagnostic}`, maxOutput, tail);
       return { ...result, stdout: "", stdoutCapture: undefined, stderr: stderrCapture?.text ?? "",
@@ -124,9 +132,10 @@ export function decodeWinRmResult(result: PsResult, frame: string, maxOutput = 1
         return { ...result, stdout: "", stdoutCapture: undefined, stderr: stderrCapture.text, stderrCapture,
           outputLimitBytes: maxOutput, truncated: stderrCapture.truncated, invocationStatus: "transport_error" };
       }
-      const stdoutCapture = captureFromEnvelope(body, body.output);
-      if (stdoutCapture && stdoutCapture.capturedBytes > maxOutput) throw Error("Output exceeds limit");
-      return { ...result, stdout: body.status === "transport_error" ? "" : body.output, stderr: body.status === "transport_error" ? body.output : result.stderr, stdoutCapture,
+      const protectedResult = logOutput ? protectedPayload(body, maxOutput, tail, quota, reservedLog) : undefined;
+      const stdoutCapture = protectedResult?.display ?? captureFromEnvelope(body, body.output);
+      if (!logOutput && stdoutCapture.capturedBytes > maxOutput) throw Error("Output exceeds limit");
+      return { ...result, stdout: stdoutCapture.text, ...(protectedResult ? { log: protectedResult.log } : {}), stderr: body.status === "transport_error" ? body.output : result.stderr, stdoutCapture,
         outputLimitBytes: maxOutput, truncated: !!stdoutCapture?.truncated || !!result.stderrCapture?.truncated,
         invocationStatus: body.status as PsResult["invocationStatus"], ...(records ? { errorRecords: records, errorRecordsTruncated: body.recordsTruncated || body.records.some((r: any) => ["category", "fullyQualifiedErrorId", "exceptionType", "message"].some(k => Buffer.byteLength(r[k], "utf8") > 256)) } : {}) };
     } catch {

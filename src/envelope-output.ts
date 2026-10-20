@@ -1,4 +1,28 @@
-import type { StreamCapture } from "./output-collector.js";
+import { OutputCollector, type StreamCapture } from "./output-collector.js";
+import { logStore } from "./full-logs.js";
+
+export function protectedPayload(body: Record<string, unknown>, displayLimit: number, tail: boolean, quota?: number, reservedLog?: ReturnType<typeof logStore.create>) {
+  const full = captureFromEnvelope(body, body.output as string);
+  const log = reservedLog ?? logStore.create(quota);
+  log.append('stdout', Buffer.from(full.text, 'utf8'));
+  const metadata = log.finish(!full.truncated);
+  const collector = new OutputCollector(displayLimit, tail);
+  collector.append(Buffer.from(full.text, 'utf8'));
+  const display = collector.snapshot();
+  display.observedBytes = full.observedBytes;
+  display.omittedBytes = full.observedBytes - display.capturedBytes;
+  display.truncated = display.omittedBytes > 0;
+  return { display, log: metadata };
+}
+
+export function payloadLimit(displayLimit: number, logOutput?: boolean, quota?: number) {
+  return logOutput ? quota ?? 8_388_608 : displayLimit;
+}
+
+/** Finite bound for base64 of worst-case JSON escaped payload plus metadata. */
+export function frameLimit(payloadBytes: number) {
+  return Math.ceil((payloadBytes * 6 + 65536) / 3) * 4 + 128;
+}
 
 /** JSON escape expansion followed by base64 at the 8 MiB public cap. */
 export const FRAME_OUTPUT_LIMIT = 70_000_000;

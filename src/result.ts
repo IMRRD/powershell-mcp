@@ -29,6 +29,7 @@ export const resultShape = {
   errorRecords: z.array(z.object({ category: z.string(), fullyQualifiedErrorId: z.string(), exceptionType: z.string(), message: z.string() })).optional(),
   errorRecordsTruncated: z.boolean().optional(),
   terminationCertainty: z.enum(["unknown", "root_exited"]),
+  log: z.object({ handle: z.string(), complete: z.boolean(), stdoutBytes: z.number(), stderrBytes: z.number(), expiresAt: z.string() }).optional(),
   detail: z.object({ shell: z.string().optional(), signal: z.string().optional(), error: z.string().optional(), direction: z.enum(["upload", "download"]).optional(), bytes: z.number().optional(), localExitCode: z.number().nullable().optional() }),
 };
 export type ExecutionResult = z.infer<ReturnType<typeof z.object<typeof resultShape>>>;
@@ -41,7 +42,7 @@ export function fromProcess(r: PsResult, transport: "powershell" | "program" | "
   const status = r.timedOut ? "timeout" : r.spawnError || r.protocolError ? "transport_error"
     : transport === "winrm" ? (r.invocationStatus ?? "unknown")
     : r.scriptError ? "script_error" : r.exitCode === null ? "unknown" : r.exitCode === 0 ? "completed" : "nonzero_exit";
-  return { ...base(transport, target, r.durationMs), stdout: r.stdout, stderr: r.stderr,
+  return { ...base(transport, target, r.durationMs), stdout: r.stdout, stderr: r.stderr, ...(r.log ? { log: r.log } : {}),
     ...(r.errorRecords ? { errorRecords: r.errorRecords, errorRecordsTruncated: r.errorRecordsTruncated } : {}),
     // WinRM reports a local PowerShell host exit, not a remote command exit.
     exitCode: transport === "winrm" ? null : r.exitCode, timedOut: r.timedOut,
@@ -55,7 +56,7 @@ export function fromProcess(r: PsResult, transport: "powershell" | "program" | "
 export function fromSsh(r: SshResult, target: string, limitBytesPerStream: number): ExecutionResult {
   const status = r.timedOut ? "timeout" : r.error ? "transport_error" : r.signal ? "unknown"
     : r.exitCode === null ? "unknown" : r.exitCode === 0 ? "completed" : "nonzero_exit";
-  return { ...base("ssh", target, r.durationMs), stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode,
+  return { ...base("ssh", target, r.durationMs), stdout: r.stdout, stderr: r.stderr, exitCode: r.exitCode, ...(r.log ? { log: r.log } : {}),
     timedOut: r.timedOut, truncation: { truncated: r.truncated, limitBytesPerStream,
       ...(r.stdoutCapture ? { stdout: metrics(r.stdoutCapture) } : {}),
       ...(r.stderrCapture ? { stderr: metrics(r.stderrCapture) } : {}) }, terminationStatus: status, terminationCertainty: "unknown",

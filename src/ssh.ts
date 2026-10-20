@@ -1,6 +1,7 @@
 import { Client } from "ssh2";
 import { OutputCollector, type StreamCapture } from "./output-collector.js";
 import { readFileSync } from "node:fs";
+import { logStore } from "./full-logs.js";
 
 export interface SshOptions {
   host: string;
@@ -15,6 +16,8 @@ export interface SshOptions {
   maxOutputBytes?: number;
   /** When true, keep the LAST maxOutputBytes instead of the first (tail). */
   tail?: boolean;
+  logOutput?: boolean;
+  logQuotaBytes?: number;
 }
 
 export interface SshResult {
@@ -29,6 +32,7 @@ export interface SshResult {
   outputLimitBytes?: number;
   error?: string;
   durationMs: number;
+  log?: { handle: string; complete: boolean; stdoutBytes: number; stderrBytes: number; expiresAt: string };
 }
 
 const DEFAULT_OUTPUT_CAP = 1_048_576; // 1 MiB per stream
@@ -45,7 +49,9 @@ export function runSsh(opts: SshOptions): Promise<SshResult> {
     const conn = new Client();
     const out = new OutputCollector(cap, opts.tail);
     const errOut = new OutputCollector(cap, opts.tail);
+    const log = opts.logOutput ? logStore.create(opts.logQuotaBytes) : undefined;
     let settled = false;
+    let stdoutEnded = false, stderrEnded = false;
 
     const finish = (r: Partial<SshResult>) => {
       if (settled) return;
@@ -57,6 +63,7 @@ export function runSsh(opts: SshOptions): Promise<SshResult> {
         stdoutCapture: out.snapshot(), stderrCapture: errOut.snapshot(), outputLimitBytes: cap,
         exitCode: null, timedOut: false, truncated: out.snapshot().truncated || errOut.snapshot().truncated,
         durationMs: Date.now() - started, ...r,
+        ...(log ? { log: log.finish(!r.error && !r.timedOut && stdoutEnded && stderrEnded) } : {}),
       });
     };
 
@@ -68,8 +75,10 @@ export function runSsh(opts: SshOptions): Promise<SshResult> {
         stream
           .on("close", (code: number | null, signal?: string) =>
             finish({ exitCode: code ?? null, signal }))
-          .on("data", (d: Buffer) => { out.append(d); })
-          .stderr.on("data", (d: Buffer) => { errOut.append(d); });
+          .on("end", () => { stdoutEnded = true; })
+          .on("data", (d: Buffer) => { if (!settled) { out.append(d); log?.append("stdout", d); } })
+          .stderr.on("end", () => { stderrEnded = true; })
+          .on("data", (d: Buffer) => { if (!settled) { errOut.append(d); log?.append("stderr", d); } });
       });
     });
 

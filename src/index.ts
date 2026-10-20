@@ -13,6 +13,7 @@ import { startupPing, incrementTool, startFlushTimer } from "./telemetry.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { logStore } from "./full-logs.js";
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
@@ -23,6 +24,8 @@ const server = new McpServer({ name: "powershell-mcp", version: VERSION });
 const outputOptions = {
   maxOutputBytes: z.number().int().positive().max(8_388_608).optional().describe("Raw UTF-8 bytes per stream (default 1 MiB)."),
   tail: z.boolean().optional().describe("Keep last bytes rather than first; incomplete UTF-8 boundary scalars are omitted."),
+  logOutput: z.boolean().optional().describe("Opt in to private file-backed raw output logs; may include secrets emitted by command."),
+  logQuotaBytes: z.number().int().positive().max(8_388_608).optional().describe("Combined stdout/stderr quota (default 8 MiB); incomplete beyond quota."),
 };
 
 server.registerTool(
@@ -34,9 +37,9 @@ server.registerTool(
     errorPolicy: z.enum(["legacy", "strict"]).optional().describe("Default legacy raw script; strict detects unhandled PowerShell ErrorRecords. Check native exits immediately in the script."),
     ...outputOptions,
   } },
-  async ({ script, cwd, timeoutMs, errorPolicy, maxOutputBytes, tail }) => {
+  async ({ script, cwd, timeoutMs, errorPolicy, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
     incrementTool("run_powershell");
-    const r = await runPowerShell(script, { cwd, timeoutMs, errorPolicy, maxOutputBytes, tail });
+    const r = await runPowerShell(script, { cwd, timeoutMs, errorPolicy, maxOutputBytes, tail, logOutput, logQuotaBytes });
     return toolResult(fromProcess(r, "powershell", "local"), formatResult(r));
   },
 );
@@ -123,10 +126,12 @@ server.registerTool(
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000). Also bounds the connection handshake."),
     maxOutputBytes: z.number().int().positive().max(8_388_608).optional().describe("Cap captured stdout/stderr per stream (bytes, default 1 MiB)."),
     tail: z.boolean().optional().describe("Keep the LAST maxOutputBytes instead of the first (tail) â€” useful for long logs."),
+    logOutput: outputOptions.logOutput,
+    logQuotaBytes: outputOptions.logQuotaBytes,
   } },
-  async ({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs, maxOutputBytes, tail }) => {
+  async ({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
     incrementTool("ssh_exec");
-    const r = await runSsh({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs, maxOutputBytes, tail });
+    const r = await runSsh({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes });
     return toolResult(fromSsh(r, `${username}@${host}:${port ?? 22}`, maxOutputBytes ?? 1_048_576), formatSsh(`${username}@${host}`, r));
   },
 );
@@ -143,9 +148,9 @@ server.registerTool(
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 120000)."),
     ...outputOptions,
   } },
-  async ({ computerName, command, username, password, useSsl, authentication, timeoutMs, maxOutputBytes, tail }) => {
+  async ({ computerName, command, username, password, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
     incrementTool("winrm_exec");
-    const r = await runWinRm({ computerName, command, username, password, useSsl, authentication, timeoutMs, maxOutputBytes, tail });
+    const r = await runWinRm({ computerName, command, username, password, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes });
     return toolResult(fromProcess(r, "winrm", computerName), formatResult(r));
   },
 );
@@ -193,12 +198,17 @@ server.registerTool(
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000)."),
     ...outputOptions,
   } },
-  async ({ program, args, cwd, timeoutMs, maxOutputBytes, tail }) => {
+  async ({ program, args, cwd, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
     incrementTool("run_program");
-    const r = await runProgram(program, args ?? [], { cwd, timeoutMs, maxOutputBytes, tail });
+    const r = await runProgram(program, args ?? [], { cwd, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes });
     return toolResult(fromProcess(r, "program", program), formatResult(r));
   },
 );
+server.registerTool("read_output_log", { description: "Read a bounded raw byte page from an opt-in session log; base64 encoded. Handles are process-local and expire after one hour.", inputSchema: {
+  handle: z.string().regex(/^[0-9a-f]{48}$/), stream: z.enum(["stdout", "stderr"]),
+  offset: z.number().int().nonnegative(), length: z.number().int().positive().max(65536),
+} }, async ({ handle, stream, offset, length }) => ({ content: [{ type: "text" as const, text: JSON.stringify(logStore.read(handle, stream, offset, length)) }] }));
+server.registerTool("delete_output_log", { description: "Delete a session log by opaque handle.", inputSchema: { handle: z.string().regex(/^[0-9a-f]{48}$/) } }, async ({ handle }) => ({ content: [{ type: "text" as const, text: JSON.stringify({ deleted: logStore.delete(handle) }) }] }));
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);

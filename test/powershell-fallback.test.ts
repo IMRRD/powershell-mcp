@@ -11,6 +11,7 @@ vi.mock("node:child_process", async () => {
 });
 
 import { runPowerShell } from "../src/powershell.js";
+import { logStore } from "../src/full-logs.js";
 
 class FakeChild extends EventEmitter {
   stdin = new PassThrough();
@@ -26,6 +27,20 @@ afterEach(() => {
 });
 
 describe("runPowerShell executable fallback", () => {
+  it("releases a failed candidate's reservation before launching fallback", async () => {
+    vi.spyOn(os, "platform").mockReturnValue("win32");
+    const first = new FakeChild(), second = new FakeChild();
+    const held = Array.from({ length: 7 }, () => logStore.create());
+    spawnMock.mockImplementationOnce(() => { queueMicrotask(() => first.emit("error", Object.assign(new Error("missing"), { code: "ENOENT" }))); return first; })
+      .mockImplementationOnce(() => { queueMicrotask(() => second.emit("close", 0)); return second; });
+    try {
+      const result = await runPowerShell("'ok'", { logOutput: true });
+      expect(spawnMock).toHaveBeenCalledTimes(2);
+      expect(result.log?.complete).toBe(true);
+      expect(logStore.read(result.log!.handle, "stdout", 0, 1).totalBytes).toBe(0);
+      logStore.delete(result.log!.handle);
+    } finally { for (const item of held) logStore.delete(item.finish().handle); }
+  });
   it("writes sensitive input through stdin without adding it to argv or environment", async () => {
     const child = new FakeChild();
     let received = "";

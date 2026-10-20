@@ -13,7 +13,7 @@ Most tools that let an agent run Windows commands spawn a visible console window
 
 ## Tools
 
-All ten tools advertise a versioned MCP `outputSchema` and return the same
+The ten execution tools advertise a versioned MCP `outputSchema` and return the same
 `structuredContent` contract (`schemaVersion: 1`) alongside their original
 human-readable text. Fields are `executionId` (per call), `transport`, `target`,
 `stdout`, `stderr`, nullable `exitCode`, `durationMs`, `timedOut`, `truncation`
@@ -33,6 +33,32 @@ local child exit, otherwise `unknown`; neither status proves descendants or remo
 execution stopped after a timeout. These
 results never include authentication options or credential values.
 
+### Optional raw output logs
+
+`run_program`, `run_powershell` (legacy or strict), `winrm_exec`, and `ssh_exec` accept `logOutput: true` and
+optional `logQuotaBytes` (default/max 8 MiB combined stdout and stderr). Disabled
+by default: no log directory is created without opting in. Raw child output is
+written separately per stream, independently of the display byte cap. Strict
+PowerShell and WinRM persist only validated command payload output (stdout);
+framing, credentials, stdin, and wrapper diagnostics are never persisted. Their
+PowerShell pipeline/remote item collection still buffers output before framing;
+this feature does not bound producer-side memory. A result's
+`log` contains an unpredictable process-local handle, `complete`, byte counts,
+and expiry timestamp. `complete: false` means the quota or a write failed; never
+interpret it as the entire output. Read through `read_output_log` with handle,
+stream, byte offset and length (maximum 65,536 bytes); `data` is base64, and
+`nextOffset`/`totalBytes` support pagination. `delete_output_log` removes a log.
+Handles are available only in this MCP process, never filesystem paths; only
+the current OS user and SYSTEM have directory ACL access on Windows (0700/0600
+on POSIX). The process reserves at most 64 MiB total, expires completed handles one
+hour after finish on the next log operation (active handles remain reserved), and removes its own files on normal exit. A hard
+crash may leave private files requiring operator cleanup under the configured `POWERSHELL_MCP_LOG_PARENT` or `TMPDIR`, otherwise the OS temp path.
+Commands can emit secrets: opt-in logs preserve emitted stdout/stderr verbatim,
+so do not enable logging for sensitive commands. Passwords, stdin and MCP
+envelopes are never intentionally logged. Framed payloads are bounded to the
+log quota before JSON/base64 transport, and `complete: false` reports any
+producer-side truncation. A bounded local envelope buffer is still required.
+
 Execution tools accept `maxOutputBytes` (1–8,388,608, default 1 MiB **per
 stream**) and `tail` (default false: retain the head; true: retain the tail).
 `truncation.stdout` and `.stderr`, when the producer observed stream bytes,
@@ -45,7 +71,7 @@ the encoded replacement characters. Raw structured `stdout`/`stderr` preserve
 newlines; human-readable formatting may trim whitespace. Wrapper-generated
 diagnostics are not producer bytes and have no invented stream counts. Some
 failed/early remote calls cannot report producer-side byte counts. No full logs
-are persisted by default, and there is currently no protected full-log handle.
+are persisted by default; opt-in runs return a protected output-log handle.
 Strict PowerShell and WinRM cap their framed payload *inside* the envelope so
 large successful outputs remain successful, but their existing PowerShell
 pipeline/WinRM remote-side item collection still buffers full command output
