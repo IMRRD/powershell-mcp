@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { runPowerShell } from "../src/powershell.js";
 import { fromProcess } from "../src/result.js";
 
+const nativeExe = `'${process.execPath.replace(/'/g, "''")}'`;
 const engines = (process.platform === "win32" ? ["powershell.exe", "pwsh.exe"] : ["pwsh"])
   .filter(exe => spawnSync(exe, ["-NoProfile", "-Command", "exit 0"], { timeout: 10000 }).status === 0);
 for (const exe of engines) describe(`error policy (${exe})`, () => {
@@ -27,7 +28,7 @@ for (const exe of engines) describe(`error policy (${exe})`, () => {
   it("does not confuse handled errors, stderr, or an earlier native exit with strict failure", async () => {
     expect((await run("try { throw 'handled' } catch { Write-Output 'recovered' }")).errorRecords).toEqual([]);
     expect((await run("[Console]::Error.WriteLine('diagnostic'); Write-Output 'ok'")).errorRecords).toEqual([]);
-    const native = await run("cmd.exe /d /c exit /b 7; Write-Output 'later cmdlet'");
+    const native = await run(`& ${nativeExe} -e 'process.exit(7)'; Write-Output 'later cmdlet'`);
     expect(native.stdout).toContain("later cmdlet");
     expect(native.errorRecords).toEqual([]);
   });
@@ -46,7 +47,8 @@ for (const exe of engines) describe(`error policy (${exe})`, () => {
     expect(silent.scriptError).toBe(false);
   });
   it("does not fail on successful native stderr", async () => {
-    const result = await run("cmd.exe /d /c \"echo native-diagnostic 1>&2 & exit /b 0\"; Write-Output AFTER_NATIVE");
+    const result = await run(`& ${nativeExe} -e 'process.stderr.write(String(123))'; Write-Output AFTER_NATIVE`);
+    expect(result.stdout + result.stderr).toContain("123");
     expect(result.stdout).toContain("AFTER_NATIVE");
     expect(result.scriptError).toBe(false);
   });

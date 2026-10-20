@@ -53,10 +53,16 @@ for (const exe of engines) describe(`native WinRM bootstrap (${exe}, isolated In
     expect(result.invocationStatus).toBe("remote_error");
     expect(JSON.stringify(result)).not.toContain("SECRET_NOT_EMITTED_62091");
   });
-  it("rejects missing and malformed wrapper results", async () => {
-    for (const body of ["$null", "[pscustomobject]@{ Output = 'x' }", "[pscustomobject]@{ Output = 1; RemoteError = $false }", "[pscustomobject]@{ Output = 'x'; RemoteError = 'false' }", "[pscustomobject]@{ Output = 'x'; RemoteError = $false }; [pscustomobject]@{ Output = 'y'; RemoteError = $false }"]) {
-      expect((await exercise(exe, "Write-Output x", body)).invocationStatus).toBe("transport_error");
-    }
+  it.each([
+    "$null",
+    "[pscustomobject]@{ Output = 'x' }",
+    "[pscustomobject]@{ Output = 1; RemoteError = $false }",
+    "[pscustomobject]@{ Output = 'x'; RemoteError = 'false' }",
+    "[pscustomobject]@{ Output = 'x'; RemoteError = $false }; [pscustomobject]@{ Output = 'y'; RemoteError = $false }",
+  ])("rejects invalid wrapper result: %s", async (body) => {
+    expect((await exercise(exe, "Write-Output x", body)).invocationStatus).toBe("transport_error");
+  });
+  it("reports connection failure", async () => {
     expect((await exercise(exe, "Write-Output x", "throw 'synthetic connection failure'")).invocationStatus).toBe("transport_error");
   });
   it("keeps spoof-like remote output as data and rejects forged frames", async () => {
