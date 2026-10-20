@@ -6,7 +6,7 @@ Most tools that let an agent run Windows commands spawn a visible console window
 
 ## Why
 
-- **No popup windows.** Commands run hidden; your foreground app keeps focus.
+- **Hidden process configuration.** Local child creation uses `windowsHide: true`; foreground focus preservation needs interactive desktop acceptance and is not established by headless CI.
 - **Structured + safe.** Every call returns `{ stdout, stderr, exit_code, duration, timed_out }`. Hard timeout with tree-kill. Output is capped so a runaway command can't flood the context.
 - **Real Windows management.** First-class tools for services and system info, not just a raw shell â€” handy for managing Windows servers and backup systems.
 - **Cross-shell.** Prefers `pwsh` (PowerShell 7+) and falls back to `powershell.exe`; override with `PWSH_MCP_EXE`.
@@ -82,7 +82,7 @@ this is **not** an end-to-end bounded-memory guarantee for remoting.
 |------|-------------|
 | `run_powershell` | Run any PowerShell script/command (hidden). `{ script, cwd?, timeoutMs?, errorPolicy?: "legacy" | "strict", maxOutputBytes?, tail? }` |
 | `runtime_capabilities` | Read-only package/protocol version, supported and detected available engines, engine policy (without exposing configured override paths), transports and input/output/timeout limits. Does not return user identity, environment or secrets. |
-| `run_program` | Run a **native executable directly** (no shell) and capture clean stdout/stderr + exit code - for `gh`/`git`/`docker`/`node` and other console binaries whose output a hidden shell swallows. `{ program, args?, cwd?, timeoutMs?, maxOutputBytes?, tail? }` |
+| `run_program` | Run a **native executable directly** (no shell) and capture its stdout/stderr + exit code with direct argument passing. `{ program, args?, cwd?, timeoutMs?, maxOutputBytes?, tail? }` |
 | `list_services` | List services, optional `filter` wildcard. |
 | `get_service` | Detailed status of one service by name. |
 | `control_service` | `start` / `stop` / `restart` / `status` a service. |
@@ -124,7 +124,7 @@ Only synthetic loopback SFTP fixtures exercise this feature in the repository;
 live-server extension behavior, filesystem semantics, and permissions remain
 unverified and require operator validation before deployment.
 
-> **Native programs:** Windows PowerShell routes a native command's stdout to the console, so run hidden it is lost. Use `run_program` (direct-exec) for console binaries like `gh`/`git`/`docker`; use `run_powershell` for PowerShell/cmdlet logic.
+> **Native programs:** Historical #1 observed missing native stdout from a hidden PowerShell host for particular executables. This is not universal: on a Windows PowerShell 5.1 local probe (October 20, 2026), `cmd.exe /d /c echo NATIVE_CMD_24`, `git.exe --version`, and `node.exe --version` all produced captured stdout. That probe does not reproduce or refute the original `gh.exe`/`where.exe` failure on its host. Prefer `run_program` (direct exec) when you need native arguments, exit status and stdout/stderr independent of PowerShell pipeline behavior; use `run_powershell` for cmdlets and scripts. Validate the specific executable and host before relying on either path.
 
 **Typed inputs:** `run_powershell` accepts `engine: "pwsh" | "powershell"` (Windows; only `pwsh` elsewhere). An explicit choice selects only that engine and overrides `PWSH_MCP_EXE`; if it is missing, execution fails without fallback. When `engine` is omitted and `PWSH_MCP_EXE` is configured, only that executable is attempted; a missing configured executable fails without fallback. Only when neither is selected does automatic discovery try `pwsh`, then `powershell.exe` on Windows (only `pwsh` on other platforms). `runtime_capabilities.availableEngines` reports detected named engines, not whether the configured override is runnable. Its result `detail.shell` reports the actual executable used and `detail.version` the version when detectable. `parameters` is an optional named JSON object of strings, finite numbers, booleans, nulls, arrays and nested objects (max 8 levels, 1 MiB serialized UTF-8). Declare matching `param($name)` in the script. Values are sent on stdin and bound as data, not interpolated into source; the default remains legacy (strict must be requested explicitly). `winrm_exec` accepts the same `parameters` and sends them inside its protected stdin payload for remote binding. Never deliberately print secrets: emitted output may enter results or opt-in output logs.
 
@@ -190,7 +190,7 @@ OK (9129 bytes, 714ms)
 
 ## Remote operations
 
-`powershell-mcp` manages more than the local box. Windows' own `ssh.exe` produces no capturable output when run from a windowless/background process, and shipping WSL to every server doesn't scale â€” so remote exec is built in:
+`powershell-mcp` supports SSH in-process, without depending on a native SSH executable or a windowed console. The historical native-output issue is described above; native stdout capture varies by executable and environment:
 
 - **`ssh_exec`** uses the pure-JS [`ssh2`](https://github.com/mscdex/ssh2) client (no external binary), so it works headless and needs nothing on the target beyond an SSH server. Ideal for Linux hosts.
 - **`winrm_exec`** uses native PowerShell Remoting, so a Windows fleet needs only WinRM enabled â€” no per-server install.
@@ -252,7 +252,11 @@ npm test           # unit + (where a shell is present) integration tests
 npm run typecheck
 ```
 
-CI runs build + tests on both `windows-latest` and `ubuntu-latest`.
+CI requires three lanes: Windows PowerShell 5.1 (`powershell.exe`), Windows PowerShell 7 (`pwsh`), and Linux PowerShell 7 (`pwsh`). Missing engines fail instead of skipping the installed-artifact engine gate. Each lane runs locked `npm ci`, typecheck, build, the existing regression suite with explicit discovered/passed/failed/skipped counts and required-suite discovery checks, then `npm pack` and installs the resulting tarball into a temporary project. The installed CLI is exercised over MCP stdio for schema/version, native arguments and byte bounds, failure, timeout, synthetic credential/trust rejection, and explicit engine selection. SSH/SFTP tests use synthetic/loopback fixtures; opt-in live SSH tests remain skipped unless intentionally configured and are not release evidence. A green local run on Windows does not prove the Linux lane passed.
+
+### Release compatibility and operator gates
+
+The candidate remains canonical `@imrrd/powershell-mcp@0.5.3` with MCP output `schemaVersion: 1`; existing text `content` accompanies structured results. The frozen unscoped `powershell-mcp` compatibility package receives no changes or release. The CI tarball is a local build artifact, not proof of a published registry version. Before any separately authorized release, compare the candidate tag/commit, package and lockfile version, `server.json` identity/version and packed manifest; preserve the CI run and tarball digest as provenance. Verify clients consuming text-only responses and schema v1, credential/trust migrations, and runtime behavior against an approved previous version. Roll back by pinning/reinstalling the previously approved **scoped** package version and restoring its client configuration; do not publish or revive the legacy name. Persisted lifecycle records and credential stores are not automatically reversible: reconcile running/unknown jobs and back up/reprovision DPAPI entries through approved operator processes before switching versions. A tag or CI pass does not authorize publishing, deployment, or production rollover. On a real interactive Windows desktop, manually verify no popup and unchanged foreground focus for `run_powershell`/`run_program` and cancellation; headless CI cannot prove foreground focus preservation.
 
 ## SSH/SFTP host trust (breaking secure default)
 

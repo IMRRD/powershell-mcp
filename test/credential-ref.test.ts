@@ -82,14 +82,22 @@ describe("scoped credential references", () => {
     const directory = mkdtempSync(join(tmpdir(), "mcp-unsafe-"));
     try {
       const script = join(process.cwd(), "scripts", "provision-credential.ps1");
-      const before = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-Acl -LiteralPath $args[0]).Sddl", directory], { encoding: "utf8" }).stdout.trim();
+      const snapshotAcl = () => {
+        const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1') -ErrorAction Stop; (Get-Acl -LiteralPath ([Console]::In.ReadToEnd())).Sddl"],
+          { input: directory, encoding: "utf8", timeout: 10000, windowsHide: true });
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout.trim()).toMatch(/^O:[^\s]+G:[^\s]+D:/);
+        return result.stdout.trim();
+      };
+      const before = snapshotAcl();
       const child = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-File", script, "-Directory", directory, "-Reference", "synthetic-test"], { input: JSON.stringify({ ...scope, password: secret }), encoding: "utf8", timeout: 15000 });
       expect(child.status).not.toBe(0);
-      const after = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-Acl -LiteralPath $args[0]).Sddl", directory], { encoding: "utf8" }).stdout.trim();
+      const after = snapshotAcl();
       expect(after).toBe(before);
       await expect(resolveCredential({ ...scope, credentialRef: "synthetic-test" }, new WindowsProtectedFileProvider(directory))).rejects.toThrow(/unavailable/i);
     } finally { rmSync(directory, { recursive: true, force: true }); }
-  });
+  }, 30000);
   it.skipIf(process.platform !== "win32")("rejects a scratch junction root and pins its ancestry against replacement", async () => {
     const parent = mkdtempSync(join(tmpdir(), "mcp-junction-"));
     const destination = join(parent, "destination");
