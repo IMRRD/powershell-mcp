@@ -19,7 +19,7 @@ human-readable text. Fields are `executionId` (per call), `transport`, `target`,
 `stdout`, `stderr`, nullable `exitCode`, `durationMs`, `timedOut`, `truncation`
 (`truncated`, nullable `limitBytesPerStream`), `terminationStatus`, and `detail`.
 `terminationStatus` is one of `completed`, `nonzero_exit`, `remote_error`, `timeout`,
-`cancelled`, `transport_error`, or `unknown`. Any status other than `completed`
+`script_error`, `cancelled`, `transport_error`, or `unknown`. Any status other than `completed`
 sets MCP `isError`; this is execution status, **not** proof that an application
 operation succeeded. A null exit code never means success. SSH includes a
 signal or connection error in `detail`; an unsolicited signal is `unknown`, not
@@ -35,7 +35,7 @@ results never include authentication options or credential values.
 
 | Tool | Description |
 |------|-------------|
-| `run_powershell` | Run any PowerShell script/command (hidden). `{ script, cwd?, timeoutMs? }` |
+| `run_powershell` | Run any PowerShell script/command (hidden). `{ script, cwd?, timeoutMs?, errorPolicy?: "legacy" | "strict" }` |
 | `run_program` | Run a **native executable directly** (no shell) and capture clean stdout/stderr + exit code - for `gh`/`git`/`docker`/`node` and other console binaries whose output a hidden shell swallows. `{ program, args?, cwd?, timeoutMs? }` |
 | `list_services` | List services, optional `filter` wildcard. |
 | `get_service` | Detailed status of one service by name. |
@@ -47,6 +47,39 @@ results never include authentication options or credential values.
 | `sftp_download` | Download a remote file to this host over SFTP, in-process. Same params as `sftp_upload`. |
 
 > **Native programs:** Windows PowerShell routes a native command's stdout to the console, so run hidden it is lost. Use `run_program` (direct-exec) for console binaries like `gh`/`git`/`docker`; use `run_powershell` for PowerShell/cmdlet logic.
+
+`run_powershell` defaults to **legacy** raw `-Command` semantics. Opt into
+`errorPolicy: "strict"` to parse the script before execution and report unhandled
+PowerShell `ErrorRecord`s as `script_error`. Strict sets command-level default
+`-ErrorAction Stop`, so an unhandled `Write-Error` stops subsequent commands;
+explicit `-ErrorAction Continue` still continues (and reports an error), while
+`-ErrorAction SilentlyContinue` suppresses that error. Handled `try/catch`
+exceptions are not failures. Its framed wrapper sends the source over stdin;
+script output is retained before failures. Structured diagnostics render only
+selected exception messages and metadata, not `ErrorRecord` source context;
+legacy raw output retains the engine's native formatting.
+`errorRecords` contains at most eight summaries (`category`,
+`fullyQualifiedErrorId`, `exceptionType`, `message`), with each field shortened to
+256 characters; `errorRecordsTruncated` flags omitted records/fields. Diagnostics
+can contain sensitive **user-emitted text**; this is bounding, not redaction.
+The strict wrapper changes script scope and output formatting; choose legacy for
+scripts relying on raw `exit`, argument binding, or stream semantics. A missing or
+truncated wrapper envelope is a transport error, never reported as success.
+
+Neither policy proves that *every* native command succeeded: `$LASTEXITCODE` only
+describes the latest native call, and a later cmdlet does not validate earlier
+native calls. Explicitly check immediately after each native command, e.g.
+`& mytool.exe; if ($LASTEXITCODE -ne 0) { throw "mytool failed: $LASTEXITCODE" }`.
+Native stderr alone is not failure. Strict retains command-level Stop without
+setting global `$ErrorActionPreference = 'Stop'`, which would turn successful
+native stderr into a terminating exception on Windows PowerShell 5.1. Redirected
+native `NativeCommandError` records are treated as diagnostic output rather than
+script errors; other PowerShell errors still stop by default. For an explicit
+native exit code use `run_program` or check `$LASTEXITCODE` immediately in the
+script. These defaults are not a sandbox: user scripts can override error
+preferences and deliberately emit arbitrary content (including secrets) in output
+or exception messages. WinRM preserves its legacy remote error policy, while its
+structured error output also avoids rendering source context.
 
 ## See it work
 

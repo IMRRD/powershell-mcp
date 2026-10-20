@@ -33,7 +33,7 @@ export const WINRM_BOOTSTRAP = [
   "$json = $null;",
   "$invoke = @{",
   "  ComputerName = [string]$payload.computerName;",
-  "  ScriptBlock = { param($source) $items = [System.Collections.ArrayList]::new(); $failed = $false; try { & ([ScriptBlock]::Create($source)) 2>&1 3>&1 4>&1 5>&1 6>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $failed = $true }; [void]$items.Add($_) } } catch { $failed = $true; [void]$items.Add($_) }; [pscustomobject]@{ Output = [string]($items.ToArray() | Out-String -Width 240); RemoteError = [bool]$failed } };",
+  "  ScriptBlock = { param($source) $items = [System.Collections.ArrayList]::new(); $errors = [System.Collections.ArrayList]::new(); $failed = $false; try { & ([ScriptBlock]::Create($source)) 2>&1 3>&1 4>&1 5>&1 6>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $failed = $true; [void]$errors.Add($_); [void]$items.Add([string]$_.Exception.Message) } else { [void]$items.Add($_) } } } catch { $failed = $true; [void]$errors.Add($_); [void]$items.Add([string]$_.Exception.Message) }; $records = @($errors | Select-Object -First 8 | ForEach-Object { [pscustomobject]@{ category = [string]$_.CategoryInfo.Category; fullyQualifiedErrorId = [string]$_.FullyQualifiedErrorId; exceptionType = [string]$_.Exception.GetType().FullName; message = [string]$_.Exception.Message } }); [pscustomobject]@{ Output = [string]($items.ToArray() | Out-String -Width 240); RemoteError = [bool]$failed; ErrorRecords = $records; ErrorRecordsTruncated = [bool]($errors.Count -gt 8) } };",
   "  ArgumentList = @([string]$payload.command);",
   "};",
   "if ($payload.useSsl) { $invoke.UseSSL = $true; }",
@@ -49,9 +49,9 @@ export const WINRM_BOOTSTRAP = [
   "}",
   "try {",
   "  $results = @(Invoke-Command @invoke -ErrorAction Stop);",
-  "  if ($results.Count -ne 1 -or $null -eq $results[0] -or $null -eq $results[0].PSObject.Properties['Output'] -or $null -eq $results[0].PSObject.Properties['RemoteError'] -or $results[0].Output -isnot [string] -or $results[0].RemoteError -isnot [bool]) { throw 'Invalid WinRM wrapper result' };",
+  "  if ($results.Count -ne 1 -or $null -eq $results[0] -or $null -eq $results[0].PSObject.Properties['Output'] -or $null -eq $results[0].PSObject.Properties['RemoteError'] -or $null -eq $results[0].PSObject.Properties['ErrorRecords'] -or $null -eq $results[0].PSObject.Properties['ErrorRecordsTruncated'] -or $results[0].Output -isnot [string] -or $results[0].RemoteError -isnot [bool] -or $results[0].ErrorRecordsTruncated -isnot [bool]) { throw 'Invalid WinRM wrapper result' };",
   "  $result = $results[0];",
-  "  $body = @{ status = $(if ($result.RemoteError) { 'remote_error' } else { 'completed' }); output = $result.Output };",
+  "  $body = @{ status = $(if ($result.RemoteError) { 'remote_error' } else { 'completed' }); output = $result.Output; records = @($result.ErrorRecords); recordsTruncated = $result.ErrorRecordsTruncated };",
   "} catch { $body = @{ status = 'transport_error'; output = [string]$_ } }",
   "[Console]::Out.WriteLine('WINRM-RESULT:' + $payload.frame + ':' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Compress))));",
 ].join("\n");
@@ -98,7 +98,9 @@ export function decodeWinRmResult(result: PsResult, frame: string): PsResult {
     try {
       const body = JSON.parse(Buffer.from(match[2], "base64").toString("utf8"));
       if (!["completed", "remote_error", "transport_error"].includes(body.status) || typeof body.output !== "string") throw Error("Invalid result body");
-      return { ...result, stdout: body.status === "transport_error" ? "" : body.output, stderr: body.status === "transport_error" ? body.output : result.stderr, invocationStatus: body.status as PsResult["invocationStatus"] };
+      if (body.status !== "transport_error" && (typeof body.recordsTruncated !== "boolean" || !Array.isArray(body.records) || body.records.length > 8 || body.records.some((r: any) => !r || ["category", "fullyQualifiedErrorId", "exceptionType", "message"].some(k => typeof r[k] !== "string")) || (body.status === "remote_error" && body.records.length === 0))) throw Error("Invalid remote records");
+      const records = body.status === "transport_error" ? undefined : body.records.map((r: any) => Object.fromEntries(["category", "fullyQualifiedErrorId", "exceptionType", "message"].map(k => [k, Buffer.from(r[k], "utf8").subarray(0, 256).toString("utf8")])));
+      return { ...result, stdout: body.status === "transport_error" ? "" : body.output, stderr: body.status === "transport_error" ? body.output : result.stderr, invocationStatus: body.status as PsResult["invocationStatus"], ...(records ? { errorRecords: records, errorRecordsTruncated: body.recordsTruncated || body.records.some((r: any) => ["category", "fullyQualifiedErrorId", "exceptionType", "message"].some(k => Buffer.byteLength(r[k], "utf8") > 256)) } : {}) };
     } catch {
       return { ...result, invocationStatus: "transport_error" as const, stderr: `${result.stderr}\nInvalid WinRM result body` };
     }

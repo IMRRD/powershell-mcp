@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
 import os from "node:os";
+import { randomBytes } from "node:crypto";
+
+export interface ErrorRecordSummary { category: string; fullyQualifiedErrorId: string; exceptionType: string; message: string }
 
 /** Result of a PowerShell invocation. */
 export interface PsResult {
@@ -15,6 +18,10 @@ export interface PsResult {
   truncated: boolean;
   spawnError?: string;
   invocationStatus?: "completed" | "remote_error" | "transport_error";
+  errorRecords?: ErrorRecordSummary[];
+  errorRecordsTruncated?: boolean;
+  scriptError?: boolean;
+  protocolError?: boolean;
 }
 
 export interface RunOptions {
@@ -30,6 +37,58 @@ export interface RunOptions {
   stdin?: string;
   /** Cap captured stdout+stderr (bytes each, default 1 MiB). */
   maxOutputBytes?: number;
+  errorPolicy?: "legacy" | "strict";
+}
+
+const STRICT_BOOTSTRAP = `
+$source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))
+$items = New-Object System.Collections.ArrayList
+$errors = New-Object System.Collections.ArrayList
+$failed = $false
+$parseErrors = $null
+$tokens = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -gt 0) {
+  $failed = $true
+  foreach ($entry in $parseErrors) { [void]$errors.Add([pscustomobject]@{ category='ParserError'; fullyQualifiedErrorId=[string]$entry.ErrorId; exceptionType='ParseError'; message=[string]$entry.Message }) }
+} else {
+  try {
+    # Command-level Stop avoids PS 5.1 promoting successful native stderr to a terminating error.
+    $PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
+    & ([ScriptBlock]::Create($source)) 2>&1 3>&1 4>&1 5>&1 6>&1 | ForEach-Object {
+      if ($_ -is [System.Management.Automation.ErrorRecord]) {
+        if ($_.FullyQualifiedErrorId -ne 'NativeCommandError') { $failed = $true; [void]$errors.Add($_) }
+        [void]$items.Add([string]$_.Exception.Message)
+      } else { [void]$items.Add($_) }
+    }
+  } catch { $failed = $true; [void]$errors.Add($_); [void]$items.Add([string]$_.Exception.Message) }
+}
+$source = $null
+function LimitText($value) {
+  $text = [string]$value
+  if ($text.Length -gt 256) { $text = $text.Substring(0,256); $script:limited = $true }
+  return $text
+}
+$limited = $errors.Count -gt 8
+$summaries = @()
+foreach ($entry in @($errors | Select-Object -First 8)) {
+  if ($entry -is [System.Management.Automation.ErrorRecord]) {
+    $summaries += @{ category=(LimitText $entry.CategoryInfo.Category); fullyQualifiedErrorId=(LimitText $entry.FullyQualifiedErrorId); exceptionType=(LimitText $entry.Exception.GetType().FullName); message=(LimitText $entry.Exception.Message) }
+  } else { $summaries += @{ category=(LimitText $entry.category); fullyQualifiedErrorId=(LimitText $entry.fullyQualifiedErrorId); exceptionType=(LimitText $entry.exceptionType); message=(LimitText $entry.message) } }
+}
+$body = @{ output=[string]($items.ToArray() | Out-String -Width 240); failed=[bool]$failed; records=@($summaries); recordsTruncated=[bool]$limited }
+[Console]::Out.WriteLine('PS-RESULT:' + $env:PS_MCP_FRAME + ':' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Depth 5 -Compress))))
+`;
+
+function decodeStrict(result: PsResult, frame: string): PsResult {
+  if (result.timedOut || result.spawnError) return result;
+  const match = result.stdout.match(/^PS-RESULT:([0-9a-f]{48}):([A-Za-z0-9+/=]+)$/);
+  if (result.truncated || result.exitCode !== 0 || !match || match[1] !== frame) return { ...result, protocolError: true, stderr: `${result.stderr}\nMissing or invalid strict result envelope` };
+  try {
+    const body = JSON.parse(Buffer.from(match[2], "base64").toString("utf8"));
+    if (typeof body.output !== "string" || typeof body.failed !== "boolean" || typeof body.recordsTruncated !== "boolean" || !Array.isArray(body.records) || body.records.length > 8 || body.records.some((r: any) => !r || ["category", "fullyQualifiedErrorId", "exceptionType", "message"].some(k => typeof r[k] !== "string" || Buffer.byteLength(r[k], "utf8") > 1024)) || (body.failed && body.records.length === 0)) throw Error("Invalid strict result");
+    return { ...result, stdout: body.output.trimEnd(), scriptError: body.failed, errorRecords: body.records, errorRecordsTruncated: body.recordsTruncated };
+  } catch { return { ...result, protocolError: true, stderr: `${result.stderr}\nInvalid strict result body` }; }
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -78,6 +137,10 @@ export function buildArgs(script: string): string[] {
  * timeout, and never throws on a non-zero exit (it's reported in `exitCode`).
  */
 export function runPowerShell(script: string, opts: RunOptions = {}): Promise<PsResult> {
+  if (opts.errorPolicy === "strict") {
+    const frame = randomBytes(24).toString("hex");
+    return runPowerShell(STRICT_BOOTSTRAP, { ...opts, errorPolicy: "legacy", stdin: Buffer.from(script, "utf8").toString("base64"), env: { ...opts.env, PS_MCP_FRAME: frame } }).then(r => decodeStrict(r, frame));
+  }
   const candidates = resolvePowerShellCandidates(opts.exe);
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxOutput = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT;
