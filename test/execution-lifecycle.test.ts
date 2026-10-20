@@ -137,12 +137,16 @@ else { const run = request(); writeFileSync(join(root, 'recovered'), JSON.string
     expect(peak).toBeLessThanOrEqual(8_388_608 + 4096);
   }), 20000);
   it('keeps a launched child accounted for when an asynchronous save fails', async () => fixture(async root => {
-    const store = new ExecutionStore(root);
+    let commits = 0;
+    const store = new ExecutionStore(root, fs.fsyncSync, () => {
+      if (++commits === 3) throw Error('injected asynchronous metadata failure');
+    });
     const run = store.start('owner', 'lost-disk', process.execPath, ['-e', 'setTimeout(()=>process.stdout.write("later"), 100)']);
-    rmSync(join(root, run.id), { recursive: true, force: true });
     for (let i = 0; i < 150 && store.status('owner', run.id).state === 'running'; i++) await pause(20);
+    expect(commits).toBeGreaterThanOrEqual(3);
     expect(store.status('owner', run.id).state).toBe('unknown');
     expect(store.status('owner', run.id).outputComplete).toBe(false);
+    expect(new ExecutionStore(root).status('owner', run.id).state).toBe('unknown');
   }));
   it('quotes Windows arguments without a command shell and fails closed on launch error', async () => fixture(async root => {
     if (process.platform !== 'win32') return;
@@ -205,8 +209,9 @@ setInterval(()=>{},1000);`);
   it('creates a private Windows root atomically beneath an accessible parent', async () => fixture(async root => {
     if (process.platform !== 'win32') return;
     new ExecutionStore(root);
-    const command = `$p=${JSON.stringify(root)}; $a=Get-Acl -LiteralPath $p; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; if ($a.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid -or -not $a.AreAccessRulesProtected) { exit 1 }; foreach($r in $a.Access) { $s=$r.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value; if ($r.IsInherited -or ($s -ne $sid -and $s -ne 'S-1-5-18')) { exit 2 } }`;
-    expect(spawnSync('powershell.exe', ['-NoProfile', '-Command', command]).status).toBe(0);
+    const command = `$ErrorActionPreference='Stop'; Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1') -ErrorAction Stop; $p=${JSON.stringify(root)}; $a=Get-Acl -LiteralPath $p; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; if ($a.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid -or -not $a.AreAccessRulesProtected) { exit 1 }; foreach($r in $a.Access) { $s=$r.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value; if ($r.IsInherited -or ($s -ne $sid -and $s -ne 'S-1-5-18')) { exit 2 } }`;
+    const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8' });
+    expect(result.status, (result.stderr || result.stdout).slice(0, 2048)).toBe(0);
   }));
   it('recovers missing and truncated completed outputs as unknown without replay', async () => fixture(async root => {
     const store = new ExecutionStore(root);
