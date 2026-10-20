@@ -30,6 +30,33 @@ async function check(name: string, args: Record<string, unknown>, status: string
 }
 
 describe("built-artifact stdio structured tool contract", () => {
+  it("advertises typed inputs and read-only runtime capabilities", async () => {
+    const { tools } = await client.listTools();
+    for (const [tool, property] of [["run_program", "stdin"], ["run_powershell", "engine"], ["run_powershell", "parameters"], ["winrm_exec", "parameters"]])
+      expect(tools.find(t => t.name === tool)?.inputSchema.properties).toHaveProperty(property);
+    expect(tools.map(t => t.name)).toContain("runtime_capabilities");
+    const response = await client.callTool({ name: "runtime_capabilities", arguments: {} });
+    expect(response.structuredContent).toMatchObject({ packageVersion: "0.5.3", protocolVersion: 1, limits: { inputBytes: 1_048_576 },
+      defaultEnginePolicy: "Explicit engine selects only that engine; otherwise configured PWSH_MCP_EXE selects only that executable; without either, try pwsh then powershell.exe on Windows (pwsh only elsewhere)." });
+    expect(JSON.stringify(response)).not.toContain("nonexistent-mcp-shell-15-secret");
+    const missing = await client.callTool({ name: "run_powershell", arguments: { script: "echo 'LAUNCHED'", engine: "pwsh" } });
+    expect(missing.structuredContent?.detail).toHaveProperty("shell");
+    if (process.platform === "win32") {
+      expect(missing.structuredContent?.detail).toMatchObject({ shell: "pwsh" });
+      expect(missing.structuredContent?.detail?.version).toMatch(/^\d+\.\d+/);
+      expect(missing.structuredContent?.stdout).toContain("LAUNCHED");
+    }
+    const native = await client.callTool({ name: "run_program", arguments: { program: process.execPath,
+      args: ["-e", "process.stdin.on('data', b => process.stdout.write(b)); process.stdin.on('end', () => process.stdout.write('|EOF'))"], stdin: "quoted ' 💫 \\" } });
+    expect(native.structuredContent?.stdout).toBe("quoted ' 💫 \\|EOF");
+    const oversized = await client.callTool({ name: "run_program", arguments: { program: process.execPath, args: ["-e", "process.stdout.write('LAUNCHED')"], stdin: "💫".repeat(300_000) } });
+    expect(JSON.stringify(oversized)).not.toContain("LAUNCHED");
+  });
+  it("configured missing executable fails rather than trying installed engines", async () => {
+    const data = await check("run_powershell", { script: "Write-Output SHOULD_NOT_RUN" }, "transport_error", true);
+    expect(data).toMatchObject({ exitCode: null, stdout: "", detail: { shell: "nonexistent-mcp-shell-15" } });
+    expect(JSON.stringify(data)).not.toContain("SHOULD_NOT_RUN");
+  });
   it("advertises scoped references and rejects mixed authentication before transport over built stdio", async () => {
     const { tools } = await client.listTools();
     for (const name of ["ssh_exec", "sftp_upload", "sftp_download", "winrm_exec"]) {
@@ -95,10 +122,10 @@ describe("built-artifact stdio structured tool contract", () => {
   });
   it("advertises a shared output schema on every tool", async () => {
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(16);
+    expect(tools).toHaveLength(17);
     expect(tools.map(t => t.name)).toContain("read_output_log");
     expect(tools.map(t => t.name)).toContain("delete_output_log");
-    for (const tool of tools.filter(t => !["read_output_log", "delete_output_log", "start_execution", "execution_status", "read_execution_output", "cancel_execution"].includes(t.name))) {
+    for (const tool of tools.filter(t => !["read_output_log", "delete_output_log", "runtime_capabilities", "start_execution", "execution_status", "read_execution_output", "cancel_execution"].includes(t.name))) {
       expect(tool.outputSchema?.properties).toHaveProperty("terminationStatus");
       expect(tool.outputSchema?.properties).toHaveProperty("executionId");
     }

@@ -16,6 +16,8 @@ import { dirname, join } from "node:path";
 import { logStore } from "./full-logs.js";
 import { executionStore } from "./execution-lifecycle.js";
 import { configuredProvider, resolveCredential, sanitizeCredentialResult } from "./credentials.js";
+import { typedParameters, INPUT_LIMIT } from "./typed-input.js";
+import { capabilities, engineExecutable, detectEngine } from "./capabilities.js";
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
@@ -34,15 +36,19 @@ server.registerTool(
   "run_powershell",
   { description: "Run a PowerShell script/command on this Windows host in a hidden process (no console window appears). Returns stdout, stderr and exit code. Use for any Windows command, file, or system task.", outputSchema: resultShape, inputSchema: {
     script: z.string().describe("PowerShell script or command to execute."),
+    engine: z.enum(process.platform === "win32" ? ["pwsh", "powershell"] : ["pwsh"]).optional().describe("Explicit engine; no fallback when specified. Omit to use only configured PWSH_MCP_EXE if set; otherwise try pwsh then powershell.exe on Windows (pwsh only elsewhere)."),
+    parameters: typedParameters.describe("JSON-safe named script parameters, delivered via stdin; never interpolated into source."),
     cwd: z.string().optional().describe("Working directory."),
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000)."),
     errorPolicy: z.enum(["legacy", "strict"]).optional().describe("Default legacy raw script; strict detects unhandled PowerShell ErrorRecords. Check native exits immediately in the script."),
     ...outputOptions,
   } },
-  async ({ script, cwd, timeoutMs, errorPolicy, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
+  async ({ script, engine, parameters, cwd, timeoutMs, errorPolicy, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
     incrementTool("run_powershell");
-    const r = await runPowerShell(script, { cwd, timeoutMs, errorPolicy, maxOutputBytes, tail, logOutput, logQuotaBytes });
-    return toolResult(fromProcess(r, "powershell", "local"), formatResult(r));
+    const r = await runPowerShell(script, { exe: engine ? engineExecutable(engine) : undefined, parameters, cwd, timeoutMs, errorPolicy, maxOutputBytes, tail, logOutput, logQuotaBytes });
+    const result = fromProcess(r, "powershell", "local");
+    if (r.exitCode !== null) result.detail.version = detectEngine(r.shell)?.version;
+    return toolResult(result, formatResult(r));
   },
 );
 
@@ -147,6 +153,7 @@ server.registerTool(
   { description: "Run a command on a remote Windows host via PowerShell Remoting (WinRM / Invoke-Command). Native to Windows Server â€” no SSH server or agent needed on the target, only WinRM enabled. Output captured in-process (no console window).", outputSchema: resultShape, inputSchema: {
     computerName: z.string().describe("Remote Windows host name or IP."),
     command: z.string().describe("PowerShell command/scriptblock body to run remotely."),
+    parameters: typedParameters.describe("JSON-safe named remote script parameters; delivered through protected WinRM stdin payload."),
     username: z.string().optional().describe("Credential username (DOMAIN\\\\user or host\\\\user). Omit to use the host process identity."),
     password: z.string().optional().describe("Credential password."),
     credentialRef: z.string().optional().describe("Operator-provisioned scoped credential reference, exclusive with raw auth."),
@@ -155,10 +162,10 @@ server.registerTool(
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 120000)."),
     ...outputOptions,
   } },
-  async ({ computerName, command, username, password, credentialRef, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
+  async ({ computerName, command, parameters, username, password, credentialRef, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
     incrementTool("winrm_exec");
     const auth = await resolveCredential({ credentialRef, transport: "winrm", host: computerName, port: useSsl ? 5986 : 5985, principal: username ?? "", username, password }, configuredProvider());
-    const r = await runWinRm({ computerName, command, username, password, ...auth, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput: credentialRef ? false : logOutput, logQuotaBytes });
+    const r = await runWinRm({ computerName, command, parameters, username, password, ...auth, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput: credentialRef ? false : logOutput, logQuotaBytes });
     const safe = credentialRef ? sanitizeCredentialResult(r, auth) : r;
     return toolResult(fromProcess(safe, "winrm", computerName), formatResult(safe));
   },
@@ -209,16 +216,21 @@ server.registerTool(
   { description: "Run a native executable DIRECTLY (no shell) in a hidden process and capture clean stdout/stderr + exit code. Use this for console programs like gh, git, docker, node, python, etc. -- their output is captured reliably, unlike when the same program is run inside run_powershell (where a hidden PowerShell swallows native stdout). Provide the program and an args array (no shell quoting needed).", outputSchema: resultShape, inputSchema: {
     program: z.string().describe("Executable name on PATH or a full path, e.g. 'git' or 'C:\\Program Files\\GitHub CLI\\gh.exe'."),
     args: z.array(z.string()).optional().describe("Arguments as an array; each element is passed verbatim (no shell quoting)."),
+    stdin: z.string().max(INPUT_LIMIT).optional().describe("UTF-8 stdin, max 1 MiB bytes. Empty string still opens stdin and sends EOF; no stdin in argv, environment or logs."),
     cwd: z.string().optional().describe("Working directory."),
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000)."),
     ...outputOptions,
   } },
-  async ({ program, args, cwd, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
+  async ({ program, args, stdin, cwd, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
     incrementTool("run_program");
-    const r = await runProgram(program, args ?? [], { cwd, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes });
+    const r = await runProgram(program, args ?? [], { stdin, cwd, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes });
     return toolResult(fromProcess(r, "program", program), formatResult(r));
   },
 );
+server.registerTool("runtime_capabilities", { description: "Read-only runtime package, protocol, supported and available engines, transports and limits; no identity, environment or secrets.", inputSchema: {} }, async () => {
+  const data = capabilities(VERSION);
+  return { structuredContent: data, content: [{ type: "text" as const, text: JSON.stringify(data) }] };
+});
 const executionId = z.string().regex(/^[0-9a-f]{48}$/);
 const executionOwner = z.string().min(1).max(256).describe("Private caller namespace token; keep secret and stable across restarts. This is a bearer secret, not authenticated MCP identity.");
 const executionReply = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] });

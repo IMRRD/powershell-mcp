@@ -30,7 +30,7 @@ export const resultShape = {
   errorRecordsTruncated: z.boolean().optional(),
   terminationCertainty: z.enum(["unknown", "root_exited"]),
   log: z.object({ handle: z.string(), complete: z.boolean(), stdoutBytes: z.number(), stderrBytes: z.number(), expiresAt: z.string() }).optional(),
-  detail: z.object({ shell: z.string().optional(), signal: z.string().optional(), error: z.string().optional(), direction: z.enum(["upload", "download"]).optional(), bytes: z.number().optional(), localExitCode: z.number().nullable().optional() }),
+  detail: z.object({ shell: z.string().optional(), version: z.string().optional(), signal: z.string().optional(), error: z.string().optional(), direction: z.enum(["upload", "download"]).optional(), bytes: z.number().optional(), localExitCode: z.number().nullable().optional() }),
 };
 export type ExecutionResult = z.infer<ReturnType<typeof z.object<typeof resultShape>>>;
 

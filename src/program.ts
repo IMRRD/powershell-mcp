@@ -3,6 +3,7 @@ import os from "node:os";
 import { OutputCollector, captureDiagnostic } from "./output-collector.js";
 import type { PsResult, RunOptions } from "./powershell.js";
 import { logStore } from "./full-logs.js";
+import { INPUT_LIMIT } from "./typed-input.js";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT = 1024 * 1024;
@@ -22,6 +23,10 @@ export function runProgram(program: string, args: string[] = [], opts: RunOption
   const maxOutput = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT;
   const started = Date.now();
 
+  if (opts.stdin !== undefined && Buffer.byteLength(opts.stdin, "utf8") > INPUT_LIMIT) {
+    return Promise.resolve({ stdout: "", stderr: "input limit exceeded", spawnError: "input limit exceeded", exitCode: null, timedOut: false, durationMs: 0, shell: program, truncated: false, outputLimitBytes: maxOutput });
+  }
+
   return new Promise<PsResult>((resolve) => {
     const log = opts.logOutput ? logStore.create(opts.logQuotaBytes) : undefined;
     let child;
@@ -30,7 +35,7 @@ export function runProgram(program: string, args: string[] = [], opts: RunOption
         cwd: opts.cwd,
         env: { ...process.env, ...(opts.env ?? {}) },
         windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: [opts.stdin === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       });
     } catch (err) {
       if (log) logStore.delete(log.finish().handle);
@@ -53,6 +58,10 @@ export function runProgram(program: string, args: string[] = [], opts: RunOption
     const out = new OutputCollector(maxOutput, opts.tail);
     const errOut = new OutputCollector(maxOutput, opts.tail);
     let timedOut = false;
+    if (opts.stdin !== undefined) {
+      child.stdin?.on("error", () => { /* early child exit owns result */ });
+      child.once("spawn", () => child.stdin?.end(opts.stdin));
+    }
 
     child.stdout?.on("data", (b: Buffer) => { out.append(b); log?.append("stdout", b); });
     child.stderr?.on("data", (b: Buffer) => { errOut.append(b); log?.append("stderr", b); });
