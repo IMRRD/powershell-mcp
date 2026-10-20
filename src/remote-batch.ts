@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { runSsh } from './ssh.js';
+import { runSsh, type SshHop } from './ssh.js';
 import { runWinRm, WinRmDispatchDeadlineError } from './winrm.js';
 import { configuredProvider, resolveCredential, sanitizeCredentialResult } from './credentials.js';
 import { hostTrust } from './host-trust.js';
@@ -7,7 +7,7 @@ import { hostTrust } from './host-trust.js';
 export type BatchTarget = {
   transport: 'ssh' | 'winrm'; host: string; command: string; username?: string;
   port?: number; privateKeyPath?: string; passphrase?: string; password?: string; credentialRef?: string;
-  hostKeyPins?: string[]; useSsl?: boolean; authentication?: 'Default' | 'Negotiate' | 'Kerberos' | 'Basic' | 'CredSSP';
+  hostKeyPins?: string[]; jumps?: SshHop[]; useSsl?: boolean; authentication?: 'Default' | 'Negotiate' | 'Kerberos' | 'Basic' | 'CredSSP';
   parameters?: Record<string, unknown>;
 };
 export type BatchStatus = 'queued' | 'running' | 'completed' | 'failed' | 'timeout' | 'cancelled' | 'unknown';
@@ -20,10 +20,11 @@ export async function executeBatchTarget(target: BatchTarget, timeoutMs: number)
   const started = Date.now();
   const auth = await resolveCredential({ credentialRef: target.credentialRef, transport: target.transport, host: target.host, port: target.transport === 'ssh' ? target.port ?? 22 : target.useSsl ? 5986 : 5985, principal: target.username ?? '', username: target.username, password: target.password, passphrase: target.passphrase, privateKeyPath: target.privateKeyPath }, configuredProvider());
   if (target.transport === 'ssh') {
+    if (target.jumps && (!Array.isArray(target.jumps) || target.jumps.length > 4)) throw Error("Invalid jump route");
     hostTrust({ host: target.host, port: target.port, hostKeyPins: target.hostKeyPins, knownHostsPath: process.env.POWERSHELL_MCP_KNOWN_HOSTS });
     const remaining = timeoutMs - (Date.now() - started);
     if (remaining <= 0) return { status: 'unknown', reason: 'Invocation deadline elapsed before dispatch; remote execution unverified' };
-    const r = await runSsh({ host: target.host, username: target.username!, command: target.command, port: target.port, privateKeyPath: target.privateKeyPath, passphrase: target.passphrase, password: target.password, ...auth, hostKeyPins: target.hostKeyPins, knownHostsPath: process.env.POWERSHELL_MCP_KNOWN_HOSTS, timeoutMs: remaining, maxOutputBytes: 65536, logOutput: false });
+    const r = await runSsh({ host: target.host, username: target.username!, command: target.command, port: target.port, privateKeyPath: target.privateKeyPath, passphrase: target.passphrase, password: target.password, ...auth, hostKeyPins: target.hostKeyPins, jumps: target.jumps, knownHostsPath: process.env.POWERSHELL_MCP_KNOWN_HOSTS, deadlineAt: started + timeoutMs, maxOutputBytes: 65536, logOutput: false });
     const safe = sanitizeCredentialResult(r, { ...auth, password: auth.password ?? target.password, passphrase: auth.passphrase ?? target.passphrase });
     return { status: r.timedOut ? 'timeout' : r.error || r.exitCode !== 0 ? 'failed' : 'completed', output: safe };
   }

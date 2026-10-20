@@ -129,6 +129,7 @@ server.registerTool(
     username: z.string().describe("SSH username."),
     command: z.string().describe("Command to run on the remote host."),
     hostKeyPins: z.array(z.string()).optional().describe("Explicit SHA256:base64 trusted host key fingerprints; multiple keys permit rotation."),
+    jumps: z.array(z.object({ host: z.string().min(1), port: z.number().int().min(1).max(65535).optional(), username: z.string().min(1), hostKeyPins: z.array(z.string()).optional(), credentialRef: z.string().optional(), privateKeyPath: z.string().optional(), passphrase: z.string().optional(), password: z.string().optional() }).strict()).max(4).optional(),
     port: z.number().int().positive().max(65535).optional().describe("SSH port (default 22)."),
     privateKeyPath: z.string().optional().describe("Path to a private key file on this Windows host, e.g. C:\\\\Users\\\\isak\\\\.ssh\\\\id_ed25519."),
     passphrase: z.string().optional().describe("Passphrase for the private key, if any."),
@@ -140,10 +141,11 @@ server.registerTool(
     logOutput: outputOptions.logOutput,
     logQuotaBytes: outputOptions.logQuotaBytes,
   } },
-  async ({ host, username, command, port, privateKeyPath, passphrase, password, credentialRef, hostKeyPins, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
+  async ({ host, username, command, port, privateKeyPath, passphrase, password, credentialRef, hostKeyPins, jumps, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
     incrementTool("ssh_exec");
+    const started = Date.now();
     const auth = await resolveCredential({ credentialRef, transport: "ssh", host, port: port ?? 22, principal: username, privateKeyPath, passphrase, password }, configuredProvider());
-    const r = await runSsh({ host, username, command, port, privateKeyPath, passphrase, password, ...auth, hostKeyPins, knownHostsPath: process.env.POWERSHELL_MCP_KNOWN_HOSTS, timeoutMs, maxOutputBytes, tail, logOutput: credentialRef ? false : logOutput, logQuotaBytes });
+    const r = await runSsh({ host, username, command, port, privateKeyPath, passphrase, password, ...auth, hostKeyPins, jumps, knownHostsPath: process.env.POWERSHELL_MCP_KNOWN_HOSTS, deadlineAt: started + (timeoutMs ?? 60000), maxOutputBytes, tail, logOutput: credentialRef || jumps?.some(h => h.credentialRef) ? false : logOutput, logQuotaBytes });
     const safe = credentialRef ? sanitizeCredentialResult(r, auth) : r;
     return toolResult(fromSsh(safe, `${username}@${host}:${port ?? 22}`, maxOutputBytes ?? 1_048_576), formatSsh(`${username}@${host}`, safe));
   },
@@ -230,11 +232,11 @@ server.registerTool(
   },
 );
 const batchTarget = z.discriminatedUnion('transport', [
-  z.object({ transport: z.literal('ssh'), host: z.string().min(1), username: z.string().min(1), command: z.string().min(1), port: z.number().int().min(1).max(65535).optional(), privateKeyPath: z.string().optional(), passphrase: z.string().optional(), password: z.string().optional(), credentialRef: z.string().optional(), hostKeyPins: z.array(z.string()).optional() }).strict(),
+  z.object({ transport: z.literal('ssh'), host: z.string().min(1), username: z.string().min(1), command: z.string().min(1), port: z.number().int().min(1).max(65535).optional(), privateKeyPath: z.string().optional(), passphrase: z.string().optional(), password: z.string().optional(), credentialRef: z.string().optional(), hostKeyPins: z.array(z.string()).optional(), jumps: z.array(z.object({ host: z.string().min(1), port: z.number().int().min(1).max(65535).optional(), username: z.string().min(1), hostKeyPins: z.array(z.string()).optional(), credentialRef: z.string().optional(), privateKeyPath: z.string().optional(), passphrase: z.string().optional(), password: z.string().optional() }).strict()).max(4).optional() }).strict(),
   z.object({ transport: z.literal('winrm'), host: z.string().min(1), command: z.string().min(1), username: z.string().optional(), password: z.string().optional(), credentialRef: z.string().optional(), useSsl: z.boolean().optional(), authentication: z.enum(['Default','Negotiate','Kerberos','Basic','CredSSP']).optional(), parameters: typedParameters }).strict(),
 ]);
 const batchReply = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
-server.registerTool('start_remote_batch', { description: 'Opt-in process-local SSH/WinRM batch; 1–32 explicit targets, up to 8 concurrent, per-target deadline. No discovery, retry or jump routing. Unknown after server restart.', inputSchema: { targets: z.array(batchTarget).min(1).max(32), concurrency: z.number().int().min(1).max(8), timeoutMs: z.number().int().min(1).max(900000) } }, async ({ targets, concurrency, timeoutMs }) => batchReply(remoteBatchStore.status(remoteBatchStore.start({ targets, concurrency, timeoutMs }))));
+server.registerTool('start_remote_batch', { description: 'Opt-in process-local SSH/WinRM batch; 1–32 explicit targets, up to 8 concurrent, per-target deadline. No discovery or retry. SSH supports at most four explicit jumps. Unknown after server restart.', inputSchema: { targets: z.array(batchTarget).min(1).max(32), concurrency: z.number().int().min(1).max(8), timeoutMs: z.number().int().min(1).max(900000) } }, async ({ targets, concurrency, timeoutMs }) => batchReply(remoteBatchStore.status(remoteBatchStore.start({ targets, concurrency, timeoutMs }))));
 server.registerTool('remote_batch_status', { description: 'Read ordered per-target batch records; unavailable after process restart.', inputSchema: { id: z.string().regex(/^[0-9a-f]{48}$/) } }, async ({ id }) => batchReply(remoteBatchStore.status(id) ?? { status: 'unknown', reason: 'Job not in this process; no replay or remote ownership proof' }));
 server.registerTool('cancel_remote_batch', { description: 'Stop dispatch of queued targets; active targets become unknown, not confirmed terminated.', inputSchema: { id: z.string().regex(/^[0-9a-f]{48}$/) } }, async ({ id }) => batchReply(remoteBatchStore.cancel(id) ?? { status: 'unknown', reason: 'Job not in this process' }));
 
