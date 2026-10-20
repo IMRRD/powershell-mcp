@@ -9,6 +9,7 @@ export interface SshOptions {
   command: string;
   port?: number;
   privateKeyPath?: string;
+  privateKey?: string;
   passphrase?: string;
   password?: string;
   timeoutMs?: number;
@@ -93,11 +94,12 @@ export function runSsh(opts: SshOptions): Promise<SshResult> {
       keepaliveInterval: 0,
     };
 
+    if (opts.privateKey) cfg.privateKey = opts.privateKey;
     if (opts.privateKeyPath) {
       try { cfg.privateKey = readFileSync(opts.privateKeyPath); }
       catch (e) { finish({ error: `could not read key '${opts.privateKeyPath}': ${(e as Error).message}` }); return; }
-      if (opts.passphrase) cfg.passphrase = opts.passphrase;
     }
+    if (cfg.privateKey && opts.passphrase !== undefined) cfg.passphrase = opts.passphrase;
     if (opts.password) cfg.password = opts.password;
 
     if (!cfg.privateKey && !cfg.password) {

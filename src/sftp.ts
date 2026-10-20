@@ -9,6 +9,7 @@ export interface SftpOptions {
   direction: "upload" | "download";
   port?: number;
   privateKeyPath?: string;
+  privateKey?: string;
   passphrase?: string;
   password?: string;
   timeoutMs?: number;
@@ -71,11 +72,12 @@ export function runSftp(o: SftpOptions): Promise<SftpResult> {
       username: o.username,
       readyTimeout: Math.min(timeoutMs, 120_000),
     };
+    if (o.privateKey) cfg.privateKey = o.privateKey;
     if (o.privateKeyPath) {
       try { cfg.privateKey = readFileSync(o.privateKeyPath); }
       catch (e) { finish({ error: `could not read key '${o.privateKeyPath}': ${(e as Error).message}` }); return; }
-      if (o.passphrase) cfg.passphrase = o.passphrase;
     }
+    if (cfg.privateKey && o.passphrase !== undefined) cfg.passphrase = o.passphrase;
     if (o.password) cfg.password = o.password;
     if (!cfg.privateKey && !cfg.password) {
       finish({ error: "no auth provided: supply privateKeyPath or password" });

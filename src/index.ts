@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { logStore } from "./full-logs.js";
 import { executionStore } from "./execution-lifecycle.js";
+import { configuredProvider, resolveCredential, sanitizeCredentialResult } from "./credentials.js";
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
@@ -124,16 +125,19 @@ server.registerTool(
     privateKeyPath: z.string().optional().describe("Path to a private key file on this Windows host, e.g. C:\\\\Users\\\\isak\\\\.ssh\\\\id_ed25519."),
     passphrase: z.string().optional().describe("Passphrase for the private key, if any."),
     password: z.string().optional().describe("Password auth (used if no key)."),
+    credentialRef: z.string().optional().describe("Operator-provisioned scoped credential reference, exclusive with raw auth."),
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000). Also bounds the connection handshake."),
     maxOutputBytes: z.number().int().positive().max(8_388_608).optional().describe("Cap captured stdout/stderr per stream (bytes, default 1 MiB)."),
     tail: z.boolean().optional().describe("Keep the LAST maxOutputBytes instead of the first (tail) â€” useful for long logs."),
     logOutput: outputOptions.logOutput,
     logQuotaBytes: outputOptions.logQuotaBytes,
   } },
-  async ({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
+  async ({ host, username, command, port, privateKeyPath, passphrase, password, credentialRef, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
     incrementTool("ssh_exec");
-    const r = await runSsh({ host, username, command, port, privateKeyPath, passphrase, password, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes });
-    return toolResult(fromSsh(r, `${username}@${host}:${port ?? 22}`, maxOutputBytes ?? 1_048_576), formatSsh(`${username}@${host}`, r));
+    const auth = await resolveCredential({ credentialRef, transport: "ssh", host, port: port ?? 22, principal: username, privateKeyPath, passphrase, password }, configuredProvider());
+    const r = await runSsh({ host, username, command, port, privateKeyPath, passphrase, password, ...auth, timeoutMs, maxOutputBytes, tail, logOutput: credentialRef ? false : logOutput, logQuotaBytes });
+    const safe = credentialRef ? sanitizeCredentialResult(r, auth) : r;
+    return toolResult(fromSsh(safe, `${username}@${host}:${port ?? 22}`, maxOutputBytes ?? 1_048_576), formatSsh(`${username}@${host}`, safe));
   },
 );
 
@@ -144,15 +148,18 @@ server.registerTool(
     command: z.string().describe("PowerShell command/scriptblock body to run remotely."),
     username: z.string().optional().describe("Credential username (DOMAIN\\\\user or host\\\\user). Omit to use the host process identity."),
     password: z.string().optional().describe("Credential password."),
+    credentialRef: z.string().optional().describe("Operator-provisioned scoped credential reference, exclusive with raw auth."),
     useSsl: z.boolean().optional().describe("Use HTTPS/5986 WinRM."),
     authentication: z.enum(["Default", "Negotiate", "Kerberos", "Basic", "CredSSP"]).optional().describe("WinRM auth mechanism."),
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 120000)."),
     ...outputOptions,
   } },
-  async ({ computerName, command, username, password, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
+  async ({ computerName, command, username, password, credentialRef, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
     incrementTool("winrm_exec");
-    const r = await runWinRm({ computerName, command, username, password, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes });
-    return toolResult(fromProcess(r, "winrm", computerName), formatResult(r));
+    const auth = await resolveCredential({ credentialRef, transport: "winrm", host: computerName, port: useSsl ? 5986 : 5985, principal: username ?? "", username, password }, configuredProvider());
+    const r = await runWinRm({ computerName, command, username, password, ...auth, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput: credentialRef ? false : logOutput, logQuotaBytes });
+    const safe = credentialRef ? sanitizeCredentialResult(r, auth) : r;
+    return toolResult(fromProcess(safe, "winrm", computerName), formatResult(safe));
   },
 );
 
@@ -163,6 +170,7 @@ const sftpAuth = {
   privateKeyPath: z.string().optional().describe("Path to a private key file on this Windows host."),
   passphrase: z.string().optional().describe("Passphrase for the private key, if any."),
   password: z.string().optional().describe("Password auth (used if no key)."),
+    credentialRef: z.string().optional().describe("Operator-provisioned scoped credential reference, exclusive with raw auth."),
   timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 120000)."),
 };
 
@@ -170,11 +178,13 @@ server.registerTool(
   "sftp_upload",
   { description: "Upload a local file to a remote host over SFTP, in-process (ssh2 â€” no scp.exe, no WSL, headless). Use to deploy scripts/configs to Linux hosts.", outputSchema: resultShape, inputSchema: { localPath: z.string().describe("Local file path on this Windows host."),
     remotePath: z.string().describe("Destination path on the remote host."), ...sftpAuth } },
-  async ({ localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, timeoutMs }) => {
+  async ({ localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, credentialRef, timeoutMs }) => {
     incrementTool("sftp_upload");
-    const o = { direction: "upload" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, timeoutMs };
+    const auth = await resolveCredential({ credentialRef, transport: "sftp", host, port: port ?? 22, principal: username, privateKeyPath, passphrase, password }, configuredProvider());
+    const o = { direction: "upload" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, ...auth, timeoutMs };
     const r = await runSftp(o);
-    return toolResult(fromSftp(r, `${username}@${host}:${port ?? 22}:${remotePath}`, "upload"), formatSftp(o, r));
+    const safe = credentialRef ? sanitizeCredentialResult(r, auth) : r;
+    return toolResult(fromSftp(safe, `${username}@${host}:${port ?? 22}:${remotePath}`, "upload"), formatSftp(o, safe));
   },
 );
 
@@ -182,11 +192,13 @@ server.registerTool(
   "sftp_download",
   { description: "Download a file from a remote host to this Windows host over SFTP, in-process (ssh2 â€” no scp.exe, no WSL, headless).", outputSchema: resultShape, inputSchema: { remotePath: z.string().describe("Source path on the remote host."),
     localPath: z.string().describe("Destination path on this Windows host."), ...sftpAuth } },
-  async ({ remotePath, localPath, host, username, port, privateKeyPath, passphrase, password, timeoutMs }) => {
+  async ({ remotePath, localPath, host, username, port, privateKeyPath, passphrase, password, credentialRef, timeoutMs }) => {
     incrementTool("sftp_download");
-    const o = { direction: "download" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, timeoutMs };
+    const auth = await resolveCredential({ credentialRef, transport: "sftp", host, port: port ?? 22, principal: username, privateKeyPath, passphrase, password }, configuredProvider());
+    const o = { direction: "download" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, ...auth, timeoutMs };
     const r = await runSftp(o);
-    return toolResult(fromSftp(r, `${username}@${host}:${port ?? 22}:${remotePath}`, "download"), formatSftp(o, r));
+    const safe = credentialRef ? sanitizeCredentialResult(r, auth) : r;
+    return toolResult(fromSftp(safe, `${username}@${host}:${port ?? 22}:${remotePath}`, "download"), formatSftp(o, safe));
   },
 );
 

@@ -30,6 +30,18 @@ async function check(name: string, args: Record<string, unknown>, status: string
 }
 
 describe("built-artifact stdio structured tool contract", () => {
+  it("advertises scoped references and rejects mixed authentication before transport over built stdio", async () => {
+    const { tools } = await client.listTools();
+    for (const name of ["ssh_exec", "sftp_upload", "sftp_download", "winrm_exec"]) {
+      expect(tools.find(t => t.name === name)?.inputSchema.properties).toHaveProperty("credentialRef");
+    }
+    const mixed = await client.callTool({ name: "ssh_exec", arguments: { host: "synthetic.invalid", username: "robot", command: "true", credentialRef: "synthetic", password: "SYNTHETIC-secret" } });
+    expect(mixed.isError).toBe(true);
+    expect(JSON.stringify(mixed)).not.toContain("SYNTHETIC-secret");
+    const missing = await client.callTool({ name: "winrm_exec", arguments: { computerName: "synthetic.invalid", command: "hostname", credentialRef: "missing", username: "robot" } });
+    expect(missing.isError).toBe(true);
+    expect(JSON.stringify(missing)).toContain("Credential reference unavailable");
+  });
   it("advertises bounded output options for each execution transport", async () => {
     const { tools } = await client.listTools();
     for (const name of ["run_powershell", "run_program", "winrm_exec", "ssh_exec"]) {
