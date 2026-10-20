@@ -217,6 +217,12 @@ npm run typecheck
 
 CI runs build + tests on both `windows-latest` and `ubuntu-latest`.
 
+## SSH/SFTP host trust (breaking secure default)
+
+SSH and SFTP now **reject unknown host keys**. Authentication and command/file operations do not begin without verified trust. Provision trust out of band, independently of the network endpoint, before migrating existing calls. Either supply `hostKeyPins: ["SHA256:<43-character-base64>"]` in the tool call or configure `POWERSHELL_MCP_KNOWN_HOSTS` in the server process environment to an operator-controlled OpenSSH known-hosts file. There is no caller-supplied known-hosts path and no automatic trust-on-first-use or changed-key update. Missing trust and changed keys have distinct error messages. Credential references only provide authentication, never host trust.
+
+Pins are SHA-256 digests of the SSH wire-format public host key (standard OpenSSH `SHA256:` fingerprint without trailing `=`). Pins verify the presented key, irrespective of the requested host name; treat each pin as scoped to the target you intend to call. The known-hosts policy matches the `host` input exactly, using `host` for port 22 or `[host]:port` for other ports. It supports plain single-host entries of the form `host key-type base64-public-key`, including multiple entries per identity for planned rotation. It does not interpret aliases, host patterns, comma-separated names, hashed entries, markers (`@cert-authority`, `@revoked`), or certificates: unsupported entries fail closed rather than being skipped. Keep this file private, bounded, and operator-maintained; do not point at an untrusted or model-selected file. For rotation, stage the new trusted key alongside the old key (or supply both pins) after separate verification, then remove the old one. A mismatch never learns or replaces a key. There is no insecure bypass option.
+
 ## Security notes
 
 - `winrm_exec` sends caller-controlled connection details to the local PowerShell child over stdin; credentials are not placed in process arguments or environment variables.

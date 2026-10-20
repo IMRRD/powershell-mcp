@@ -1,7 +1,8 @@
 import { Client } from "ssh2";
+import { hostTrust, type HostTrustOptions } from "./host-trust.js";
 import { readFileSync, statSync } from "node:fs";
 
-export interface SftpOptions {
+export interface SftpOptions extends HostTrustOptions {
   host: string;
   username: string;
   localPath: string;
@@ -63,14 +64,20 @@ export function runSftp(o: SftpOptions): Promise<SftpResult> {
       });
     });
 
+    let trust: ReturnType<typeof hostTrust> | undefined;
+    let rejectedHost = false;
     conn.on("error", (e: Error & { level?: string }) =>
-      finish({ error: `connection error${e.level ? ` (${e.level})` : ""}: ${e.message}` }));
+      finish({ error: rejectedHost && trust ? trust.failure() : `connection error${e.level ? ` (${e.level})` : ""}: ${e.message}` }));
+
+    try { trust = hostTrust(o); }
+    catch (e) { finish({ error: (e as Error).message }); return; }
 
     const cfg: Record<string, unknown> = {
       host: o.host,
       port: o.port ?? 22,
       username: o.username,
       readyTimeout: Math.min(timeoutMs, 120_000),
+      hostVerifier: (key: Buffer) => { const accepted = trust.hostVerifier(key); if (!accepted) rejectedHost = true; return accepted; },
     };
     if (o.privateKey) cfg.privateKey = o.privateKey;
     if (o.privateKeyPath) {

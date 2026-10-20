@@ -42,6 +42,15 @@ describe("built-artifact stdio structured tool contract", () => {
     expect(missing.isError).toBe(true);
     expect(JSON.stringify(missing)).toContain("Credential reference unavailable");
   });
+  it("advertises host pins and rejects malformed pin over built stdio", async () => {
+    const { tools } = await client.listTools();
+    for (const name of ["ssh_exec", "sftp_upload", "sftp_download"])
+      expect(tools.find(t => t.name === name)?.inputSchema.properties).toHaveProperty("hostKeyPins");
+    const response = await client.callTool({ name: "ssh_exec", arguments: {
+      host: "127.0.0.1", port: 1, username: "fixture", command: "true", password: "synthetic-secret", hostKeyPins: ["SHA256:invalid"] } });
+    expect(response.structuredContent?.detail).toMatchObject({ error: "invalid host key pin" });
+    expect(JSON.stringify(response)).not.toContain("synthetic-secret");
+  });
   it("advertises bounded output options for each execution transport", async () => {
     const { tools } = await client.listTools();
     for (const name of ["run_powershell", "run_program", "winrm_exec", "ssh_exec"]) {
