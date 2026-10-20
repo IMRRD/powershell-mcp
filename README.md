@@ -126,6 +126,14 @@ preferences and deliberately emit arbitrary content (including secrets) in outpu
 or exception messages. WinRM preserves its legacy remote error policy, while its
 structured error output also avoids rendering source context.
 
+## Experimental local execution lifecycle
+
+`start_execution` accepts `owner` (a secret caller-chosen namespace token), `idempotencyKey`, `program`, `args` and optional `cwd`. It starts a **local executable directly**, without a shell. `execution_status`, `read_execution_output` (base64 byte pages, at most 65,536 bytes) and `cancel_execution` require the same owner token and opaque execution ID. A repeated owner/key/request returns the same ID; a different request with that key fails. Never retry with a new key after an ambiguous launch. The owner token is a bearer capability, **not** MCP transport authentication; callers sharing the token can read or cancel one another's executions.
+
+Metadata and output live under `POWERSHELL_MCP_EXEC_PARENT/powershell-mcp-executions` or the private temporary parent. The dedicated directory is restricted to the current Windows SID and SYSTEM (or POSIX mode 0700); records contain request hashes, not raw arguments or scripts. Output can contain secrets; quota is 8 MiB combined per execution and at most 64 retained executions. No encryption or automatic retention cleanup is provided: archive/delete the dedicated store **only when no execution is active**, and never clear idempotency history if duplicate side effects would be unsafe. Do not point the parent at a shared/untrusted location.
+
+Disconnecting an MCP client does not cancel its running process while the server lives. A new server can read completed persisted output but classifies a previously running/reserved execution as `unknown`; it will neither adopt nor automatically relaunch or cancel it. The same limitation applies after server crash and OS reboot; `unknown` does not prove the process remains alive or stopped. On Windows, cancellation requests the packaged Job Object supervisor to terminate its owned tree and subsequently reports `cancelled` only after job accounting reaches zero; until then status remains `running`, and failed/absent proof remains `unknown`. Normal supervisor closure uses kill-on-job-close. POSIX cancellation remains `unknown` because descendant termination is not proven. It never uses bare-PID `taskkill`. The stored output quota is 8 MiB; Windows raw spool files can temporarily exceed it during high-volume output and should be monitored until bounded streaming replaces spooling. Commands with side effects require independent reconciliation before a new idempotency key is used. SSH/WinRM remote supervision and remote termination proof are unsupported in this local slice.
+
 ## See it work
 
 Real calls, real output â€” headless, no console window, structured results:
