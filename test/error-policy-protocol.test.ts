@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { join } from "node:path";
+import { EOL } from "node:os";
 
 const exe = (process.platform === "win32" ? ["powershell.exe", "pwsh.exe"] : ["pwsh"])
   .find(x => spawnSync(x, ["-NoProfile", "-Command", "exit 0"], { timeout: 10000 }).status === 0);
@@ -16,7 +17,7 @@ describe.skipIf(!exe)("built MCP strict and legacy execution", () => {
       const data = response.structuredContent as Record<string, any>;
       expect(data).toMatchObject({ stdout: 'a', terminationStatus: 'completed', log: { complete: true, stderrBytes: 0 } });
       const page = await client.callTool({ name: 'read_output_log', arguments: { handle: data.log.handle, stream: 'stdout', offset: 0, length: 16 } });
-      expect(Buffer.from(JSON.parse((page.content[0] as { text: string }).text).data, 'base64').toString()).toBe('abcdef\r\n');
+      expect(Buffer.from(JSON.parse((page.content[0] as { text: string }).text).data, 'base64').toString()).toBe(`abcdef${EOL}`);
       await client.callTool({ name: 'delete_output_log', arguments: { handle: data.log.handle } });
     } finally { await client.close(); }
   }, 20_000);

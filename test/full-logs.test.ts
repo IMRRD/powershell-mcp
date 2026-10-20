@@ -4,27 +4,59 @@ import { runPowerShell } from '../src/powershell.js';
 import { logStore } from '../src/full-logs.js';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
-import { lstatSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { lstatSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+
+const scratchRoot = () => process.env.TMPDIR ?? process.env.RUNNER_TEMP ?? tmpdir();
+const logParent = () => process.env.POWERSHELL_MCP_LOG_PARENT ?? process.env.TMPDIR ?? (process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Temp') : tmpdir());
 
 describe('opt-in output logs', () => {
   it('does not launch a child when total log quota is exhausted', async () => {
-    const held = Array.from({ length: 8 }, () => logStore.create());
-    const marker = join(process.env.TMPDIR!, `quota-marker-${process.pid}`);
+    const held: ReturnType<typeof logStore.create>[] = [];
+    let scratch: string | undefined;
     try {
+      scratch = mkdtempSync(join(scratchRoot(), 'quota-marker-'));
+      const marker = join(scratch, 'marker');
+      for (let i = 0; i < 8; i++) held.push(logStore.create());
       await expect(runProgram(process.execPath, ['-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'bad')`], { logOutput: true })).rejects.toThrow('Log quota unavailable');
       await expect(runPowerShell(`'bad'`, { logOutput: true })).rejects.toThrow('Log quota unavailable');
       await new Promise(resolve => setTimeout(resolve, 150));
       expect(() => lstatSync(marker)).toThrow();
-    } finally { for (const item of held) logStore.delete(item.finish().handle); rmSync(marker, { force: true }); }
+    } finally { for (const item of held) logStore.delete(item.finish().handle); if (scratch) rmSync(scratch, { recursive: true, force: true }); }
   });
   it('does not launch on injected log-create failure', async () => {
-    const marker = join(process.env.TMPDIR!, `io-marker-${process.pid}`);
-    const spy = vi.spyOn(logStore, 'create').mockImplementation(() => { throw Error('synthetic IO failure'); });
+    let scratch: string | undefined;
+    let spy: ReturnType<typeof vi.spyOn> | undefined;
     try {
+      scratch = mkdtempSync(join(scratchRoot(), 'io-marker-'));
+      const marker = join(scratch, 'marker');
+      spy = vi.spyOn(logStore, 'create').mockImplementation(() => { throw Error('synthetic IO failure'); });
       await expect(runProgram(process.execPath, ['-e', `require('fs').writeFileSync(${JSON.stringify(marker)}, 'bad')`], { logOutput: true })).rejects.toThrow('synthetic IO failure');
       await new Promise(resolve => setTimeout(resolve, 150));
       expect(() => lstatSync(marker)).toThrow();
-    } finally { spy.mockRestore(); rmSync(marker, { force: true }); }
+    } finally { spy?.mockRestore(); if (scratch) rmSync(scratch, { recursive: true, force: true }); }
+  });
+  it('releases partial quota reservations when fixture setup fails', () => {
+    const held: ReturnType<typeof logStore.create>[] = [];
+    const create = logStore.create;
+    let calls = 0;
+    const spy = vi.spyOn(logStore, 'create').mockImplementation(() => {
+      if (++calls === 4) throw Error('synthetic setup failure');
+      return create();
+    });
+    try {
+      expect(() => { for (let i = 0; i < 8; i++) held.push(logStore.create()); }).toThrow('synthetic setup failure');
+      expect(held).toHaveLength(3);
+    } finally {
+      spy.mockRestore();
+      for (const item of held) logStore.delete(item.finish().handle);
+    }
+    const fullQuota: ReturnType<typeof logStore.create>[] = [];
+    try {
+      for (let i = 0; i < 8; i++) fullQuota.push(logStore.create());
+      expect(() => logStore.create()).toThrow('Log quota unavailable');
+    }
+    finally { for (const item of fullQuota) logStore.delete(item.finish().handle); }
   });
   it('does not write through a deleted active descriptor or claim completeness', () => {
     const active = logStore.create(20);
@@ -79,7 +111,7 @@ describe('opt-in output logs', () => {
   });
   it.skipIf(process.platform !== 'win32')('protects the fresh directory with a private Windows ACL', async () => {
     const r = await runProgram(process.execPath, ['-e', 'process.stdout.write("secret")'], { logOutput: true });
-    const parent = process.env.POWERSHELL_MCP_LOG_PARENT ?? process.env.TMPDIR ?? join(process.env.LOCALAPPDATA!, 'Temp');
+    const parent = logParent();
     const dirs = readdirSync(parent).filter(x => x.startsWith('powershell-mcp-log-'));
     const own = dirs.find(x => readdirSync(join(parent, x)).includes(`${r.log!.handle}.out`));
     expect(own).toBeTruthy();
