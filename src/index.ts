@@ -181,16 +181,17 @@ const sftpAuth = {
   password: z.string().optional().describe("Password auth (used if no key)."),
     credentialRef: z.string().optional().describe("Operator-provisioned scoped credential reference, exclusive with raw auth."),
   timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 120000)."),
+  staged: z.boolean().optional().describe("Opt-in verified staging. Upload fails closed where atomic no-clobber is unsupported; download uses SHA-256 readback and atomic no-clobber hard link."),
 };
 
 server.registerTool(
   "sftp_upload",
   { description: "Upload a local file to a remote host over SFTP, in-process (ssh2 â€” no scp.exe, no WSL, headless). Use to deploy scripts/configs to Linux hosts.", outputSchema: resultShape, inputSchema: { localPath: z.string().describe("Local file path on this Windows host."),
     remotePath: z.string().describe("Destination path on the remote host."), ...sftpAuth } },
-  async ({ localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, credentialRef, hostKeyPins, timeoutMs }) => {
+  async ({ localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, credentialRef, hostKeyPins, timeoutMs, staged }) => {
     incrementTool("sftp_upload");
     const auth = await resolveCredential({ credentialRef, transport: "sftp", host, port: port ?? 22, principal: username, privateKeyPath, passphrase, password }, configuredProvider());
-    const o = { direction: "upload" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, ...auth, hostKeyPins, knownHostsPath: process.env.POWERSHELL_MCP_KNOWN_HOSTS, timeoutMs };
+    const o = { direction: "upload" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, ...auth, hostKeyPins, knownHostsPath: process.env.POWERSHELL_MCP_KNOWN_HOSTS, timeoutMs, staged };
     const r = await runSftp(o);
     const safe = credentialRef ? sanitizeCredentialResult(r, auth) : r;
     return toolResult(fromSftp(safe, `${username}@${host}:${port ?? 22}:${remotePath}`, "upload"), formatSftp(o, safe));
@@ -201,10 +202,10 @@ server.registerTool(
   "sftp_download",
   { description: "Download a file from a remote host to this Windows host over SFTP, in-process (ssh2 â€” no scp.exe, no WSL, headless).", outputSchema: resultShape, inputSchema: { remotePath: z.string().describe("Source path on the remote host."),
     localPath: z.string().describe("Destination path on this Windows host."), ...sftpAuth } },
-  async ({ remotePath, localPath, host, username, port, privateKeyPath, passphrase, password, credentialRef, hostKeyPins, timeoutMs }) => {
+  async ({ remotePath, localPath, host, username, port, privateKeyPath, passphrase, password, credentialRef, hostKeyPins, timeoutMs, staged }) => {
     incrementTool("sftp_download");
     const auth = await resolveCredential({ credentialRef, transport: "sftp", host, port: port ?? 22, principal: username, privateKeyPath, passphrase, password }, configuredProvider());
-    const o = { direction: "download" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, ...auth, hostKeyPins, knownHostsPath: process.env.POWERSHELL_MCP_KNOWN_HOSTS, timeoutMs };
+    const o = { direction: "download" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, ...auth, hostKeyPins, knownHostsPath: process.env.POWERSHELL_MCP_KNOWN_HOSTS, timeoutMs, staged };
     const r = await runSftp(o);
     const safe = credentialRef ? sanitizeCredentialResult(r, auth) : r;
     return toolResult(fromSftp(safe, `${username}@${host}:${port ?? 22}:${remotePath}`, "download"), formatSftp(o, safe));
