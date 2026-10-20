@@ -24,6 +24,7 @@ describe('durable local executions', () => {
     const base = join(root, '..');
     const entry = join(base, 'server.mjs');
     const moduleUrl = new URL('../src/execution-lifecycle.ts', import.meta.url).href;
+    if (process.platform !== 'win32') fs.mkdirSync(root, { mode: 0o700 });
     writeFileSync(entry, `import { ExecutionStore } from ${JSON.stringify(moduleUrl)};
 import { writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -187,7 +188,7 @@ setInterval(()=>{},1000);`);
     const root = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), 'execution-acl-'));
     try {
       const before = spawnSync('icacls.exe', [root], { encoding: 'utf8' }).stdout;
-      expect(() => new ExecutionStore(root)).toThrow(/ACL unsafe/i);
+      expect(() => new ExecutionStore(root)).toThrow(/ACL unsafe: \{.*"current":.*"owner":.*"rules":/i);
       expect(spawnSync('icacls.exe', [root], { encoding: 'utf8' }).stdout).toBe(before);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });

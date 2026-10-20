@@ -43,9 +43,12 @@ function verifyRoot(path: string) {
   }
   const system = process.env.SystemRoot ?? 'C:\\Windows';
   const quoted = path.replace(/'/g, "''");
-  const command = `$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $a=Get-Acl -LiteralPath '${quoted}'; $owner=$a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; if ($owner -ne $sid -or -not $a.AreAccessRulesProtected) { exit 2 }; foreach ($rule in $a.Access) { $identity=$rule.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value; if ($rule.IsInherited -or $rule.AccessControlType -ne 'Allow' -or ($identity -ne $sid -and $identity -ne 'S-1-5-18')) { exit 3 } }`;
-  try { execFileSync(join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, stdio: 'ignore' }); }
-  catch { throw Error('Execution store owner or ACL unsafe'); }
+  const command = `$ErrorActionPreference='Stop'; try { $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $a=Get-Acl -LiteralPath '${quoted}'; $owner=$a.GetOwner([Security.Principal.SecurityIdentifier]).Value; $rules=@($a.Access | ForEach-Object { $identity=$_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value; [pscustomobject]@{ sid=$identity; inherited=$_.IsInherited; type=[string]$_.AccessControlType; rights=[string]$_.FileSystemRights } }); $safe=($owner -eq $sid -and $a.AreAccessRulesProtected); foreach($r in $rules) { if($r.inherited -or $r.type -ne 'Allow' -or ($r.sid -ne $sid -and $r.sid -ne 'S-1-5-18')) { $safe=$false } }; if(-not $safe) { [pscustomobject]@{ current=$sid; owner=$owner; protected=$a.AreAccessRulesProtected; rules=$rules } | ConvertTo-Json -Compress -Depth 4; exit 2 } } catch { [pscustomobject]@{ diagnostic='ACL inspection failed'; errorType=$_.Exception.GetType().Name } | ConvertTo-Json -Compress; exit 3 }`;
+  try { execFileSync(join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); }
+  catch (error) {
+    const detail = (error as { stdout?: string }).stdout?.trim().slice(0, 2048);
+    throw Error(`Execution store owner or ACL unsafe${detail ? `: ${detail}` : ''}`);
+  }
 }
 /** Local-only durable records. A new server never adopts or kills a previous server's processes. */
 export class ExecutionStore {
