@@ -51,7 +51,7 @@ describe("built-artifact stdio structured tool contract", () => {
     expect(native.structuredContent?.stdout).toBe("quoted ' 💫 \\|EOF");
     const oversized = await client.callTool({ name: "run_program", arguments: { program: process.execPath, args: ["-e", "process.stdout.write('LAUNCHED')"], stdin: "💫".repeat(300_000) } });
     expect(JSON.stringify(oversized)).not.toContain("LAUNCHED");
-  });
+  }, 12_000); // runtime_capabilities synchronously probes up to two engines at 3s each; allow that plus the subsequent stdio calls.
   it("configured missing executable fails rather than trying installed engines", async () => {
     const data = await check("run_powershell", { script: "Write-Output SHOULD_NOT_RUN" }, "transport_error", true);
     expect(data).toMatchObject({ exitCode: null, stdout: "", detail: { shell: "nonexistent-mcp-shell-15" } });
