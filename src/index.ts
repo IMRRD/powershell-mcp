@@ -15,6 +15,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { logStore } from "./full-logs.js";
 import { executionStore } from "./execution-lifecycle.js";
+import { remoteBatchStore } from "./remote-batch.js";
 import { configuredProvider, resolveCredential, sanitizeCredentialResult } from "./credentials.js";
 import { typedParameters, INPUT_LIMIT } from "./typed-input.js";
 import { capabilities, engineExecutable, detectEngine } from "./capabilities.js";
@@ -228,6 +229,15 @@ server.registerTool(
     return toolResult(fromProcess(r, "program", program), formatResult(r));
   },
 );
+const batchTarget = z.discriminatedUnion('transport', [
+  z.object({ transport: z.literal('ssh'), host: z.string().min(1), username: z.string().min(1), command: z.string().min(1), port: z.number().int().min(1).max(65535).optional(), privateKeyPath: z.string().optional(), passphrase: z.string().optional(), password: z.string().optional(), credentialRef: z.string().optional(), hostKeyPins: z.array(z.string()).optional() }).strict(),
+  z.object({ transport: z.literal('winrm'), host: z.string().min(1), command: z.string().min(1), username: z.string().optional(), password: z.string().optional(), credentialRef: z.string().optional(), useSsl: z.boolean().optional(), authentication: z.enum(['Default','Negotiate','Kerberos','Basic','CredSSP']).optional(), parameters: typedParameters }).strict(),
+]);
+const batchReply = (value: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(value) }] });
+server.registerTool('start_remote_batch', { description: 'Opt-in process-local SSH/WinRM batch; 1–32 explicit targets, up to 8 concurrent, per-target deadline. No discovery, retry or jump routing. Unknown after server restart.', inputSchema: { targets: z.array(batchTarget).min(1).max(32), concurrency: z.number().int().min(1).max(8), timeoutMs: z.number().int().min(1).max(900000) } }, async ({ targets, concurrency, timeoutMs }) => batchReply(remoteBatchStore.status(remoteBatchStore.start({ targets, concurrency, timeoutMs }))));
+server.registerTool('remote_batch_status', { description: 'Read ordered per-target batch records; unavailable after process restart.', inputSchema: { id: z.string().regex(/^[0-9a-f]{48}$/) } }, async ({ id }) => batchReply(remoteBatchStore.status(id) ?? { status: 'unknown', reason: 'Job not in this process; no replay or remote ownership proof' }));
+server.registerTool('cancel_remote_batch', { description: 'Stop dispatch of queued targets; active targets become unknown, not confirmed terminated.', inputSchema: { id: z.string().regex(/^[0-9a-f]{48}$/) } }, async ({ id }) => batchReply(remoteBatchStore.cancel(id) ?? { status: 'unknown', reason: 'Job not in this process' }));
+
 server.registerTool("runtime_capabilities", { description: "Read-only runtime package, protocol, supported and available engines, transports and limits; no identity, environment or secrets.", inputSchema: {} }, async () => {
   const data = capabilities(VERSION);
   return { structuredContent: data, content: [{ type: "text" as const, text: JSON.stringify(data) }] };

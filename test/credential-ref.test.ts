@@ -10,6 +10,10 @@ import type { PsResult } from "../src/powershell.js";
 const secret = "SYNTHETIC-CREDENTIAL-DO-NOT-LEAK";
 const provider: CredentialProvider = { resolve: vi.fn(async () => ({ transport: "ssh", host: "example.invalid", port: 22, principal: "robot", password: secret })) };
 const scope = { transport: "ssh" as const, host: "example.invalid", port: 22, principal: "robot" };
+const provisionBudgetMs = 15_000;
+const readBudgetMs = 10_000; // WindowsProtectedFileProvider child timeout
+const aclBudgetMs = 10_000;
+const setupMarginMs = 5_000;
 
 describe("scoped credential references", () => {
   it("resolves a matching reference into transport authentication", async () => {
@@ -77,19 +81,28 @@ describe("scoped credential references", () => {
       expect(await resolveCredential({ ...scope, credentialRef: "synthetic-test" }, diskProvider)).toEqual({ password: secret });
       await expect(resolveCredential({ ...scope, host: "different.invalid", credentialRef: "synthetic-test" }, diskProvider)).rejects.toThrow(/scope/i);
     } finally { rmSync(parent, { recursive: true, force: true }); }
-  }, 30000);
+  }, 2 * provisionBudgetMs + 3 * readBudgetMs + setupMarginMs);
   it.skipIf(process.platform !== "win32")("refuses an inherited or broadly writable existing store without altering its ACL", async () => {
     const directory = mkdtempSync(join(tmpdir(), "mcp-unsafe-"));
     try {
       const script = join(process.cwd(), "scripts", "provision-credential.ps1");
-      const before = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-Acl -LiteralPath $args[0]).Sddl", directory], { encoding: "utf8" }).stdout.trim();
+      const snapshotAcl = () => {
+        const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "$ErrorActionPreference='Stop'; (Get-Acl -LiteralPath ([Console]::In.ReadToEnd())).Sddl"],
+          { input: directory, encoding: "utf8", timeout: aclBudgetMs, windowsHide: true });
+        expect(result.error).toBeUndefined();
+        expect(result.status, result.stderr).toBe(0);
+        const sddl = result.stdout.trim();
+        expect(sddl).toMatch(/^O:[^\s]+G:[^\s]+D:/);
+        return sddl;
+      };
+      const before = snapshotAcl();
       const child = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-File", script, "-Directory", directory, "-Reference", "synthetic-test"], { input: JSON.stringify({ ...scope, password: secret }), encoding: "utf8", timeout: 15000 });
       expect(child.status).not.toBe(0);
-      const after = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", "(Get-Acl -LiteralPath $args[0]).Sddl", directory], { encoding: "utf8" }).stdout.trim();
+      const after = snapshotAcl();
       expect(after).toBe(before);
       await expect(resolveCredential({ ...scope, credentialRef: "synthetic-test" }, new WindowsProtectedFileProvider(directory))).rejects.toThrow(/unavailable/i);
     } finally { rmSync(directory, { recursive: true, force: true }); }
-  });
+  }, 2 * aclBudgetMs + provisionBudgetMs + readBudgetMs + setupMarginMs);
   it.skipIf(process.platform !== "win32")("rejects a scratch junction root and pins its ancestry against replacement", async () => {
     const parent = mkdtempSync(join(tmpdir(), "mcp-junction-"));
     const destination = join(parent, "destination");
@@ -109,7 +122,7 @@ describe("scoped credential references", () => {
       const pinned = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: 15000 });
       expect(pinned.status, pinned.stderr).toBe(0);
     } finally { rmSync(parent, { recursive: true, force: true }); }
-  }, 30000);
+  }, 3 * provisionBudgetMs + readBudgetMs + setupMarginMs);
   it("preserves legacy modes without provider", async () => {
     expect(await resolveCredential({ ...scope, privateKeyPath: "key", passphrase: "raw" }, provider)).toEqual({});
     expect(await resolveCredential({ transport: "winrm", host: "example.invalid", port: 5985, principal: "", }, provider)).toEqual({});

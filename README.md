@@ -204,6 +204,14 @@ On startup the server sends a one-time ping (host id, version, OS, timestamp) an
 
 The collector under [`collector/`](collector/) is a standalone Node.js service (JSONL append, systemd unit, nginx snippet, `deploy.sh`) deployed separately.
 
+## Opt-in remote batches (first #23 slice)
+
+`start_remote_batch` accepts an explicit `targets` list (1–32), `concurrency` (1–8), and a per-target full-invocation `timeoutMs` (1–900000). Admission is capped at 32 retained jobs, 256 retained targets, 8 genuinely unsettled executions, and 1 MiB of request data per job; retained results have a 2 MiB aggregate cap. Completed jobs expire after 60 seconds (lazy cleanup on the next batch call); expired IDs return unknown. A deadline or cancellation marks an active invocation unknown but does not prove remote termination or release its live execution slot until the adapter actually settles. Queued cancelled targets never dispatch; no live work is evicted to admit new requests. Each target chooses `transport: "ssh"` or `"winrm"`, `host`, `command`, and the same transport-specific credential/trust inputs as `ssh_exec` or `winrm_exec`. It returns an opaque process-local ID and an ordered record for every supplied target. `remote_batch_status({id})` reads the current snapshot; `cancel_remote_batch({id})` prevents queued dispatch. Completed records are independent: one unreachable host does not conceal other outcomes. SSH host trust and credential-reference scope are checked by the existing adapters. Outputs are bounded to 64 KiB per stream and exact known credential values are redacted; commands may themselves print sensitive material, so treat results as sensitive.
+
+Cancellation **does not prove remote termination**: queued targets report `cancelled`, active targets report `unknown` and may continue remotely; their late results do not overwrite the unknown record. Adapter timeouts bound the local wait, not remote side effects. Jobs exist only in this server process; after restart the ID returns `unknown`, without replay or ownership inference. No inventory discovery, automatic retries, agent forwarding, or jump routing is provided. **Jump routing remains a separate next slice; this does not close #23.**
+
+
+
 ## Install
 
 The canonical npm package is [**`@imrrd/powershell-mcp`**](https://www.npmjs.com/package/@imrrd/powershell-mcp).
