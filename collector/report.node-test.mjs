@@ -1,0 +1,93 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const script = fileURLToPath(new URL('./report.js', import.meta.url));
+function fixture(lines, config = { internalHostIds: ['internal-id'], testHostIds: ['test-id'] }, args = []) {
+  const dir = mkdtempSync(join(tmpdir(), 'adoption-fixture-'));
+  try {
+    const data = join(dir, 'events.jsonl'), ids = join(dir, 'private.json');
+    writeFileSync(data, lines.map(x => JSON.stringify(x)).join('\n') + '\n');
+    writeFileSync(ids, JSON.stringify(config));
+    return spawnSync(process.execPath, [script, '--file', data, '--classification', ids, '--from', '2026-10-01T00:00:00.000Z', '--to', '2026-10-08T00:00:00.000Z', ...args], { encoding: 'utf8', env: { ...process.env, POWERSHELL_MCP_NO_TELEMETRY: '1' } });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+const event = (hostId, eventName, ts, extra = {}) => ({ hostId, event: eventName, ts, version: '0.5.3', os: 'win32', ...extra });
+test('offline report deduplicates hosts and segregates internal, test and unknown origin', () => {
+  const result = fixture([
+    event('internal-id', 'startup', '2026-10-01T00:00:00.000Z'),
+    event('internal-id', 'tool_counts', '2026-10-02T00:00:00.000Z', { counts: { run_program: 2 } }),
+    event('test-id', 'startup', '2026-10-02T00:00:00.000Z'),
+    event('unknown-secret', 'startup', '2026-10-03T00:00:00.000Z'),
+    event('unknown-secret', 'tool_counts', '2026-10-03T00:00:00.000Z', { counts: { ssh_exec: 3 } }),
+    event('outside-secret', 'startup', '2026-10-08T00:00:00.000Z'),
+  ]);
+  assert.equal(result.status, 0, result.stderr);
+  const r = JSON.parse(result.stdout);
+  assert.deepEqual(r.groups.internal, { observedInstallations: 1, activeInstallations: 1, startupOnlyInstallations: 0, versions: { '0.5.3': 1 }, os: { win32: 1 }, toolCounts: { run_program: 2 } });
+  assert.equal(r.groups.test.observedInstallations, 1);
+  assert.equal(r.groups.unknownOrigin.observedInstallations, 1);
+  assert.equal(r.groups.unknownOrigin.activeInstallations, 1);
+  assert.equal(r.groups.unknownOrigin.toolCounts.ssh_exec, 3);
+  assert.equal(r.groups.externalUsers, undefined);
+  assert.doesNotMatch(result.stdout + result.stderr, /internal-id|test-id|unknown-secret|outside-secret/);
+});
+test('ambiguous classification and invalid windows fail closed', () => {
+  const row = event('private-id', 'startup', '2026-10-01T00:00:00.000Z');
+  for (const [classification, args] of [
+    [{ internalHostIds: ['private-id'], testHostIds: ['private-id'] }, []],
+    [{ internalHostIds: [], testHostIds: [] }, ['--unexpected', 'value']],
+    [{ internalHostIds: [], testHostIds: [] }, ['--to', '2026-10-09T00:00:00.000Z']],
+  ]) {
+    const result = fixture([row], classification, args);
+    assert.notEqual(result.status, 0);
+    assert.equal(result.stdout, '');
+    assert.doesNotMatch(result.stderr, /private-id/);
+  }
+});
+
+test('malformed input fails closed without partial report or leaking input', () => {
+  const result = fixture([event('secret-identifier', 'startup', '2026-10-01T00:00:00.000Z'), { hostId: 'secret-identifier', event: 'tool_counts', ts: 'bad', counts: { x: 1 } }]);
+  assert.notEqual(result.status, 0);
+  assert.equal(result.stdout, '');
+  assert.doesNotMatch(result.stderr, /secret-identifier/);
+});
+test('repeat deliveries deduplicate identities but retain each tool-count record', () => {
+  const row = event('unknown-secret', 'tool_counts', '2026-10-03T00:00:00.000Z', { counts: { ssh_exec: 3 } });
+  const result = fixture([row, row]);
+  assert.equal(result.status, 0, result.stderr);
+  const group = JSON.parse(result.stdout).groups.unknownOrigin;
+  assert.equal(group.observedInstallations, 1);
+  assert.equal(group.toolCounts.ssh_exec, 6);
+});
+test('untrusted version labels never appear in output while canonical versions aggregate', () => {
+  const secret = 'privateCustomerToken12345';
+  const result = fixture([
+    event('one', 'startup', '2026-10-01T00:00:00.000Z', { version: `0.5.3-${secret}` }),
+    event('two', 'startup', '2026-10-01T00:00:00.000Z', { version: '0.5.3' }),
+    event('three', 'startup', '2026-10-01T00:00:00.000Z', { version: 'untrusted label' }),
+  ]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).groups.unknownOrigin.versions, { other: 2, '0.5.3': 1 });
+  assert.doesNotMatch(result.stdout + result.stderr, /privateCustomerToken12345|untrusted label/);
+});
+test('earliest-event version also collapses untrusted labels and invalid category keys fail closed', () => {
+  const secret = 'privateCustomerToken12345';
+  const result = fixture([
+    event('one', 'startup', '2026-10-03T00:00:00.000Z', { version: '0.5.3' }),
+    event('one', 'startup', '2026-10-01T00:00:00.000Z', { version: `0.5.3-${secret}` }),
+  ]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout).groups.unknownOrigin.versions, { other: 1 });
+  assert.doesNotMatch(result.stdout + result.stderr, /privateCustomerToken12345/);
+  for (const bad of [{ os: secret }, { event: secret }, { counts: { [secret]: 1 }, event: 'tool_counts' }]) {
+    const failed = fixture([event('one', 'startup', '2026-10-01T00:00:00.000Z', bad)]);
+    assert.notEqual(failed.status, 0);
+    assert.equal(failed.stdout, '');
+    assert.doesNotMatch(failed.stderr, /privateCustomerToken12345/);
+  }
+});
