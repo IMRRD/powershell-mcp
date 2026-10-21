@@ -15,7 +15,7 @@ test('dispatch never performs synchronous filesystem work on the main thread', (
       startupPing('0.6.0'); incrementTool('run_program'); flushCounters('0.6.0'); startFlushTimer('0.6.0');
       fs.mkdirSync = original; syncBuiltinESMExports();
       while (telemetryStatus().outstanding) await new Promise(r => setTimeout(r, 10));`;
-    const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, USERPROFILE: home, HOME: home, POWERSHELL_MCP_TELEMETRY_URL: 'http://127.0.0.1:1/telemetry' }, cwd: process.cwd(), timeout: 30000 });
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, USERPROFILE: home, HOME: home, POWERSHELL_MCP_NO_TELEMETRY: '0', POWERSHELL_MCP_TELEMETRY_URL: 'http://127.0.0.1:1/telemetry' }, cwd: process.cwd(), timeout: 30000 });
     expect(r.status, r.stderr.toString()).toBe(0);
   } finally { rmSync(home, { recursive: true, force: true }); }
 }, 30000);
@@ -27,7 +27,7 @@ test('worker submission is bounded and accounts for backpressure', () => {
       for (let i = 0; i < 10000; i++) startupPing('0.6.0');
       const s = telemetryStatus();
       if (s.outstanding > 128 || s.dropped < 9000) process.exitCode = 1;`;
-    const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, USERPROFILE: home, HOME: home, POWERSHELL_MCP_TELEMETRY_URL: 'http://127.0.0.1:1/telemetry' }, cwd: process.cwd(), timeout: 30000 });
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, USERPROFILE: home, HOME: home, POWERSHELL_MCP_NO_TELEMETRY: '0', POWERSHELL_MCP_TELEMETRY_URL: 'http://127.0.0.1:1/telemetry' }, cwd: process.cwd(), timeout: 30000 });
     expect(r.status, r.stderr.toString()).toBe(0);
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
@@ -35,7 +35,7 @@ test('startup survives a real process restart with the same event identity', () 
   const home = mkdtempSync(join(tmpdir(), 'telemetry-restart-'));
   const script = `import {startupPing} from './dist/telemetry.js'; startupPing('0.6.0');`;
   try {
-    const env = { ...process.env, USERPROFILE: home, HOME: home, POWERSHELL_MCP_TELEMETRY_URL: 'http://127.0.0.1:1/telemetry' };
+    const env = { ...process.env, USERPROFILE: home, HOME: home, POWERSHELL_MCP_NO_TELEMETRY: '0', POWERSHELL_MCP_TELEMETRY_URL: 'http://127.0.0.1:1/telemetry' };
     for (let i = 0; i < 2; i++) {
       const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { env, cwd: process.cwd(), timeout: 30000 });
       expect(r.status).toBe(0);

@@ -5,7 +5,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, mkdirSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const script = `import {startupPing,telemetryStatus} from './dist/telemetry.js'; startupPing('0.6.0'); while(telemetryStatus().outstanding) await new Promise(r=>setTimeout(r,20));`;
-function env(home: string) { return { ...process.env, USERPROFILE: home, HOME: home, POWERSHELL_MCP_TELEMETRY_URL: 'http://127.0.0.1:1/telemetry' }; }
+function env(home: string) { return { ...process.env, USERPROFILE: home, HOME: home, POWERSHELL_MCP_NO_TELEMETRY: '0', POWERSHELL_MCP_TELEMETRY_URL: 'http://127.0.0.1:1/telemetry' }; }
 test('concurrent producers reserve separate slots without overwriting data', async () => {
   const home = mkdtempSync(join(tmpdir(), 'telemetry-concurrent-'));
   try {
