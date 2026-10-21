@@ -36,15 +36,20 @@ def aggregates(connection, start, end):
         axes = cur.fetchall()
         cur.execute('SELECT event_time_quality, receipt_time_quality, count(*) FROM dashboard_events WHERE received_at >= %s AND received_at < %s GROUP BY event_time_quality,receipt_time_quality', (start, end))
         quality = cur.fetchall()
+        # Unwindowable receipts cannot be assigned to this or any other week.
+        cur.execute("SELECT count(*) FROM dashboard_events WHERE received_at IS NULL OR receipt_time_quality IS DISTINCT FROM 'valid'")
+        unknown_receipt_count = cur.fetchone()[0]
         # Receipt coverage is tested across the entire closed week, not just at current time.
         cur.execute("SELECT date_trunc('hour', received_at), count(*) FROM dashboard_events WHERE received_at >= %s AND received_at < %s GROUP BY 1 ORDER BY 1", (start, end))
         receipts = cur.fetchall()
         cur.execute("SELECT last_import FROM delivery_health_utc(%s,%s,interval '2 hours')", (end, start))
         imported = cur.fetchone()[0]
-    return dict(adoption=adoption, events=events, tools=tools, axes=axes, quality=quality, receipts=receipts, imported=imported)
+    return dict(adoption=adoption, events=events, tools=tools, axes=axes, quality=quality, unknown_receipt_count=unknown_receipt_count, receipts=receipts, imported=imported)
 
 
 def render(data, start, end, now):
+    if data['unknown_receipt_count'] is None or data['unknown_receipt_count'] > 0:
+        raise ValueError('unassignable receipt time exists (all-history); weekly activity cannot be certified')
     if not data['imported'] or now - data['imported'] > dt.timedelta(hours=2):
         raise ValueError('missing or stale importer checkpoint')
     if not data['receipts']:
@@ -53,7 +58,7 @@ def render(data, start, end, now):
     if any(start + dt.timedelta(hours=i) not in hours for i in range(168)):
         raise ValueError('partial weekly receipt coverage')
     if any(a != 'valid' or b != 'valid' for a, b, n in data['quality'] if n):
-        raise ValueError('timestamp quality is partial (all-history)')
+        raise ValueError('timestamp quality is partial (selected receipt week)')
     lines = [f'Private telemetry digest [{start.isoformat()}, {end.isoformat()}) UTC',
              'Installation IDs are proxies, not people. Unknown origin is not external users.',
              'Receipts cover each hour; this does not prove upstream delivery of every event.',

@@ -17,7 +17,7 @@ def fixture():
     return dict(adoption=[('unknown_origin', 12, 11, 0)], events=[('unknown_origin', 'startup', 12)],
                 tools=[('unknown_origin', 'counts', 'ssh_exec', 13), ('unknown_origin', 'metrics', 'ssh_exec', 13)],
                 axes=[('unknown_origin', 'ssh_exec', 'outcomes', 'success', 13)],
-                quality=[('valid', 'valid', 2)],
+                quality=[('valid', 'valid', 2)], unknown_receipt_count=0,
                 receipts=[(START + dt.timedelta(hours=i), 1) for i in range(168)],
                 imported=NOW - dt.timedelta(minutes=15))
 
@@ -44,17 +44,49 @@ class Conn:
     def __exit__(self, *a): pass
 
 
+def result_rows(f):
+    return [f['adoption'], f['events'], f['tools'], f['axes'], f['quality'],
+            [(f['unknown_receipt_count'],)], f['receipts'], [(f['imported'],)]]
+
 class DigestTests(unittest.TestCase):
     def test_week_boundaries(self):
         self.assertEqual((START.isoformat(), END.isoformat()), ('2026-10-12T00:00:00+00:00', '2026-10-19T00:00:00+00:00'))
     def test_aggregate_grants_only_and_parameters(self):
         f = fixture()
-        conn = Conn([f['adoption'], f['events'], f['tools'], f['axes'], f['quality'], f['receipts'], [(f['imported'],)]])
+        conn = Conn(result_rows(f))
         self.assertEqual(w.aggregates(conn, START, END)['adoption'], f['adoption'])
         self.assertTrue(all('telemetry_event ' not in s and 'telemetry_checkpoint ' not in s for s in conn.cur.sql))
         self.assertEqual(conn.cur.sql[0], 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
         self.assertTrue(all('%s' in s for s in conn.cur.sql[1:5]))
         self.assertIn('received_at >= %s AND received_at < %s', conn.cur.sql[5])
+    def test_unknown_receipt_query_and_no_send(self):
+        f = fixture()
+        f['unknown_receipt_count'] = 1
+        conn = Conn(result_rows(f))
+        with self.assertRaisesRegex(ValueError, 'unassignable receipt'):
+            w.render(w.aggregates(conn, START, END), START, END, NOW)
+        sql = ' '.join(conn.cur.sql)
+        self.assertIn('received_at IS NULL', sql)
+        self.assertIn("receipt_time_quality IS DISTINCT FROM 'valid'", sql)
+        self.assertIn('dashboard_events', sql)
+        self.assertNotIn('event_at IS NULL', sql)
+        self.assertEqual(conn.cur.sql[0], 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+        self.assertNotIn('WHERE received_at >=', conn.cur.sql[6])
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / 'config.json'
+            config.write_text(json.dumps(dict(enabled=True, recipient='private@example.invalid', approved_recipients=['private@example.invalid'], host='localhost', port=587, sender='sender@example.invalid', username='sender')))
+            state = Path(tmp) / 'state'
+            with self.assertRaisesRegex(ValueError, 'unassignable receipt'):
+                w.main(['--config', str(config), '--state-dir', str(state)], NOW,
+                       lambda: Conn(result_rows(f)), lambda *args: self.fail('sent'))
+            self.assertFalse(state.exists())
+
+    def test_missing_unknown_receipt_field_fails_closed(self):
+        f = fixture()
+        del f['unknown_receipt_count']
+        with self.assertRaises((KeyError, ValueError)):
+            w.render(f, START, END, NOW)
+
     def test_render_separates_streams_and_proxies(self):
         body = w.render(fixture(), START, END, NOW)
         self.assertIn('Installation IDs are proxies, not people', body)
@@ -73,7 +105,7 @@ class DigestTests(unittest.TestCase):
                 with self.assertRaises(ValueError): w.render(f, START, END, NOW)
     def test_disabled_preview_delivery_and_ambiguous_replay(self):
         f = fixture()
-        def connect(): return Conn([f['adoption'], f['events'], f['tools'], f['axes'], f['quality'], f['receipts'], [(f['imported'],)]])
+        def connect(): return Conn(result_rows(f))
         sent = []
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / 'config.json'
@@ -113,13 +145,13 @@ class DigestTests(unittest.TestCase):
 
     def test_snapshot_is_established_before_first_query(self):
         f = fixture()
-        conn = Conn([f['adoption'], f['events'], f['tools'], f['axes'], f['quality'], f['receipts'], [(f['imported'],)]])
+        conn = Conn(result_rows(f))
         w.aggregates(conn, START, END)
         self.assertEqual(conn.cur.sql[0], 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
 
     def test_unapproved_or_malformed_headers_leave_no_intent(self):
         f = fixture()
-        def connect(): return Conn([f['adoption'], f['events'], f['tools'], f['axes'], f['quality'], f['receipts'], [(f['imported'],)]])
+        def connect(): return Conn(result_rows(f))
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / 'config.json'
             state = Path(tmp) / 'state'
@@ -132,7 +164,7 @@ class DigestTests(unittest.TestCase):
 
     def test_missing_recipient(self):
         f = fixture()
-        def connect(): return Conn([f['adoption'], f['events'], f['tools'], f['axes'], f['quality'], f['receipts'], [(f['imported'],)]])
+        def connect(): return Conn(result_rows(f))
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / 'config.json'
             config.write_text(json.dumps({'enabled': True}))
