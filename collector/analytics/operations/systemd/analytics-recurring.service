@@ -2,6 +2,7 @@
 Description=Private analytics collector recurrence (reviewed, manual enable only)
 AssertPathExists=/opt/analytics-private-data/telemetry.jsonl
 AssertPathExists=/etc/analytics-recurring/recurrence.conf
+AssertPathExists=/opt/analytics-reviewed/venv/bin/python
 After=network-online.target
 Wants=network-online.target
 
@@ -11,7 +12,7 @@ User=analytics-import
 Group=analytics-import
 EnvironmentFile=/etc/analytics-recurring/recurrence.conf
 WorkingDirectory=/opt/analytics-reviewed/operations
-ExecStart=/usr/bin/python3 /opt/analytics-reviewed/operations/recurring_import.py \
+ExecStart=/opt/analytics-reviewed/venv/bin/python /opt/analytics-reviewed/operations/recurring_import.py \
   --source /opt/analytics-private-data/telemetry.jsonl \
   --state /opt/analytics-private-data/collector-identity.json \
   --receipt /opt/analytics-private-data/recurrence-receipt.json \

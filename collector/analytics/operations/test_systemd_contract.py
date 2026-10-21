@@ -10,7 +10,9 @@ class SystemdContractTests(unittest.TestCase):
         service = (HERE / 'systemd' / 'analytics-recurring.service').read_text()
         timer = (HERE / 'systemd' / 'analytics-recurring.timer').read_text()
         self.assertIn('EnvironmentFile=/etc/analytics-recurring/recurrence.conf', service)
-        self.assertIn('ExecStart=/usr/bin/python3 /opt/analytics-reviewed/operations/recurring_import.py', service)
+        self.assertIn('ExecStart=/opt/analytics-reviewed/venv/bin/python /opt/analytics-reviewed/operations/recurring_import.py', service)
+        self.assertIn('AssertPathExists=/opt/analytics-reviewed/venv/bin/python', service)
+        self.assertIn('sys.executable, args.importer', (HERE / 'recurring_import.py').read_text())
         from recurring_import import main
         import ast
         source = ast.parse((HERE / 'recurring_import.py').read_text())
