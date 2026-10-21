@@ -24,8 +24,8 @@ def closed_week(now):
 
 def aggregates(connection, start, end):
     # Only dashboard grants: no raw event tables, identifiers, or payloads.
-    connection.read_only = True
     with connection.cursor() as cur:
+        cur.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
         cur.execute('SELECT origin, observed_installations, active_installations, startup_only_installations FROM adoption_utc(%s,%s)', (start, end))
         adoption = cur.fetchall()
         cur.execute('SELECT origin, event, count(*) FROM dashboard_events WHERE event_at >= %s AND event_at < %s GROUP BY origin,event', (start, end))
@@ -34,7 +34,7 @@ def aggregates(connection, start, end):
         tools = cur.fetchall()
         cur.execute('SELECT origin,tool,axis,bucket,sum(calls) FROM dashboard_metric_axes WHERE event_at >= %s AND event_at < %s GROUP BY origin,tool,axis,bucket', (start, end))
         axes = cur.fetchall()
-        cur.execute('SELECT event_time_quality, receipt_time_quality, count(*) FROM dashboard_events GROUP BY event_time_quality,receipt_time_quality')
+        cur.execute('SELECT event_time_quality, receipt_time_quality, count(*) FROM dashboard_events WHERE received_at >= %s AND received_at < %s GROUP BY event_time_quality,receipt_time_quality', (start, end))
         quality = cur.fetchall()
         # Receipt coverage is tested across the entire closed week, not just at current time.
         cur.execute("SELECT date_trunc('hour', received_at), count(*) FROM dashboard_events WHERE received_at >= %s AND received_at < %s GROUP BY 1 ORDER BY 1", (start, end))
@@ -58,27 +58,35 @@ def render(data, start, end, now):
              'Installation IDs are proxies, not people. Unknown origin is not external users.',
              'Receipts cover each hour; this does not prove upstream delivery of every event.',
              'Counts and metrics are overlapping streams, never added into unique calls.']
+    # Fail closed on any small cell: release no numeric marginals or complementary
+    # totals, including installation proxies and overlapping metric axes.
+    small = any(0 < n < 10 for key in ('adoption', 'events', 'tools', 'axes')
+                for row in data[key] for n in (row[1:] if key == 'adoption' else row[-1:]))
     seen = set()
     for origin, observed, active, startup in data['adoption']:
         if origin not in ORIGINS or origin in seen:
             raise ValueError('unexpected adoption origin')
         seen.add(origin)
-        lines.append(f'{origin}: observed installations={observed}; active={active}; startup-only={startup}')
-    for origin in ORIGINS:
-        if origin not in seen:
-            lines.append(f'{origin}: no observed installations in window (not a user count)')
     for origin, event, n in data['events']:
         if origin not in ORIGINS or event not in ('startup', 'tool_counts', 'tool_metrics'):
             raise ValueError('unexpected event dimension')
-        lines.append(f'event {origin}/{event}: {n}')
     for origin, stream, tool, n in data['tools']:
         if origin not in ORIGINS or stream not in ('counts', 'metrics') or not SAFE.fullmatch(tool):
             raise ValueError('unexpected tool dimension')
-        lines.append(f'{stream} {origin}/{tool}: {n}')
     for origin, tool, axis, bucket, n in data['axes']:
         if origin not in ORIGINS or not SAFE.fullmatch(tool) or axis not in ('outcomes', 'durations', 'features') or not SAFE.fullmatch(bucket):
             raise ValueError('unexpected metric dimension')
-        lines.append(f'metric {origin}/{tool}/{axis}/{bucket}: {n}')
+    if small:
+        lines.append('Detailed adoption, event, tool and axis counts withheld: small cells or complementary disclosure risk; no zero is implied.')
+    else:
+        for origin, observed, active, startup in data['adoption']:
+            lines.append(f'{origin}: observed installations={observed}; active={active}; startup-only={startup}')
+        for origin, event, n in data['events']:
+            lines.append(f'event {origin}/{event}: {n}')
+        for origin, stream, tool, n in data['tools']:
+            lines.append(f'{stream} {origin}/{tool}: {n}')
+        for origin, tool, axis, bucket, n in data['axes']:
+            lines.append(f'metric {origin}/{tool}/{axis}/{bucket}: {n}')
     lines.append(f'Import checkpoint: {data["imported"].isoformat()}; weekly hourly receipt coverage: 168/168')
     lines.append('Retention/capacity: no automated age deletion; verify protected JSONL, database/WAL/index growth and restore-tested backups before archive decisions.')
     return '\n'.join(lines) + '\n'
@@ -114,10 +122,23 @@ def main(argv=None, clock=None, connect=None, deliver=submit):
     if not config.get('enabled', False):
         raise ValueError('production delivery disabled pending review')
     recipient = config.get('recipient')
-    if not recipient or not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', recipient):
+    approved = config.get('approved_recipients')
+    address = re.compile(r'[A-Za-z0-9.!#$%&\'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\Z')
+    if not isinstance(approved, list) or not approved or not all(isinstance(a, str) and address.fullmatch(a) for a in approved):
         raise ValueError('approved private recipient required')
-    if not all(config.get(k) for k in ('host', 'port', 'sender', 'username')):
+    if not isinstance(recipient, str) or not address.fullmatch(recipient) or recipient not in approved:
+        raise ValueError('approved private recipient required')
+    sender = config.get('sender')
+    if not isinstance(sender, str) or not address.fullmatch(sender):
+        raise ValueError('invalid sender header')
+    if not all(config.get(k) for k in ('host', 'port', 'username')):
         raise ValueError('mail transport configuration incomplete')
+    msg = EmailMessage()
+    msg['From'] = sender
+    msg['To'] = recipient
+    msg['Subject'] = f'Private telemetry weekly digest {start.date()} to {end.date()} UTC'
+    msg.set_content(body)
+    msg.as_bytes()  # Finish and validate serialization before recording any intent.
     state = Path(args.state_dir)
     state.mkdir(mode=0o700, parents=True, exist_ok=True)
     state.chmod(0o700)
@@ -129,11 +150,6 @@ def main(argv=None, clock=None, connect=None, deliver=submit):
         f.write('submission attempted; inspect transport and recipient before any manual reconciliation\n')
         f.flush()
         os.fsync(f.fileno())
-    msg = EmailMessage()
-    msg['From'] = config['sender']
-    msg['To'] = recipient
-    msg['Subject'] = f'Private telemetry weekly digest {start.date()} to {end.date()} UTC'
-    msg.set_content(body)
     deliver(msg, recipient, config)
     return 'submission accepted by transport; external delivery not proven\n'
 

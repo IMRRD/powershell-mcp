@@ -14,9 +14,9 @@ START, END = w.closed_week(NOW)
 
 
 def fixture():
-    return dict(adoption=[('unknown_origin', 2, 1, 1)], events=[('unknown_origin', 'startup', 2)],
-                tools=[('unknown_origin', 'counts', 'ssh_exec', 3), ('unknown_origin', 'metrics', 'ssh_exec', 3)],
-                axes=[('unknown_origin', 'ssh_exec', 'outcomes', 'success', 3)],
+    return dict(adoption=[('unknown_origin', 12, 11, 0)], events=[('unknown_origin', 'startup', 12)],
+                tools=[('unknown_origin', 'counts', 'ssh_exec', 13), ('unknown_origin', 'metrics', 'ssh_exec', 13)],
+                axes=[('unknown_origin', 'ssh_exec', 'outcomes', 'success', 13)],
                 quality=[('valid', 'valid', 2)],
                 receipts=[(START + dt.timedelta(hours=i), 1) for i in range(168)],
                 imported=NOW - dt.timedelta(minutes=15))
@@ -30,6 +30,8 @@ class Cursor:
     def __exit__(self, *a): pass
     def execute(self, sql, params=None):
         self.sql.append(sql)
+        if sql.startswith('SET TRANSACTION'):
+            return
         self.current = iter(next(self.rows))
     def fetchall(self): return list(self.current)
     def fetchone(self): return next(self.current)
@@ -50,12 +52,14 @@ class DigestTests(unittest.TestCase):
         conn = Conn([f['adoption'], f['events'], f['tools'], f['axes'], f['quality'], f['receipts'], [(f['imported'],)]])
         self.assertEqual(w.aggregates(conn, START, END)['adoption'], f['adoption'])
         self.assertTrue(all('telemetry_event ' not in s and 'telemetry_checkpoint ' not in s for s in conn.cur.sql))
-        self.assertTrue(all('%s' in s for s in conn.cur.sql[:4]))
+        self.assertEqual(conn.cur.sql[0], 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+        self.assertTrue(all('%s' in s for s in conn.cur.sql[1:5]))
+        self.assertIn('received_at >= %s AND received_at < %s', conn.cur.sql[5])
     def test_render_separates_streams_and_proxies(self):
         body = w.render(fixture(), START, END, NOW)
         self.assertIn('Installation IDs are proxies, not people', body)
-        self.assertIn('counts unknown_origin/ssh_exec: 3', body)
-        self.assertIn('metrics unknown_origin/ssh_exec: 3', body)
+        self.assertIn('counts unknown_origin/ssh_exec: 13', body)
+        self.assertIn('metrics unknown_origin/ssh_exec: 13', body)
         self.assertNotIn('unique calls=6', body)
     def test_health_failures_and_privacy(self):
         for mutation in ('no_receipts', 'missing_hour', 'stale', 'quality', 'unsafe_tool'):
@@ -78,7 +82,7 @@ class DigestTests(unittest.TestCase):
             args = ['--config', str(config), '--state-dir', str(state)]
             self.assertIn('Private telemetry digest', w.main(args + ['--preview'], NOW, connect))
             with self.assertRaisesRegex(ValueError, 'disabled'): w.main(args, NOW, connect)
-            config.write_text(json.dumps(dict(enabled=True, recipient='private@example.invalid', host='localhost', port=587, sender='sender@example.invalid', username='sender')))
+            config.write_text(json.dumps(dict(enabled=True, recipient='private@example.invalid', approved_recipients=['private@example.invalid'], host='localhost', port=587, sender='sender@example.invalid', username='sender')))
             def uncertain(msg, recipient, config):
                 sent.append((msg, recipient))
                 raise TimeoutError('ambiguous SMTP acceptance')
@@ -86,6 +90,46 @@ class DigestTests(unittest.TestCase):
             with self.assertRaises(FileExistsError): w.main(args, NOW, connect, uncertain)
             self.assertEqual(len(sent), 1)
             self.assertEqual(len(list(state.glob('*.attempted'))), 1)
+    def test_small_cells_and_complements_are_not_disclosed(self):
+        f = fixture()
+        f['adoption'] = [('internal', 1, 1, 0), ('test', 12, 11, 1)]
+        f['events'] = [('internal', 'startup', 1), ('test', 'startup', 12)]
+        f['tools'] = [('internal', 'counts', 'ssh_exec', 1), ('test', 'counts', 'ssh_exec', 12)]
+        f['axes'] = [('internal', 'ssh_exec', 'outcomes', 'success', 1), ('test', 'ssh_exec', 'outcomes', 'success', 12)]
+        body = w.render(f, START, END, NOW)
+        self.assertNotIn('internal: observed installations=1', body)
+        self.assertNotIn('test: observed installations=12', body)
+        self.assertNotIn('internal/startup: 1', body)
+        self.assertNotIn('test/startup: 12', body)
+        self.assertNotIn('internal/ssh_exec: 1', body)
+        self.assertNotIn('test/ssh_exec: 12', body)
+        self.assertNotIn('internal/ssh_exec/outcomes/success: 1', body)
+        self.assertNotIn('test/ssh_exec/outcomes/success: 12', body)
+
+    def test_old_invalid_event_does_not_poison_clean_receipt_week(self):
+        f = fixture()
+        f['quality'] = [('valid', 'valid', 168)]
+        self.assertIn('Private telemetry digest', w.render(f, START, END, NOW))
+
+    def test_snapshot_is_established_before_first_query(self):
+        f = fixture()
+        conn = Conn([f['adoption'], f['events'], f['tools'], f['axes'], f['quality'], f['receipts'], [(f['imported'],)]])
+        w.aggregates(conn, START, END)
+        self.assertEqual(conn.cur.sql[0], 'SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY')
+
+    def test_unapproved_or_malformed_headers_leave_no_intent(self):
+        f = fixture()
+        def connect(): return Conn([f['adoption'], f['events'], f['tools'], f['axes'], f['quality'], f['receipts'], [(f['imported'],)]])
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / 'config.json'
+            state = Path(tmp) / 'state'
+            args = ['--config', str(config), '--state-dir', str(state)]
+            base = dict(enabled=True, recipient='private@example.invalid', approved_recipients=['approved@example.invalid'], host='localhost', port=587, sender='sender@example.invalid', username='sender')
+            for change in ({}, {'recipient': 'approved@example.invalid\nBcc: other@example.invalid', 'approved_recipients': ['approved@example.invalid\nBcc: other@example.invalid']}, {'recipient': 'approved@example.invalid', 'sender': 'sender@example.invalid\nBcc: other@example.invalid'}):
+                config.write_text(json.dumps(base | change))
+                with self.assertRaises(ValueError): w.main(args, NOW, connect, lambda *a: self.fail('delivery'))
+                self.assertFalse(state.exists())
+
     def test_missing_recipient(self):
         f = fixture()
         def connect(): return Conn([f['adoption'], f['events'], f['tools'], f['axes'], f['quality'], f['receipts'], [(f['imported'],)]])
