@@ -40,13 +40,16 @@ test('installed tarball persists through real collector ACK; wrong/lost ACK reta
     const tar = join(dir, JSON.parse(packed)[0].filename);
     execFileSync(command, [...args, 'install', '--no-audit', '--no-fund', '--prefix', install, tar], { encoding: 'utf8' });
     const module = pathToFileURL(resolve(install, 'node_modules/@imrrd/powershell-mcp/dist/telemetry.js')).href;
+    const metric = `import {recordTool,flushCounters,telemetryStatus} from ${JSON.stringify(module)}; import {readdirSync} from 'node:fs'; import {join} from 'node:path'; import {homedir} from 'node:os'; recordTool('runtime_capabilities','success','lt100','inspection'); flushCounters('0.6.0'); const root=join(homedir(),'.powershell-mcp-telemetry'); const end=Date.now()+10000; do { if(Date.now()>end) throw Error('metric ACK deadline'); await new Promise(r=>setTimeout(r,20)); } while(telemetryStatus().outstanding || readdirSync(root).some(n=>/^slot-\\d{3}$/.test(n)));`;
     const startup = `import {startupPing,telemetryStatus} from ${JSON.stringify(module)}; startupPing('0.6.0'); while(telemetryStatus().outstanding) await new Promise(r=>setTimeout(r,20)); await new Promise(r=>setTimeout(r,2500));`;
     const resume = `import {startFlushTimer,telemetryStatus} from ${JSON.stringify(module)}; startFlushTimer('0.6.0'); while(telemetryStatus().outstanding) await new Promise(r=>setTimeout(r,20)); await new Promise(r=>setTimeout(r,2500));`;
     const port = 18000 + Math.floor(Math.random() * 25000);
     collector = spawn(process.execPath, [join(repo, 'collector/server.js')], { env: { ...process.env, PORT: String(port), TELEMETRY_FILE: file }, stdio: 'ignore' });
 
     const target = `http://127.0.0.1:${port}/api/telemetry`;
-    for (let i = 0; i < 100; i++) { try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) break; } catch {} await delay(25); }
+    let ready = false;
+    for (let i = 0; i < 100; i++) { try { if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) { ready = true; break; } } catch {} await delay(25); }
+    assert.ok(ready, 'collector must be ready before fixture traffic');
     const proxyServer = createServer(async (req, res) => {
       try {
         const chunks = []; for await (const b of req) chunks.push(b);
@@ -72,6 +75,12 @@ test('installed tarball persists through real collector ACK; wrong/lost ACK reta
     await childRun(startup, install, home, target);
     await until(() => entries(home).length === 0, 'positive ACK deletion');
     assert.equal(readFileSync(file, 'utf8').trim().split('\n').length, 2);
+    await childRun(metric, install, home, target);
+    await until(() => entries(home).length === 0, 'metric ACK deletion');
+    await until(() => { try { return readFileSync(file, 'utf8').trim().split('\n').length === 4; } catch { return false; } }, 'metric receipts');
+    const records = readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.deepEqual(records.find(r => r.event === 'tool_counts').counts, { runtime_capabilities: 1 });
+    assert.deepEqual(records.find(r => r.event === 'tool_metrics').metrics.runtime_capabilities, { outcomes: { success: 1 }, durations: { lt100: 1 }, features: { inspection: 1 } });
     console.log('packaged positive ACK, wrong ACK retention, replay dedupe, queue deletion: verified');
   } finally { proxy?.close(); collector?.kill(); rmSync(dir, { recursive: true, force: true }); }
 });

@@ -6,6 +6,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parentPort } from 'node:worker_threads';
 import { validQueuedEvent, readAcknowledgement } from './telemetry-wire.js';
+import type { ToolName, Outcome, Duration, Feature } from './tool-instrumentation.js';
 
 const URL = process.env.POWERSHELL_MCP_TELEMETRY_URL ?? 'https://paperclip.mplace.co.za/api/telemetry';
 const DIR = join(homedir(), '.powershell-mcp-telemetry');
@@ -61,11 +62,11 @@ function schedule(ms: number): void {
   timer = setTimeout(() => { timer = undefined; void drain(); }, ms);
   timer.unref();
 }
-function enqueue(event: 'startup' | 'tool_counts', version: string, counts?: Record<string, number>): void {
+function enqueue(event: 'startup' | 'tool_counts' | 'tool_metrics', version: string, counts?: Record<string, number>, metrics?: Record<string, { outcomes: Record<string, number>; durations: Record<string, number>; features: Record<string, number> }>): void {
   try {
     privateRoot();
     const eventId = randomUUID();
-    const payload = { schemaVersion: 1, eventId, event, version, hostId: id(), os: process.platform, ts: new Date().toISOString(), ...(counts ? { counts } : {}) };
+    const payload = { schemaVersion: event === 'tool_metrics' ? 2 : 1, eventId, event, version, hostId: id(), os: process.platform, ts: new Date().toISOString(), ...(counts ? { counts } : {}), ...(metrics ? { metrics } : {}) };
     const body = JSON.stringify(payload);
     if (Buffer.byteLength(body) > MAX_BODY || !validQueuedEvent(payload, eventId)) { dropped++; return; }
     // Atomic slot creation reserves capacity across processes, including orphan files.
@@ -124,11 +125,11 @@ async function drain(): Promise<void> {
   } catch { schedule(5000); }
   finally { active = false; }
 }
-type Message = { resume?: boolean; event?: 'startup' | 'tool_counts'; version?: string; counts?: Record<string, number> };
+type Message = { resume?: boolean; event?: 'startup' | 'tool_counts' | 'tool_metrics'; version?: string; counts?: Record<string, number>; metrics?: Record<string, { outcomes: Record<string, number>; durations: Record<string, number>; features: Record<string, number> }> };
 parentPort?.on('message', (message: Message) => {
   try {
     if (message.resume) schedule(0);
-    else if ((message.event === 'startup' || message.event === 'tool_counts') && typeof message.version === 'string') enqueue(message.event, message.version, message.counts);
+    else if ((message.event === 'startup' || message.event === 'tool_counts' || message.event === 'tool_metrics') && typeof message.version === 'string') enqueue(message.event, message.version, message.counts, message.metrics);
   } catch { /* worker never fails tool dispatch */ }
   finally { parentPort?.postMessage({ dropped, failures }); dropped = 0; }
 });

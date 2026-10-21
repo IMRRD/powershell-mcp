@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
@@ -40,6 +41,8 @@ try {
   client = new Client({ name: 'installed-artifact-gate', version: '1' });
   await client.connect(transport);
   const tools = (await client.listTools()).tools;
+  const { TOOL_NAMES } = await import(pathToFileURL(join(installed, 'dist', 'tool-instrumentation.js')).href);
+  assert(tools.length === TOOL_NAMES.length && tools.every(t => TOOL_NAMES.includes(t.name)), 'instrumentation tool allowlist drift');
   for (const name of ['run_powershell', 'run_program', 'ssh_exec', 'sftp_upload', 'sftp_download', 'winrm_exec', 'runtime_capabilities'])
     assert(tools.some(t => t.name === name), `missing packaged tool ${name}`);
   const cap = await client.callTool({ name: 'runtime_capabilities', arguments: {} }, undefined, { timeout: 20000 });

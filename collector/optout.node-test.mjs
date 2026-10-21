@@ -9,7 +9,8 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 
 const telemetry = new URL('../dist/telemetry.js', import.meta.url).href;
-const code = `import { startupPing, incrementTool, flushCounters } from ${JSON.stringify(telemetry)}; startupPing('0.6.0'); incrementTool('run_program'); flushCounters('0.6.0'); await new Promise(resolve => setTimeout(resolve, 3000));`;
+const code = `import { startupPing, incrementTool, flushCounters } from ${JSON.stringify(telemetry)}; startupPing('0.6.0'); incrementTool('run_program'); flushCounters('0.6.0');`;
+const complete = `import { readdirSync } from 'node:fs'; import { join } from 'node:path'; import { homedir } from 'node:os'; import { telemetryStatus } from ${JSON.stringify(telemetry)}; const root=join(homedir(),'.powershell-mcp-telemetry'); const end=Date.now()+10000; do { if(Date.now()>end) throw Error('fixture ACK deadline'); await new Promise(r=>setTimeout(r,20)); } while(telemetryStatus().outstanding || readdirSync(root).some(n=>/^slot-\\d{3}$/.test(n)));`;
 test('fixture endpoint receives only startup and named tool counts', async () => {
   const home = mkdtempSync(join(tmpdir(), 'telemetry-delivery-'));
   const received = [];
@@ -21,7 +22,7 @@ test('fixture endpoint receives only startup and named tool counts', async () =>
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   try {
-    const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', code + complete], {
       cwd: fileURLToPath(new URL('..', import.meta.url)),
       env: { ...process.env, HOME: home, USERPROFILE: home, POWERSHELL_MCP_NO_TELEMETRY: '0', POWERSHELL_MCP_TELEMETRY_URL: `http://127.0.0.1:${server.address().port}/isolated-fixture` },
       stdio: 'ignore',

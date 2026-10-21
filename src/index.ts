@@ -9,7 +9,8 @@ import { runSsh, formatSsh } from "./ssh.js";
 import { runWinRm } from "./winrm.js";
 import { runSftp, formatSftp } from "./sftp.js";
 import { resultShape, fromProcess, fromSsh, fromSftp, toolResult } from "./result.js";
-import { startupPing, incrementTool, startFlushTimer } from "./telemetry.js";
+import { startupPing, recordTool, startFlushTimer } from "./telemetry.js";
+import { instrumentTool, type ToolName } from "./tool-instrumentation.js";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -25,6 +26,10 @@ const pkg = JSON.parse(
 const VERSION = pkg.version;
 
 const server = new McpServer({ name: "powershell-mcp", version: VERSION });
+// One registration boundary captures each RPC exactly once, including failures.
+const originalRegisterTool = server.registerTool.bind(server);
+server.registerTool = ((name: ToolName, config: unknown, handler: (...args: any[]) => any) =>
+  originalRegisterTool(name, config as any, instrumentTool(name, handler, recordTool))) as typeof server.registerTool;
 const outputOptions = {
   maxOutputBytes: z.number().int().positive().max(8_388_608).optional().describe("Raw UTF-8 bytes per stream (default 1 MiB)."),
   tail: z.boolean().optional().describe("Keep last bytes rather than first; incomplete UTF-8 boundary scalars are omitted."),
@@ -44,7 +49,7 @@ server.registerTool(
     ...outputOptions,
   } },
   async ({ script, engine, parameters, cwd, timeoutMs, errorPolicy, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
-    incrementTool("run_powershell");
+
     const r = await runPowerShell(script, { exe: engine ? engineExecutable(engine) : undefined, parameters, cwd, timeoutMs, errorPolicy, maxOutputBytes, tail, logOutput, logQuotaBytes });
     const result = fromProcess(r, "powershell", "local");
     if (r.exitCode !== null) result.detail.version = detectEngine(r.shell)?.version;
@@ -60,7 +65,7 @@ server.registerTool(
     inputSchema: { filter: z.string().optional().describe("Wildcard name filter, e.g. 'Sql*' or '*backup*'.") },
   },
   async ({ filter }) => {
-    incrementTool("list_services");
+
     const f = filter ? `-Name '${filter.replace(/'/g, "''")}'` : "";
     const script = `Get-Service ${f} | Select-Object Name,DisplayName,Status | Sort-Object Name | Format-Table -AutoSize | Out-String -Width 200`;
     const r = await runPowerShell(script, { timeoutMs: 30_000 });
@@ -76,7 +81,7 @@ server.registerTool(
     inputSchema: { name: z.string().describe("Exact service name (not display name).") },
   },
   async ({ name }) => {
-    incrementTool("get_service");
+
     const n = name.replace(/'/g, "''");
     const script = `Get-Service -Name '${n}' | Select-Object Name,DisplayName,Status,StartType,CanStop,CanPauseAndContinue | Format-List | Out-String -Width 200`;
     const r = await runPowerShell(script, { timeoutMs: 30_000 });
@@ -91,7 +96,7 @@ server.registerTool(
     action: z.enum(["start", "stop", "restart", "status"]).describe("Action to perform."),
   } },
   async ({ name, action }) => {
-    incrementTool("control_service");
+
     const n = name.replace(/'/g, "''");
     const verb = { start: "Start-Service", stop: "Stop-Service", restart: "Restart-Service", status: "Get-Service" }[action];
     const script = `${verb} -Name '${n}' -ErrorAction Stop; Get-Service -Name '${n}' | Select-Object Name,Status | Format-List | Out-String -Width 200`;
@@ -104,7 +109,7 @@ server.registerTool(
   "system_info",
   { description: "Return OS, CPU, memory and disk summary for this Windows host.", outputSchema: resultShape, inputSchema: {} },
   async () => {
-    incrementTool("system_info");
+
     const script = [
       "$os = Get-CimInstance Win32_OperatingSystem;",
       "$cs = Get-CimInstance Win32_ComputerSystem;",
@@ -140,7 +145,7 @@ server.registerTool(
     logQuotaBytes: outputOptions.logQuotaBytes,
   } },
   async ({ host, username, command, port, privateKeyPath, passphrase, password, credentialRef, hostKeyPins, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
-    incrementTool("ssh_exec");
+
     const auth = await resolveCredential({ credentialRef, transport: "ssh", host, port: port ?? 22, principal: username, privateKeyPath, passphrase, password }, configuredProvider());
     const r = await runSsh({ host, username, command, port, privateKeyPath, passphrase, password, ...auth, hostKeyPins, knownHostsPath: process.env.POWERSHELL_MCP_KNOWN_HOSTS, timeoutMs, maxOutputBytes, tail, logOutput: credentialRef ? false : logOutput, logQuotaBytes });
     const safe = credentialRef ? sanitizeCredentialResult(r, auth) : r;
@@ -163,7 +168,7 @@ server.registerTool(
     ...outputOptions,
   } },
   async ({ computerName, command, parameters, username, password, credentialRef, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
-    incrementTool("winrm_exec");
+
     const auth = await resolveCredential({ credentialRef, transport: "winrm", host: computerName, port: useSsl ? 5986 : 5985, principal: username ?? "", username, password }, configuredProvider());
     const r = await runWinRm({ computerName, command, parameters, username, password, ...auth, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput: credentialRef ? false : logOutput, logQuotaBytes });
     const safe = credentialRef ? sanitizeCredentialResult(r, auth) : r;
@@ -189,7 +194,7 @@ server.registerTool(
   { description: "Upload a local file to a remote host over SFTP, in-process (ssh2 â€” no scp.exe, no WSL, headless). Use to deploy scripts/configs to Linux hosts.", outputSchema: resultShape, inputSchema: { localPath: z.string().describe("Local file path on this Windows host."),
     remotePath: z.string().describe("Destination path on the remote host."), ...sftpAuth } },
   async ({ localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, credentialRef, hostKeyPins, timeoutMs, staged }) => {
-    incrementTool("sftp_upload");
+
     const auth = await resolveCredential({ credentialRef, transport: "sftp", host, port: port ?? 22, principal: username, privateKeyPath, passphrase, password }, configuredProvider());
     const o = { direction: "upload" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, ...auth, hostKeyPins, knownHostsPath: process.env.POWERSHELL_MCP_KNOWN_HOSTS, timeoutMs, staged };
     const r = await runSftp(o);
@@ -203,7 +208,7 @@ server.registerTool(
   { description: "Download a file from a remote host to this Windows host over SFTP, in-process (ssh2 â€” no scp.exe, no WSL, headless).", outputSchema: resultShape, inputSchema: { remotePath: z.string().describe("Source path on the remote host."),
     localPath: z.string().describe("Destination path on this Windows host."), ...sftpAuth } },
   async ({ remotePath, localPath, host, username, port, privateKeyPath, passphrase, password, credentialRef, hostKeyPins, timeoutMs, staged }) => {
-    incrementTool("sftp_download");
+
     const auth = await resolveCredential({ credentialRef, transport: "sftp", host, port: port ?? 22, principal: username, privateKeyPath, passphrase, password }, configuredProvider());
     const o = { direction: "download" as const, localPath, remotePath, host, username, port, privateKeyPath, passphrase, password, ...auth, hostKeyPins, knownHostsPath: process.env.POWERSHELL_MCP_KNOWN_HOSTS, timeoutMs, staged };
     const r = await runSftp(o);
@@ -223,7 +228,7 @@ server.registerTool(
     ...outputOptions,
   } },
   async ({ program, args, stdin, cwd, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
-    incrementTool("run_program");
+
     const r = await runProgram(program, args ?? [], { stdin, cwd, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes });
     return toolResult(fromProcess(r, "program", program), formatResult(r));
   },

@@ -28,7 +28,18 @@ const DATA_FILE = process.env.TELEMETRY_FILE ?? path.join(
 );
 
 const MAX_BODY_BYTES = 16 * 1024;
-const TOOLS = new Set(['run_powershell', 'list_services', 'get_service', 'control_service', 'system_info', 'ssh_exec', 'winrm_exec', 'sftp_upload', 'sftp_download', 'run_program']);
+const TOOLS = new Set(['run_powershell', 'list_services', 'get_service', 'control_service', 'system_info', 'ssh_exec', 'winrm_exec', 'sftp_upload', 'sftp_download', 'run_program', 'runtime_capabilities', 'start_execution', 'execution_status', 'read_execution_output', 'cancel_execution', 'read_output_log', 'delete_output_log']);
+const OUTCOMES = new Set(['success','nonzero','error','timeout','cancelled','unknown']);
+const DURATIONS = new Set(['lt100','lt1000','lt10000','gte10000']);
+const FEATURES = new Set(['execution','inspection','remote','transfer','lifecycle','logs']);
+function validAxis(axis, allowed) { return object(axis) && Object.keys(axis).length > 0 && Object.entries(axis).every(([key, count]) => allowed.has(key) && Number.isSafeInteger(count) && count > 0); }
+function validMetrics(metrics) {
+  return object(metrics) && Object.keys(metrics).length > 0 && Object.keys(metrics).length <= TOOLS.size && Object.entries(metrics).every(([name,row]) => {
+    if (!TOOLS.has(name) || !object(row) || Object.keys(row).sort().join(',') !== 'durations,features,outcomes' || !validAxis(row.outcomes, OUTCOMES) || !validAxis(row.durations, DURATIONS) || !validAxis(row.features, FEATURES)) return false;
+    const total = axis => Object.values(axis).reduce((n,v) => n + v, 0);
+    return Number.isSafeInteger(total(row.outcomes)) && total(row.outcomes) === total(row.durations) && total(row.outcomes) === total(row.features);
+  });
+}
 const OS = new Set(['win32', 'linux', 'darwin', 'freebsd', 'openbsd', 'sunos', 'aix', 'android']);
 const date = s => typeof s === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(s) && !Number.isNaN(Date.parse(s)) && new Date(s).toISOString() === s;
 const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);
@@ -149,15 +160,18 @@ function serialized(task) {
   return next;
 }
 function validPayload(p) {
-  if (!object(p) || !['startup', 'tool_counts'].includes(p.event)) return false;
-  const versioned = p.schemaVersion === 1 && typeof p.eventId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(p.eventId);
+  if (!object(p) || !['startup', 'tool_counts', 'tool_metrics'].includes(p.event)) return false;
+  const versioned = ((p.schemaVersion === 1 && p.event !== 'tool_metrics') || (p.schemaVersion === 2 && p.event === 'tool_metrics')) && typeof p.eventId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(p.eventId);
+  if (p.event === 'tool_metrics' && !versioned) return false;
   if (('eventId' in p || 'schemaVersion' in p) && !versioned) return false;
-  const expected = p.event === 'startup' ? ['event', 'hostId', 'os', 'ts', 'version'] : ['counts', 'event', 'hostId', 'os', 'ts', 'version'];
+  const expected = p.event === 'startup' ? ['event', 'hostId', 'os', 'ts', 'version'] : p.event === 'tool_counts' ? ['counts', 'event', 'hostId', 'os', 'ts', 'version'] : ['metrics','event','hostId','os','ts','version'];
   if (versioned) expected.push('eventId', 'schemaVersion');
   expected.sort();
   if (Object.keys(p).sort().join(',') !== expected.join(',')) return false;
   if (typeof p.hostId !== 'string' || !p.hostId || p.hostId.length > 256 || typeof p.version !== 'string' || !p.version || p.version.length > 256 || !OS.has(p.os) || !date(p.ts)) return false;
-  return p.event === 'startup' || (object(p.counts) && Object.keys(p.counts).length > 0 && Object.entries(p.counts).every(([name, count]) => TOOLS.has(name) && Number.isSafeInteger(count) && count > 0));
+  if (p.event === 'startup') return true;
+  if (p.event === 'tool_metrics') return validMetrics(p.metrics);
+  return object(p.counts) && Object.keys(p.counts).length > 0 && Object.entries(p.counts).every(([name, count]) => TOOLS.has(name) && Number.isSafeInteger(count) && count > 0);
 }
 let activeBodies = 0;
 function readBody(req) {

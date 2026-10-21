@@ -1,10 +1,14 @@
 /** Allowlisted pseudonymous telemetry. Opt-out must precede every ID, disk and network operation. */
 import { Worker } from 'node:worker_threads';
+import { TOOL_NAMES, OUTCOMES, DURATIONS, FEATURES, type ToolName, type Outcome, type Duration, type Feature } from './tool-instrumentation.js';
 
 const OPT_OUT = process.env.POWERSHELL_MCP_NO_TELEMETRY === '1';
 const MAX_PENDING = 128;
-const TOOLS = new Set(['run_powershell', 'list_services', 'get_service', 'control_service', 'system_info', 'ssh_exec', 'winrm_exec', 'sftp_upload', 'sftp_download', 'run_program']);
+const TOOLS = new Set<string>(TOOL_NAMES);
 const counters: Record<string, number> = {};
+type Metric = { outcomes: Record<string, number>; durations: Record<string, number>; features: Record<string, number> };
+const metrics: Record<string, Metric> = {};
+const bump = (axis: Record<string, number>, key: string) => { axis[key] = (axis[key] ?? 0) + 1; };
 let worker: Worker | undefined;
 let outstanding = 0;
 let dropped = 0;
@@ -40,16 +44,29 @@ function submit(message: object): void {
   try { target.ref(); target.postMessage(message); outstanding++; }
   catch { dropped++; failures++; }
 }
-function enqueue(event: 'startup' | 'tool_counts', version: string, counts?: Record<string, number>): void {
-  submit({ event, version, counts });
+function enqueue(event: 'startup' | 'tool_counts' | 'tool_metrics', version: string, counts?: Record<string, number>, batch?: Record<string, Metric>): void {
+  submit({ event, version, ...(counts ? { counts } : {}), ...(batch ? { metrics: batch } : {}) });
 }
 export function startupPing(version: string): void { enqueue('startup', version); }
 export function incrementTool(name: string): void { if (!OPT_OUT && TOOLS.has(name)) counters[name] = (counters[name] ?? 0) + 1; }
+export function recordTool(name: ToolName, outcome: Outcome, duration: Duration, feature: Feature): void {
+  if (OPT_OUT || !TOOLS.has(name) || !OUTCOMES.includes(outcome) || !DURATIONS.includes(duration) || !FEATURES.includes(feature)) return;
+  incrementTool(name);
+  const row = metrics[name] ??= { outcomes: {}, durations: {}, features: {} };
+  bump(row.outcomes, outcome); bump(row.durations, duration); bump(row.features, feature);
+}
 export function flushCounters(version: string): void {
-  if (OPT_OUT || !Object.keys(counters).length) return;
-  const counts = { ...counters };
-  for (const key of Object.keys(counters)) delete counters[key];
-  enqueue('tool_counts', version, counts);
+  if (OPT_OUT) return;
+  if (Object.keys(counters).length) {
+    const counts = { ...counters };
+    for (const key of Object.keys(counters)) delete counters[key];
+    enqueue('tool_counts', version, counts);
+  }
+  if (Object.keys(metrics).length) {
+    const batch = { ...metrics };
+    for (const key of Object.keys(metrics)) delete metrics[key];
+    enqueue('tool_metrics', version, undefined, batch);
+  }
 }
 export function startFlushTimer(version: string): void {
   if (OPT_OUT) return;
