@@ -19,7 +19,7 @@ def _protected(path, *, directory=False):
         info = node.lstat()
         if stat.S_ISLNK(info.st_mode) or info.st_mode & 0o022:
             raise ValueError('untrusted target path')
-        if info.st_uid not in (0, os.geteuid()) or (os.geteuid() == 0 and info.st_uid != 0):
+        if info.st_uid != 0:
             raise ValueError('untrusted target owner')
     info = path.stat()
     if not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)):
@@ -36,18 +36,22 @@ def verified_activation():
     config = Path(os.environ['ANALYTICS_HELPER_CONFIG'])
     _protected(root, directory=True)
     _protected(config)
+    config_data = json.loads(config.read_bytes())
+    verified = {}
     for relative, digest in expected.items():
         target = root / relative
         _protected(target)
-        if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+        data = target.read_bytes()
+        if hashlib.sha256(data).hexdigest() != digest:
             raise ValueError('reviewed artifact drift')
+        verified[relative] = data
     # No cwd/PYTHONPATH lookup for activation; dependencies read from verified root.
     import types
     source = root / 'operations' / 'activate_private.py'
     module = types.ModuleType('reviewed_activate_private')
     module.__file__ = str(source)
-    exec(compile(source.read_bytes(), str(source), 'exec'), module.__dict__)
-    return module.LiveAdapter, module.resources
+    exec(compile(verified['operations/activate_private.py'], str(source), 'exec'), module.__dict__)
+    return module.LiveAdapter, module.resources, config_data
 
 
 def handle(request):
@@ -90,8 +94,7 @@ def handle(request):
             (action == 'credential_active' and key not in ('importer', 'dashboard_role')) or
             (action == 'revoke_credentials' and key != 'roles')):
         raise ValueError('action/resource mismatch')
-    LiveAdapter, resources = verified_activation()
-    config = json.loads(Path(os.environ['ANALYTICS_HELPER_CONFIG']).read_text())
+    LiveAdapter, resources, config = verified_activation()
     adapter = LiveAdapter(Path(config['pg_admin_dsn_file']).read_text().strip() if backend == 'pg' else '',
                           config.get('grafana_url', 'http://127.0.0.1:13000'),
                           config.get('grafana_token_file', ''), config.get('importer_secret_file', ''),

@@ -7,6 +7,8 @@ import unittest
 import tempfile
 import os
 import time
+import hashlib
+from types import SimpleNamespace
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
@@ -41,6 +43,50 @@ class TransportTests(unittest.TestCase):
             result = subprocess.run([sys.executable, str(helper)], input=request, env=env, capture_output=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn(b'activate_private', result.stdout)
+
+    def test_protected_rejects_ssh_user_owned_ancestry(self):
+        spec_helper = importlib.util.spec_from_file_location('helper', HERE / 'ssh_command_helper.py')
+        helper = importlib.util.module_from_spec(spec_helper)
+        spec_helper.loader.exec_module(helper)
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / 'config.json'
+            target.write_text('{}')
+            with patch.object(Path, 'lstat', return_value=SimpleNamespace(st_mode=0o100600, st_uid=1001)), \
+                 patch.object(helper.os, 'geteuid', return_value=1001, create=True):
+                with self.assertRaisesRegex(ValueError, 'owner'):
+                    helper._protected(target)
+
+    def test_verified_activation_executes_captured_blob_and_returns_captured_config(self):
+        spec_helper = importlib.util.spec_from_file_location('helper', HERE / 'ssh_command_helper.py')
+        helper = importlib.util.module_from_spec(spec_helper)
+        spec_helper.loader.exec_module(helper)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / 'operations').mkdir()
+            source = b'class LiveAdapter: pass\ndef resources(admin): return admin\n'
+            blobs = {name: (source if name == 'operations/activate_private.py' else b'fixture') for name in transport.REVIEWED_BLOBS}
+            for name, data in blobs.items():
+                (root / name).write_bytes(data)
+            config = root / 'helper.json'
+            config.write_bytes(b'{"approved_admin":"safe"}')
+            helper.REVIEWED_BLOBS = {name: hashlib.sha256(data).hexdigest() for name, data in blobs.items()}
+            original_read = Path.read_bytes
+            reads = []
+            def changing_read(path):
+                data = original_read(path)
+                reads.append(path)
+                if path == root / 'operations/activate_private.py':
+                    path.write_bytes(b'raise RuntimeError("unreviewed execution")')
+                if path == config:
+                    path.write_bytes(b'{"approved_admin":"changed"}')
+                return data
+            with patch.dict(os.environ, ANALYTICS_HELPER_ROOT=str(root), ANALYTICS_HELPER_CONFIG=str(config)), \
+                 patch.object(helper, '_protected'), patch.object(Path, 'read_bytes', changing_read):
+                adapter, resources, parsed = helper.verified_activation()
+            self.assertEqual(resources('safe'), 'safe')
+            self.assertEqual(parsed, {'approved_admin': 'safe'})
+            self.assertEqual(reads.count(root / 'operations/activate_private.py'), 1)
+            self.assertEqual(reads.count(config), 1)
 
     def test_bounded_reader_refuses_large_parallel_output_and_accepts_exact_boundary(self):
         with tempfile.TemporaryDirectory() as temp:
