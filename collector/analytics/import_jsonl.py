@@ -104,9 +104,8 @@ def ingest(db, source, classification):
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser()
-    p.add_argument('--dsn', required=True)
     p.add_argument('--source', required=True)
     p.add_argument('--classification', required=True)
     a = p.parse_args()
-    with psycopg.connect(a.dsn) as db:
+    with psycopg.connect(os.environ['ANALYTICS_DSN']) as db:
         print('inserted:', ingest(db, a.source, a.classification))
