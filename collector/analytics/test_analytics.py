@@ -135,3 +135,17 @@ class AnalyticsTest(unittest.TestCase):
         self.append([dict(event='startup', ts='bad', _receivedAt='2026-01-02T00:00:00.000Z')])
         ingest(self.db, self.source, self.classes)
         self.assertEqual(self.db.execute("SELECT status FROM delivery_health_utc('2026-01-02', '2026-01-01', interval '1 hour')").fetchone()[0], 'Partial: invalid event time')
+
+    def test_delivery_health_window_excludes_old_invalid_receipt_and_future_receipt(self):
+        self.append([dict(event='startup', ts='bad', _receivedAt='bad')])
+        self.assertEqual(ingest(self.db, self.source, self.classes), 1)
+        self.append([dict(event='startup', ts='2026-01-02T00:00:00Z', _receivedAt='2026-01-02T00:00:00Z')])
+        self.assertEqual(ingest(self.db, self.source, self.classes), 1)
+        row = self.db.execute("SELECT status, last_receipt, invalid_event_times, invalid_receipt_times FROM delivery_health_utc('2026-01-02T00:30:00Z', '2026-01-01T00:00:00Z', interval '1 hour')").fetchone()
+        self.assertEqual(row, ('Recent receipts (not end-to-end proof)', datetime(2026, 1, 2, tzinfo=timezone.utc), 0, 0))
+        self.append([dict(event='startup', ts='2026-01-03T00:00:00Z', _receivedAt='2026-01-03T00:00:00Z')])
+        self.assertEqual(ingest(self.db, self.source, self.classes), 1)
+        row = self.db.execute("SELECT status, last_receipt FROM delivery_health_utc('2026-01-02T00:30:00Z', '2026-01-01T00:00:00Z', interval '1 hour')").fetchone()
+        self.assertEqual(row, ('Recent receipts (not end-to-end proof)', datetime(2026, 1, 2, tzinfo=timezone.utc)))
+        row = self.db.execute("SELECT status, last_receipt FROM delivery_health_utc('2026-01-01T12:00:00Z', '2026-01-01T00:00:00Z', interval '1 hour')").fetchone()
+        self.assertEqual(row, ('Unknown: no valid receipts', None))
