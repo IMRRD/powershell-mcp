@@ -3,10 +3,12 @@ import { randomBytes } from "node:crypto";
 import { LIMIT_BOOTSTRAP, captureFromEnvelope, frameLimit, payloadLimit, protectedPayload } from "./envelope-output.js";
 import { captureDiagnostic } from "./output-collector.js";
 import { logStore } from "./full-logs.js";
+import { PARAMETER_BOOTSTRAP, validateParameters, INPUT_LIMIT } from "./typed-input.js";
 
 export interface WinRmOptions {
   computerName: string;
   command: string;
+  parameters?: Record<string, unknown>;
   username?: string;
   password?: string;
   useSsl?: boolean;
@@ -22,6 +24,7 @@ export interface WinRmOptions {
 interface WinRmInput {
   computerName: string;
   command: string;
+  parameters?: Record<string, unknown>;
   username?: string;
   password?: string;
   useSsl?: boolean;
@@ -40,12 +43,13 @@ export const WINRM_BOOTSTRAP = [
   "$payload = $json | ConvertFrom-Json;",
   "$payloadLimit = [int]$payload.outputLimit; $payloadTail = [bool]$payload.outputTail;",
   LIMIT_BOOTSTRAP,
+  PARAMETER_BOOTSTRAP,
   "$encoded = $null;",
   "$json = $null;",
   "$invoke = @{",
   "  ComputerName = [string]$payload.computerName;",
-  "  ScriptBlock = { param($source) $items = [System.Collections.ArrayList]::new(); $errors = [System.Collections.ArrayList]::new(); $failed = $false; try { & ([ScriptBlock]::Create($source)) 2>&1 3>&1 4>&1 5>&1 6>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $failed = $true; [void]$errors.Add($_); [void]$items.Add([string]$_.Exception.Message) } else { [void]$items.Add($_) } } } catch { $failed = $true; [void]$errors.Add($_); [void]$items.Add([string]$_.Exception.Message) }; $limited = $errors.Count -gt 8; $records = @($errors | Select-Object -First 8 | ForEach-Object { $e = $_; $fields = @([string]$e.CategoryInfo.Category, [string]$e.FullyQualifiedErrorId, [string]$e.Exception.GetType().FullName, [string]$e.Exception.Message); for ($i=0; $i -lt $fields.Count; $i++) { if ($fields[$i].Length -gt 256) { $fields[$i] = $fields[$i].Substring(0,256); $limited = $true } }; [pscustomobject]@{ category=$fields[0]; fullyQualifiedErrorId=$fields[1]; exceptionType=$fields[2]; message=$fields[3] } }); [pscustomobject]@{ Output = [string]($items.ToArray() | Out-String -Width 240); RemoteError = [bool]$failed; ErrorRecords = $records; ErrorRecordsTruncated = [bool]$limited } };",
-  "  ArgumentList = @([string]$payload.command);",
+  "  ScriptBlock = { param($source, $bound) $items = [System.Collections.ArrayList]::new(); $errors = [System.Collections.ArrayList]::new(); $failed = $false; try { & ([ScriptBlock]::Create($source)) @bound 2>&1 3>&1 4>&1 5>&1 6>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $failed = $true; [void]$errors.Add($_); [void]$items.Add([string]$_.Exception.Message) } else { [void]$items.Add($_) } } } catch { $failed = $true; [void]$errors.Add($_); [void]$items.Add([string]$_.Exception.Message) }; $limited = $errors.Count -gt 8; $records = @($errors | Select-Object -First 8 | ForEach-Object { $e = $_; $fields = @([string]$e.CategoryInfo.Category, [string]$e.FullyQualifiedErrorId, [string]$e.Exception.GetType().FullName, [string]$e.Exception.Message); for ($i=0; $i -lt $fields.Count; $i++) { if ($fields[$i].Length -gt 256) { $fields[$i] = $fields[$i].Substring(0,256); $limited = $true } }; [pscustomobject]@{ category=$fields[0]; fullyQualifiedErrorId=$fields[1]; exceptionType=$fields[2]; message=$fields[3] } }); [pscustomobject]@{ Output = [string]($items.ToArray() | Out-String -Width 240); RemoteError = [bool]$failed; ErrorRecords = $records; ErrorRecordsTruncated = [bool]$limited } };",
+  "  ArgumentList = @([string]$payload.command, $(if ($null -eq $payload.parameters) { @{} } else { Convert-Parameter $payload.parameters }));",
   "};",
   "if ($payload.useSsl) { $invoke.UseSSL = $true; }",
   "if ($null -ne $payload.authentication -and [string]$payload.authentication -ne '') {",
@@ -72,6 +76,7 @@ export function buildWinRmInput(opts: WinRmOptions): string {
   const input: WinRmInput = {
     computerName: opts.computerName,
     command: opts.command,
+    ...(opts.parameters !== undefined ? { parameters: opts.parameters } : {}),
   };
 
   if (opts.username !== undefined) {
@@ -93,6 +98,8 @@ export function buildWinRmInput(opts: WinRmOptions): string {
  * captured by the local hidden PowerShell host (no console window).
  */
 export function runWinRm(opts: WinRmOptions): Promise<PsResult> {
+  if (opts.parameters !== undefined) validateParameters(opts.parameters);
+  if (Buffer.byteLength(JSON.stringify({ command: opts.command, parameters: opts.parameters }), "utf8") > INPUT_LIMIT) throw Error("input limit exceeded");
   const reservedLog = opts.logOutput ? logStore.create(opts.logQuotaBytes) : undefined;
   const frame = randomBytes(24).toString("hex");
   const input = JSON.parse(Buffer.from(buildWinRmInput(opts), "base64").toString("utf8"));

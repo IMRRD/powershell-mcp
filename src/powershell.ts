@@ -4,6 +4,13 @@ import { OutputCollector, captureDiagnostic, type StreamCapture } from "./output
 import { LIMIT_BOOTSTRAP, captureFromEnvelope, frameLimit, payloadLimit, protectedPayload } from "./envelope-output.js";
 import { randomBytes } from "node:crypto";
 import { logStore } from "./full-logs.js";
+import { PARAMETER_BOOTSTRAP, validateParameters, INPUT_LIMIT } from "./typed-input.js";
+
+const TYPED_BOOTSTRAP = `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+${PARAMETER_BOOTSTRAP}
+$payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())) | ConvertFrom-Json
+$params = Convert-Parameter $payload.parameters
+& ([ScriptBlock]::Create([string]$payload.source)) @params`;
 
 export interface ErrorRecordSummary { category: string; fullyQualifiedErrorId: string; exceptionType: string; message: string }
 
@@ -32,6 +39,8 @@ export interface PsResult {
 }
 
 export interface RunOptions {
+  /** JSON-safe named script parameters, bound without source interpolation. */
+  parameters?: Record<string, unknown>;
   /** Working directory for the command. */
   cwd?: string;
   /** Hard timeout in milliseconds (default 60000). */
@@ -167,12 +176,23 @@ export function buildArgs(script: string): string[] {
  * timeout, and never throws on a non-zero exit (it's reported in `exitCode`).
  */
 export function runPowerShell(script: string, opts: RunOptions = {}): Promise<PsResult> {
+  if (opts.parameters !== undefined) {
+    validateParameters(opts.parameters);
+    const json = JSON.stringify({ source: script, parameters: opts.parameters });
+    if (Buffer.byteLength(json, "utf8") > INPUT_LIMIT) throw Error("input limit exceeded");
+    if (opts.errorPolicy !== "strict") return runPowerShell(TYPED_BOOTSTRAP, { ...opts, parameters: undefined, stdin: Buffer.from(json, "utf8").toString("base64") });
+  }
   if (opts.errorPolicy === "strict") {
     const reservedLog = opts.logOutput ? logStore.create(opts.logQuotaBytes) : undefined;
     const frame = randomBytes(24).toString("hex");
     const limit = opts.maxOutputBytes ?? 1_048_576;
     const captureLimit = payloadLimit(limit, opts.logOutput, opts.logQuotaBytes);
-    return runPowerShell(STRICT_BOOTSTRAP, { ...opts, logOutput: false, maxOutputBytes: frameLimit(captureLimit), tail: false, stderrLimitBytes: limit, stderrTail: opts.tail, errorPolicy: "legacy", stdin: Buffer.from(script, "utf8").toString("base64"), env: { ...opts.env, PS_MCP_FRAME: frame, PS_MCP_OUTPUT_LIMIT: String(captureLimit), PS_MCP_OUTPUT_TAIL: opts.tail ? "1" : "0" } }).then(r => {
+    const typed = opts.parameters !== undefined;
+    const bootstrap = typed ? STRICT_BOOTSTRAP.replace(
+      "$source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))",
+      `${PARAMETER_BOOTSTRAP}\n$payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())) | ConvertFrom-Json\n$source = [string]$payload.source\n$params = Convert-Parameter $payload.parameters`,
+    ).replace("& ([ScriptBlock]::Create($source)) 2>&1", "& ([ScriptBlock]::Create($source)) @params 2>&1") : STRICT_BOOTSTRAP;
+    return runPowerShell(bootstrap, { ...opts, parameters: undefined, logOutput: false, maxOutputBytes: frameLimit(captureLimit), tail: false, stderrLimitBytes: limit, stderrTail: opts.tail, errorPolicy: "legacy", stdin: Buffer.from(typed ? JSON.stringify({ source: script, parameters: opts.parameters }) : script, "utf8").toString("base64"), env: { ...opts.env, PS_MCP_FRAME: frame, PS_MCP_OUTPUT_LIMIT: String(captureLimit), PS_MCP_OUTPUT_TAIL: opts.tail ? "1" : "0" } }).then(r => {
       const decoded = decodeStrict(r, frame, limit, opts.tail ?? false, opts.logOutput, opts.logQuotaBytes, reservedLog);
       if (reservedLog && !decoded.log) logStore.delete(reservedLog.finish(false).handle);
       return decoded;

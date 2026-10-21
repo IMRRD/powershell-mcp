@@ -81,6 +81,7 @@ this is **not** an end-to-end bounded-memory guarantee for remoting.
 | Tool | Description |
 |------|-------------|
 | `run_powershell` | Run any PowerShell script/command (hidden). `{ script, cwd?, timeoutMs?, errorPolicy?: "legacy" | "strict", maxOutputBytes?, tail? }` |
+| `runtime_capabilities` | Read-only package/protocol version, supported and detected available engines, engine policy (without exposing configured override paths), transports and input/output/timeout limits. Does not return user identity, environment or secrets. |
 | `run_program` | Run a **native executable directly** (no shell) and capture clean stdout/stderr + exit code - for `gh`/`git`/`docker`/`node` and other console binaries whose output a hidden shell swallows. `{ program, args?, cwd?, timeoutMs?, maxOutputBytes?, tail? }` |
 | `list_services` | List services, optional `filter` wildcard. |
 | `get_service` | Detailed status of one service by name. |
@@ -92,6 +93,10 @@ this is **not** an end-to-end bounded-memory guarantee for remoting.
 | `sftp_download` | Download a remote file to this host over SFTP, in-process. Same params as `sftp_upload`. |
 
 > **Native programs:** Windows PowerShell routes a native command's stdout to the console, so run hidden it is lost. Use `run_program` (direct-exec) for console binaries like `gh`/`git`/`docker`; use `run_powershell` for PowerShell/cmdlet logic.
+
+**Typed inputs:** `run_powershell` accepts `engine: "pwsh" | "powershell"` (Windows; only `pwsh` elsewhere). An explicit choice selects only that engine and overrides `PWSH_MCP_EXE`; if it is missing, execution fails without fallback. When `engine` is omitted and `PWSH_MCP_EXE` is configured, only that executable is attempted; a missing configured executable fails without fallback. Only when neither is selected does automatic discovery try `pwsh`, then `powershell.exe` on Windows (only `pwsh` on other platforms). `runtime_capabilities.availableEngines` reports detected named engines, not whether the configured override is runnable. Its result `detail.shell` reports the actual executable used and `detail.version` the version when detectable. `parameters` is an optional named JSON object of strings, finite numbers, booleans, nulls, arrays and nested objects (max 8 levels, 1 MiB serialized UTF-8). Declare matching `param($name)` in the script. Values are sent on stdin and bound as data, not interpolated into source; the default remains legacy (strict must be requested explicitly). `winrm_exec` accepts the same `parameters` and sends them inside its protected stdin payload for remote binding. Never deliberately print secrets: emitted output may enter results or opt-in output logs.
+
+`run_program` accepts optional UTF-8 `stdin` (at most 1 MiB **bytes**, not characters). An empty string opens the pipe and sends EOF; omitted stdin inherits no pipe. The child receives no input in argv/environment or telemetry, and stdin is not captured in logs. Oversize is rejected before child launch; Node stream writes respect backpressure, and early exit, timeout and pipe errors are handled without unhandled stream errors. Do not send secrets to programs that echo them.
 
 `run_powershell` defaults to **legacy** raw `-Command` semantics. Opt into
 `errorPolicy: "strict"` to parse the script before execution and report unhandled
