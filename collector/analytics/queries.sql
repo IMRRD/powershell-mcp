@@ -14,3 +14,11 @@ SELECT origin, date_trunc('day', received_at) AS received_day, count(*) AS recei
        percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM (received_at-event_at))) AS p95_lag_seconds
 FROM dashboard_events WHERE received_at >= :from_utc AND received_at < :to_utc
 AND event_at IS NOT NULL GROUP BY origin, received_day;
+-- Feed health is based on checkpoint existence, last actual receipt and importer run.
+-- A checkpoint only proves the importer scanned a source; it cannot prove upstream delivery.
+SELECT * FROM delivery_health_utc(:to_utc, :from_utc, interval '2 hours');
+-- Axes are independent marginals; never sum across axes or add schema-1 counts to schema-2 metrics.
+SELECT origin, tool, axis, bucket, sum(calls) AS calls FROM dashboard_metric_axes
+WHERE event_at >= :from_utc AND event_at < :to_utc GROUP BY origin, tool, axis, bucket;
+SELECT event_time_quality, receipt_time_quality, count(*) AS records FROM dashboard_events
+GROUP BY event_time_quality, receipt_time_quality;

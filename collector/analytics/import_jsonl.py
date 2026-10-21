@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import uuid
+from datetime import datetime
 
 import psycopg
 
@@ -14,6 +15,8 @@ UTC = re.compile(r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$')
 VERSION = re.compile(r'^(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})$')
 OS = {'win32', 'linux', 'darwin', 'freebsd', 'openbsd', 'sunos', 'aix', 'android'}
 TOOLS = {'run_powershell', 'list_services', 'get_service', 'control_service', 'system_info', 'ssh_exec', 'winrm_exec', 'sftp_upload', 'sftp_download', 'run_program', 'runtime_capabilities', 'start_execution', 'execution_status', 'read_execution_output', 'cancel_execution', 'read_output_log', 'delete_output_log'}
+AXES = {'outcomes': {'success', 'nonzero', 'error', 'timeout', 'cancelled', 'unknown'}, 'durations': {'lt100', 'lt1000', 'lt10000', 'gte10000'}, 'features': {'execution', 'inspection', 'remote', 'transfer', 'lifecycle', 'logs'}}
+MAX_COUNT = 9007199254740991
 
 
 def classes(path):
@@ -27,7 +30,34 @@ def classes(path):
 
 
 def timestamp(s):
-    return s if isinstance(s, str) and UTC.fullmatch(s) else None
+    if not isinstance(s, str) or not UTC.fullmatch(s):
+        return None
+    try:
+        return s if datetime.fromisoformat(s.replace('Z', '+00:00')).isoformat(timespec='milliseconds').replace('+00:00', 'Z') == s else None
+    except ValueError:
+        return None
+
+
+def quality(value):
+    return 'missing' if value is None else 'valid' if timestamp(value) else 'invalid'
+
+
+def valid_count(value):
+    return isinstance(value, int) and not isinstance(value, bool) and 0 < value <= MAX_COUNT
+
+
+def metric_axes(value):
+    if not isinstance(value, dict) or set(value) != set(AXES):
+        raise ValueError('invalid metric axes')
+    totals = []
+    for axis, allowed in AXES.items():
+        buckets = value[axis]
+        if not isinstance(buckets, dict) or not buckets or any(k not in allowed or not valid_count(n) for k, n in buckets.items()):
+            raise ValueError('invalid metric axis')
+        totals.append(sum(buckets.values()))
+    if totals[0] > MAX_COUNT or len(set(totals)) != 1:
+        raise ValueError('inconsistent metric totals')
+    return totals[0]
 
 
 def ingest(db, source, classification):
@@ -78,7 +108,7 @@ def ingest(db, source, classification):
                 received = timestamp(row.get('_receivedAt'))
                 version = row.get('version')
                 safe = {'schemaVersion': row.get('schemaVersion') if isinstance(row.get('schemaVersion'), int) else None}
-                result = db.execute('INSERT INTO telemetry_event(event_key,payload_hash,origin,installation_key,event,event_at,received_at,version_bucket,os_bucket,raw) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(event_key) DO NOTHING RETURNING event_key', (key, payload_hash, origin, hashlib.sha256(safe_host.encode()).hexdigest() if safe_host else None, event, timestamp(row.get('ts')), received, version if isinstance(version, str) and VERSION.fullmatch(version) else 'other', row.get('os') if row.get('os') in OS else 'other', json.dumps(safe))).fetchone()
+                result = db.execute('INSERT INTO telemetry_event(event_key,payload_hash,origin,installation_key,event,event_at,received_at,version_bucket,os_bucket,raw,event_time_quality,receipt_time_quality) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(event_key) DO NOTHING RETURNING event_key', (key, payload_hash, origin, hashlib.sha256(safe_host.encode()).hexdigest() if safe_host else None, event, timestamp(row.get('ts')), received, version if isinstance(version, str) and VERSION.fullmatch(version) else 'other', row.get('os') if row.get('os') in OS else 'other', json.dumps(safe), quality(row.get('ts')), quality(row.get('_receivedAt')))).fetchone()
                 if not result:
                     old = db.execute('SELECT payload_hash FROM telemetry_event WHERE event_key=%s', (key,)).fetchone()
                     if old[0] != payload_hash:
@@ -92,13 +122,17 @@ def ingest(db, source, classification):
                         for tool, value in data.items():
                             if tool not in TOOLS:
                                 raise ValueError('invalid tool')
-                            calls = value if event == 'tool_counts' else sum(value['outcomes'].values())
-                            if not isinstance(calls, int) or isinstance(calls, bool) or calls <= 0 or calls > 9007199254740991:
+                            calls = value if event == 'tool_counts' else metric_axes(value)
+                            if not valid_count(calls):
                                 raise ValueError('invalid calls')
                             db.execute('INSERT INTO telemetry_tool VALUES (%s,%s,%s,%s)', (key, 'counts' if event == 'tool_counts' else 'metrics', tool, calls))
+                            if event == 'tool_metrics':
+                                for axis, buckets in value.items():
+                                    for bucket, count in buckets.items():
+                                        db.execute('INSERT INTO telemetry_metric_axis VALUES (%s,%s,%s,%s,%s)', (key, tool, axis, bucket, count))
                 prefix.update(line)
                 position = f.tell()
-        db.execute('INSERT INTO telemetry_checkpoint VALUES (%s,%s,%s,%s,%s) ON CONFLICT(source_key) DO UPDATE SET device=excluded.device,inode=excluded.inode,position=excluded.position,prefix_hash=excluded.prefix_hash', (source_key, stat.st_dev, stat.st_ino, position, prefix.hexdigest()))
+        db.execute('INSERT INTO telemetry_checkpoint(source_key,device,inode,position,prefix_hash) VALUES (%s,%s,%s,%s,%s) ON CONFLICT(source_key) DO UPDATE SET device=excluded.device,inode=excluded.inode,position=excluded.position,prefix_hash=excluded.prefix_hash,imported_at=now()', (source_key, stat.st_dev, stat.st_ino, position, prefix.hexdigest()))
     return inserted
 
 
