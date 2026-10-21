@@ -1,17 +1,62 @@
 #!/usr/bin/env python3
 """Ephemeral SSH-stdio helper; no listener, forwarding, or arbitrary SQL/URL."""
 import json
+import hashlib
 import os
 from pathlib import Path
+import stat
 import sys
 import urllib.request
 
 MAX_REQUEST = 65536
 MAX_RESPONSE = 65536
 
+def _protected(path, *, directory=False):
+    """Reject links and writable ancestry; root owns privileged installations."""
+    if not path.is_absolute():
+        raise ValueError('absolute protected path required')
+    for node in (path, *path.parents):
+        info = node.lstat()
+        if stat.S_ISLNK(info.st_mode) or info.st_mode & 0o022:
+            raise ValueError('untrusted target path')
+        if info.st_uid not in (0, os.geteuid()) or (os.geteuid() == 0 and info.st_uid != 0):
+            raise ValueError('untrusted target owner')
+    info = path.stat()
+    if not (stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)):
+        raise ValueError('invalid target file type')
+
+def verified_activation():
+    """Bind all executable dependencies to controller-frozen bytes before import."""
+    expected = globals().get('REVIEWED_BLOBS')
+    if not isinstance(expected, dict) or set(expected) != {
+            'operations/activate_private.py', 'operations/prepare-private-activation.py',
+            'schema.sql', 'roles.sql', 'queries.sql', 'dashboard.json'}:
+        raise ValueError('reviewed artifact missing')
+    root = Path(os.environ['ANALYTICS_HELPER_ROOT'])
+    config = Path(os.environ['ANALYTICS_HELPER_CONFIG'])
+    _protected(root, directory=True)
+    _protected(config)
+    for relative, digest in expected.items():
+        target = root / relative
+        _protected(target)
+        if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+            raise ValueError('reviewed artifact drift')
+    # No cwd/PYTHONPATH lookup for activation; dependencies read from verified root.
+    import types
+    source = root / 'operations' / 'activate_private.py'
+    module = types.ModuleType('reviewed_activate_private')
+    module.__file__ = str(source)
+    exec(compile(source.read_bytes(), str(source), 'exec'), module.__dict__)
+    return module.LiveAdapter, module.resources
+
 
 def handle(request):
     operation = request.get('operation')
+    if operation == 'attest':
+        if set(request) != {'operation'}:
+            raise ValueError('operation not allowed')
+        verified_activation()
+        return {'verified': True}
     if operation == 'grafana':
         if set(request) != {'operation', 'method', 'path'} or request['method'] != 'GET' or request['path'] != '/api/health':
             raise ValueError('operation not allowed')
@@ -45,7 +90,7 @@ def handle(request):
             (action == 'credential_active' and key not in ('importer', 'dashboard_role')) or
             (action == 'revoke_credentials' and key != 'roles')):
         raise ValueError('action/resource mismatch')
-    from activate_private import LiveAdapter, resources
+    LiveAdapter, resources = verified_activation()
     config = json.loads(Path(os.environ['ANALYTICS_HELPER_CONFIG']).read_text())
     adapter = LiveAdapter(Path(config['pg_admin_dsn_file']).read_text().strip() if backend == 'pg' else '',
                           config.get('grafana_url', 'http://127.0.0.1:13000'),

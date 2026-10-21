@@ -44,6 +44,10 @@ cat > "$root/run.sh" <<'RUN'
 #!/bin/sh
 set -eu
 pip -q install --no-index --find-links /fixture/wheels 'psycopg[binary]==3.3.6'
+mkdir -p /opt/reviewed
+cp -R /src/operations /opt/reviewed/
+cp /src/schema.sql /src/roles.sql /src/queries.sql /src/dashboard.json /opt/reviewed/
+chmod -R go-w /opt/reviewed
 for n in $(seq 1 60); do
   if python -c 'import psycopg;psycopg.connect(open("/fixture/admin.dsn").read()).close()' 2>/dev/null && python -c 'import urllib.request,os; urllib.request.urlopen("http://"+os.environ["FIXTURE_NAME"]+"-grafana:3000/api/health",timeout=2)' 2>/dev/null; then break; fi
   sleep 2
@@ -69,16 +73,18 @@ config={'approved_admin':'admin','pg_admin_dsn_file':'/fixture/admin.dsn',
         'ca_file':'/fixture/ca.crt', 'db_host':os.environ['FIXTURE_NAME']+'-pg:5432',
         'grafana_error_log':'/fixture/grafana-logs/grafana.log'}
 open('/fixture/helper.json','w').write(json.dumps(config))
+open('/opt/reviewed/helper.json','w').write(json.dumps(config))
 PY
 cat > /fixture/controller.py <<'PY'
 import json,os,subprocess,sys
 sys.path.insert(0,'/src/operations')
 import activate_private as activation
-from ssh_command_transport import UnknownOutcome
+from ssh_command_transport import UnknownOutcome, REVIEWED_BLOBS
 def execute(host, identity_file, request):
     backend = {'pg-fixture':'pg', 'grafana-fixture':'grafana'}[host]
-    environment = dict(os.environ, ANALYTICS_HELPER_BACKEND=backend, ANALYTICS_HELPER_CONFIG='/fixture/helper.json')
-    result = subprocess.run([sys.executable,'/src/operations/ssh_command_helper.py'],
+    environment = dict(os.environ, ANALYTICS_HELPER_BACKEND=backend, ANALYTICS_HELPER_CONFIG='/opt/reviewed/helper.json', ANALYTICS_HELPER_ROOT='/opt/reviewed', PYTHONPATH='')
+    bootstrap='import sys; from pathlib import Path; b=Path("/opt/reviewed/operations/ssh_command_helper.py").read_bytes(); exec(compile(b,"<helper>","exec"),{"__name__":"__main__","REVIEWED_BLOBS":'+repr(REVIEWED_BLOBS)+'})'
+    result = subprocess.run([sys.executable,'-I','-c',bootstrap],
                             input=json.dumps(request).encode(),capture_output=True,env=environment,timeout=30)
     try:
         response=json.loads(result.stdout)
@@ -94,6 +100,24 @@ def init(self,*args):
     real_init(self,*args)
     self.execute=execute
 activation.SSHAdapter.__init__=init
+if sys.argv[1] == 'apply' and not os.path.exists('/fixture/attested'):
+    from pathlib import Path
+    source=Path('/opt/reviewed/operations/activate_private.py')
+    original=source.read_bytes()
+    def refused():
+        try: execute('pg-fixture',None,{'operation':'attest'})
+        except UnknownOutcome: return
+        raise AssertionError('untrusted installation accepted')
+    assert execute('pg-fixture',None,{'operation':'attest'})=={'verified':True}
+    assert execute('grafana-fixture',None,{'operation':'attest'})=={'verified':True}
+    source.write_bytes(original+b'\n# mutated\n'); refused(); source.write_bytes(original)
+    source.rename(str(source)+'.missing'); refused(); Path(str(source)+'.missing').rename(source)
+    os.chown(source,65534,65534); refused(); os.chown(source,0,0)
+    shadow=Path('/fixture/activate_private.py'); shadow.write_text('raise Exception("shadow executed")')
+    assert execute('pg-fixture',None,{'operation':'attest'})=={'verified':True}
+    shadow.unlink()
+    Path('/fixture/attested').touch()
+    print('isolated binding: positive both targets; mutation, missing, wrong owner refused; shadow ignored')
 sys.argv=['activate_private.py',*sys.argv[1:],'--ssh-pg-host','pg-fixture','--ssh-grafana-host','grafana-fixture','--ssh-identity-file','/fixture/identity']
 activation.main()
 PY

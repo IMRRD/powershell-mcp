@@ -4,6 +4,8 @@ from pathlib import Path
 import subprocess
 import sys
 import unittest
+import tempfile
+import os
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
@@ -25,26 +27,56 @@ class TransportTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn('DROP DATABASE', result.stdout)
 
+    def test_binding_refuses_missing_mutated_shadow_and_untrusted_code_before_import(self):
+        helper = HERE / 'ssh_command_helper.py'
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'install'
+            root.mkdir()
+            config = Path(temp) / 'config.json'
+            config.write_text('{}')
+            env = dict(os.environ, ANALYTICS_HELPER_ROOT=str(root), ANALYTICS_HELPER_CONFIG=str(config),
+                       ANALYTICS_HELPER_BACKEND='pg')
+            request = json.dumps({'operation':'activation','action':'get','key':'database'}).encode()
+            result = subprocess.run([sys.executable, str(helper)], input=request, env=env, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn(b'activate_private', result.stdout)
+
+    def test_bounded_reader_refuses_large_parallel_output_and_accepts_exact_boundary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            code = 'import sys;sys.stdout.buffer.write(b"x"*70000);sys.stderr.buffer.write(b"y"*70000)'
+            with self.assertRaises(transport.UnknownOutcome):
+                transport._bounded_process([sys.executable, '-c', code], b'', timeout=5)
+            code = 'import sys;sys.stdout.buffer.write(b"x"*32768);sys.stderr.buffer.write(b"y"*32768)'
+            result = transport._bounded_process([sys.executable, '-c', code], b'', timeout=5)
+            self.assertEqual(len(result.stdout) + len(result.stderr), 65536)
+
+    def test_reader_deadline_and_invalid_frames_fail_closed(self):
+        with self.assertRaisesRegex(transport.UnknownOutcome, 'unknown'):
+            transport._bounded_process([sys.executable, '-c', 'import time;time.sleep(10)'], b'', timeout=.1)
+        for response in (b'', b'{"ok":true,"ok":false,"result":{}}', b'{"ok":true,"result":'):
+            with patch.object(transport, '_bounded_process', return_value=subprocess.CompletedProcess([], 0, response, b'')):
+                with self.assertRaises(transport.UnknownOutcome):
+                    transport.execute('host', 'key', {'operation':'attest'})
+
     def test_controller_uses_fixed_command_and_frames_no_secret_argv(self):
-        with patch.object(transport.subprocess, 'run') as run:
+        with patch.object(transport, '_bounded_process') as run:
             run.return_value = subprocess.CompletedProcess([], 0, b'{"ok":true,"result":{"database":false}}\n', b'')
             answer = transport.execute('host', 'key', {'operation': 'pg', 'query': 'private_database_exists'})
         self.assertEqual(answer, {'database': False})
         argv = run.call_args.args[0]
         self.assertNotIn('private_database_exists', ' '.join(argv))
         self.assertEqual(argv[-1], transport.REMOTE_COMMAND)
-        self.assertIn(b'private_database_exists', run.call_args.kwargs['input'])
-        self.assertIsNotNone(run.call_args.kwargs['timeout'])
+        self.assertIn(b'private_database_exists', run.call_args.args[1])
 
     def test_unknown_outcome_does_not_retry_or_expose_stderr(self):
-        with patch.object(transport.subprocess, 'run', side_effect=subprocess.TimeoutExpired('ssh', 5)) as run:
+        with patch.object(transport, '_bounded_process', side_effect=transport.UnknownOutcome('SSH outcome unknown')) as run:
             with self.assertRaisesRegex(transport.UnknownOutcome, 'unknown'):
                 transport.execute('host', 'key', {'operation': 'grafana', 'method': 'POST', 'path': '/api/orgs', 'payload': {'name': 'private'}})
         self.assertEqual(run.call_count, 1)
 
     def test_org_unsupported_delete_marker_is_only_classified_for_org_delete(self):
         marker = subprocess.CompletedProcess([], 0, b'{"ok":false,"error":"unsupported DeleteCollection"}\n', b'')
-        with patch.object(transport.subprocess, 'run', return_value=marker):
+        with patch.object(transport, '_bounded_process', return_value=marker):
             with self.assertRaisesRegex(RuntimeError, 'unsupported DeleteCollection'):
                 transport.execute('host', 'key', {'operation': 'activation', 'action': 'delete', 'key': 'org', 'value': {}})
             with self.assertRaises(transport.UnknownOutcome):
