@@ -1,6 +1,8 @@
-﻿import { spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import os from "node:os";
+import { OutputCollector, captureDiagnostic } from "./output-collector.js";
 import type { PsResult, RunOptions } from "./powershell.js";
+import { logStore } from "./full-logs.js";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_OUTPUT = 1024 * 1024;
@@ -21,6 +23,7 @@ export function runProgram(program: string, args: string[] = [], opts: RunOption
   const started = Date.now();
 
   return new Promise<PsResult>((resolve) => {
+    const log = opts.logOutput ? logStore.create(opts.logQuotaBytes) : undefined;
     let child;
     try {
       child = spawn(program, args, {
@@ -30,40 +33,34 @@ export function runProgram(program: string, args: string[] = [], opts: RunOption
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (err) {
+      if (log) logStore.delete(log.finish().handle);
+      const stderrCapture = captureDiagnostic(undefined, `Failed to spawn ${program}: ${(err as Error).message}`, maxOutput, opts.tail);
       resolve({
         stdout: "",
-        stderr: `Failed to spawn ${program}: ${(err as Error).message}`,
+        stderr: stderrCapture.text,
+        stderrCapture,
         spawnError: (err as Error).message,
         exitCode: null,
         timedOut: false,
         durationMs: Date.now() - started,
         shell: program,
-        truncated: false,
+        truncated: stderrCapture.truncated,
+        outputLimitBytes: maxOutput,
       });
       return;
     }
 
-    let out = "";
-    let errStr = "";
-    let outBytes = 0;
-    let errBytes = 0;
-    let truncated = false;
+    const out = new OutputCollector(maxOutput, opts.tail);
+    const errOut = new OutputCollector(maxOutput, opts.tail);
     let timedOut = false;
 
-    const append = (buf: Buffer, which: "out" | "err") => {
-      if (which === "out") {
-        if (outBytes >= maxOutput) { truncated = true; return; }
-        outBytes += buf.length;
-        out += buf.toString("utf8");
-      } else {
-        if (errBytes >= maxOutput) { truncated = true; return; }
-        errBytes += buf.length;
-        errStr += buf.toString("utf8");
-      }
+    child.stdout?.on("data", (b: Buffer) => { out.append(b); log?.append("stdout", b); });
+    child.stderr?.on("data", (b: Buffer) => { errOut.append(b); log?.append("stderr", b); });
+    const captures = () => {
+      const stdoutCapture = out.snapshot(), stderrCapture = errOut.snapshot();
+      return { stdout: stdoutCapture.text, stderr: stderrCapture.text, stdoutCapture, stderrCapture,
+        outputLimitBytes: maxOutput, truncated: stdoutCapture.truncated || stderrCapture.truncated };
     };
-
-    child.stdout?.on("data", (b: Buffer) => append(b, "out"));
-    child.stderr?.on("data", (b: Buffer) => append(b, "err"));
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -78,28 +75,29 @@ export function runProgram(program: string, args: string[] = [], opts: RunOption
 
     child.on("error", (err) => {
       clearTimeout(timer);
+      const stderrCapture = captureDiagnostic(errOut.snapshot(), `\n[spawn error] ${(err as Error).message}`, maxOutput, opts.tail);
+      const stdoutCapture = out.snapshot();
       resolve({
-        stdout: out,
-        stderr: errStr + `\n[spawn error] ${(err as Error).message}`,
+        stdout: stdoutCapture.text, stderr: stderrCapture.text, stdoutCapture, stderrCapture,
+        ...(log ? { log: log.finish(false) } : {}),
+        outputLimitBytes: maxOutput, truncated: stdoutCapture.truncated || stderrCapture.truncated,
         spawnError: (err as Error).message,
         exitCode: null,
         timedOut,
         durationMs: Date.now() - started,
         shell: program,
-        truncated,
       });
     });
 
     child.on("close", (code) => {
       clearTimeout(timer);
       resolve({
-        stdout: out.trimEnd(),
-        stderr: errStr.trimEnd(),
+        ...captures(),
         exitCode: code,
+        ...(log ? { log: log.finish(!timedOut) } : {}),
         timedOut,
         durationMs: Date.now() - started,
         shell: program,
-        truncated,
       });
     });
   });

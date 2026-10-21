@@ -30,13 +30,46 @@ async function check(name: string, args: Record<string, unknown>, status: string
 }
 
 describe("built-artifact stdio structured tool contract", () => {
+  it("advertises bounded output options for each execution transport", async () => {
+    const { tools } = await client.listTools();
+    for (const name of ["run_powershell", "run_program", "winrm_exec", "ssh_exec"]) {
+      const tool = tools.find(t => t.name === name)!;
+      expect(tool.inputSchema.properties).toHaveProperty("maxOutputBytes");
+      expect(tool.inputSchema.properties).toHaveProperty("tail");
+    }
+  });
+  it("returns raw bounded program output and per-stream metrics over stdio", async () => {
+    const data = await check("run_program", { program: process.execPath,
+      args: ["-e", "process.stdout.write('abcdef');process.stderr.write('uvwxyz')"],
+      maxOutputBytes: 2, tail: true }, "completed", false);
+    expect(data).toMatchObject({ stdout: "ef", stderr: "yz", truncation: {
+      truncated: true, limitBytesPerStream: 2,
+      stdout: { observedBytes: 6, capturedBytes: 2, omittedBytes: 4, truncated: true },
+      stderr: { observedBytes: 6, capturedBytes: 2, omittedBytes: 4, truncated: true },
+    } });
+  });
+  it("rejects invalid limits at the MCP boundary", async () => {
+    const response = await client.callTool({ name: "run_program", arguments: { program: process.execPath, maxOutputBytes: 0 } });
+    expect(response.isError).toBe(true);
+  });
   it("advertises a shared output schema on every tool", async () => {
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(10);
-    for (const tool of tools) {
+    expect(tools).toHaveLength(12);
+    expect(tools.map(t => t.name)).toContain("read_output_log");
+    expect(tools.map(t => t.name)).toContain("delete_output_log");
+    for (const tool of tools.filter(t => !["read_output_log", "delete_output_log"].includes(t.name))) {
       expect(tool.outputSchema?.properties).toHaveProperty("terminationStatus");
       expect(tool.outputSchema?.properties).toHaveProperty("executionId");
     }
+  });
+  it("captures and pages actual program output over built stdio", async () => {
+    const data = await check("run_program", { program: process.execPath,
+      args: ["-e", "process.stdout.write('abcdef');process.stderr.write('uvwxyz')"], maxOutputBytes: 2, logOutput: true }, "completed", false);
+    expect(data.log).toMatchObject({ complete: true, stdoutBytes: 6, stderrBytes: 6 });
+    const page = await client.callTool({ name: "read_output_log", arguments: { handle: data.log.handle, stream: "stdout", offset: 2, length: 3 } });
+    expect(JSON.parse((page.content[0] as { text: string }).text)).toMatchObject({ data: "Y2Rl", nextOffset: 5, totalBytes: 6 });
+    const deleted = await client.callTool({ name: "delete_output_log", arguments: { handle: data.log.handle } });
+    expect(JSON.parse((deleted.content[0] as { text: string }).text)).toEqual({ deleted: true });
   });
   it("fails closed on a missing executable and invalid cwd", async () => {
     const missing = await check("run_program", { program: "nonexistent-mcp-executable-15" }, "transport_error", true);
