@@ -51,11 +51,11 @@ def _empty_owned_org(adapter, receipt):
         raise ValueError('retained org is not empty and admin-only')
 
 
-def apply(adapter, path, desired):
+def apply(adapter, path, desired, *, disposable_fixture=None):
     if not path.exists():
-        _save(path, {'owned': {}, 'pending': {}, 'desired': desired})
+        _save(path, {'owned': {}, 'pending': {}, 'desired': desired, 'disposable_fixture': disposable_fixture})
     receipt = json.loads(path.read_text(encoding='utf-8'))
-    if receipt['desired'] != desired:
+    if receipt['desired'] != desired or receipt.get('disposable_fixture') != disposable_fixture:
         raise ValueError('receipt belongs to another activation')
     receipt.setdefault('pending', {})
     if receipt.get('retained_org'):
@@ -88,7 +88,7 @@ def apply(adapter, path, desired):
     return receipt
 
 
-def rollback(adapter, path, *, drop_empty_database=False):
+def rollback(adapter, path, *, disposable_fixture=None):
     if not path.exists():
         return
     receipt = json.loads(path.read_text(encoding='utf-8'))
@@ -138,10 +138,14 @@ def rollback(adapter, path, *, drop_empty_database=False):
                 continue
         elif key == 'database':
             # Destructive cleanup is opt-in for an isolated rehearsal only.
-            if not drop_empty_database:
+            if not disposable_fixture:
                 raise ValueError('database retained: explicit isolated rehearsal cleanup or data retention decision required')
-            if not adapter.database_empty(value['name']):
-                raise ValueError('database contains telemetry; retention decision required')
+            if (disposable_fixture.get('kind') != 'isolated-container'
+                    or disposable_fixture.get('receipt') != str(path)
+                    or receipt.get('disposable_fixture') != disposable_fixture):
+                raise ValueError('fixture binding drift; database retained')
+            if not adapter.disposable_database_empty(value['name']):
+                raise ValueError('database contains data or unknown relations; retention decision required')
             receipt['delete_pending'] = key
             _save(path, receipt)
             adapter.delete(key, value)
@@ -271,15 +275,40 @@ class LiveAdapter:
                 and not self.api('GET', '/api/search?type=dash-folder', org=oid)
                 and not self.api('GET', '/api/datasources', org=oid))
 
-    def database_empty(self, name):
+    def cluster_identity(self):
+        return str(self._db('SELECT system_identifier FROM pg_control_system()')[0])
+
+    def disposable_database_empty(self, name):
+        # Only the exact disposable schema (or pre-schema empty DB) is eligible.
+        # Unknown relations and populated checkpoint tables retain the database.
         import psycopg
+        expected = {'telemetry_event', 'telemetry_tool', 'telemetry_metric_axis', 'telemetry_checkpoint'}
+        expected_views = {'dashboard_events', 'dashboard_tools', 'dashboard_metric_axes'}
         with psycopg.connect(self.admin_dsn, dbname=name) as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT to_regclass('public.telemetry_event')")
-                if cur.fetchone()[0] is None:
-                    return True
-                cur.execute('SELECT EXISTS (SELECT 1 FROM telemetry_event LIMIT 1)')
-                return not cur.fetchone()[0]
+                cur.execute("SELECT n.nspname, c.relname, c.relkind FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND c.relkind IN ('r','p','v','m','f','S')")
+                relations = cur.fetchall()
+                tables = {(schema, relation) for schema, relation, kind in relations if kind in ('r', 'p')}
+                views = {(schema, relation) for schema, relation, kind in relations if kind == 'v'}
+                other = {(schema, relation) for schema, relation, kind in relations if kind not in ('r', 'p', 'v')}
+                cur.execute("SELECT n.nspname, c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND c.relkind='i'")
+                indexes = set(cur.fetchall())
+                expected_indexes = {'telemetry_event_pkey', 'telemetry_event_window', 'telemetry_event_installation', 'telemetry_event_arrival', 'telemetry_tool_pkey', 'telemetry_tool_stream', 'telemetry_metric_axis_pkey', 'telemetry_checkpoint_pkey'}
+                cur.execute("SELECT n.nspname, p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname NOT LIKE 'pg_toast%'")
+                functions = set(cur.fetchall())
+                expected_functions = {'adoption_utc', 'delivery_health_utc'}
+                if (other or tables not in (set(), {('public', t) for t in expected})
+                        or views not in (set(), {('public', v) for v in expected_views})
+                        or indexes not in (set(), {('public', i) for i in expected_indexes})
+                        or functions not in (set(), {('public', f) for f in expected_functions})):
+                    return False
+                if len({bool(tables), bool(views), bool(indexes), bool(functions)}) != 1:
+                    return False
+                for table in expected if tables else ():
+                    cur.execute(self.sql.SQL('SELECT EXISTS (SELECT 1 FROM {} LIMIT 1)').format(self.sql.Identifier('public', table)))
+                    if cur.fetchone()[0]:
+                        return False
+                return True
 
     def credential_active(self, key):
         name = resources('placeholder')[key]['name']
@@ -396,8 +425,8 @@ def main():
     parser.add_argument('--db-host', required=True)
     parser.add_argument('--grafana-error-log', type=Path,
                         help='Local Grafana server log; required to prove the specific unsupported org DELETE 500')
-    parser.add_argument('--isolated-empty-rehearsal', action='store_true',
-                        help='Permit DROP DATABASE only after empty-data verification in an isolated rehearsal')
+    parser.add_argument('--disposable-fixture-file', type=Path,
+                        help='Fixture provenance bound to receipt and PostgreSQL cluster; never use in production')
     args = parser.parse_args()
     script = ROOT / 'operations' / 'prepare-private-activation.py'
     spec = spec_from_file_location('pinned', script)
@@ -406,10 +435,16 @@ def main():
     module.build(ROOT)  # reject unreviewed SQL/dashboard bytes before any mutation
     adapter = LiveAdapter(args.pg_admin_dsn_file.read_text().strip(), args.grafana_url, args.grafana_token_file, args.importer_secret_file, args.dashboard_secret_file, args.ca_file, args.db_host, args.grafana_error_log)
     desired = resources(args.approved_admin)
+    fixture = None
+    if args.disposable_fixture_file:
+        fixture = json.loads(args.disposable_fixture_file.read_text())
+        if (fixture.get('kind') != 'isolated-container' or fixture.get('receipt') != str(args.receipt)
+                or fixture.get('cluster_id') != adapter.cluster_identity()):
+            raise ValueError('fixture provenance mismatch')
     if args.mode == 'apply':
-        apply(adapter, args.receipt, desired)
+        apply(adapter, args.receipt, desired, disposable_fixture=fixture)
     elif args.mode == 'rollback':
-        rollback(adapter, args.receipt, drop_empty_database=args.isolated_empty_rehearsal)
+        rollback(adapter, args.receipt, disposable_fixture=fixture)
     else:
         receipt = json.loads(args.receipt.read_text())
         if (receipt['desired'] != desired or receipt.get('pending') or set(receipt['owned']) != set(desired)

@@ -49,7 +49,16 @@ for n in $(seq 1 60); do
   sleep 2
 done
 python -c 'import psycopg;psycopg.connect(open("/fixture/admin.dsn").read()).close()'
-set -- --grafana-error-log /fixture/grafana-logs/grafana.log --isolated-empty-rehearsal --receipt /fixture/receipt.json --approved-admin admin --pg-admin-dsn-file /fixture/admin.dsn --grafana-url "http://${FIXTURE_NAME}-grafana:3000" --grafana-token-file /fixture/grafana.token --importer-secret-file /fixture/importer.secret --dashboard-secret-file /fixture/dashboard.secret --ca-file /fixture/ca.crt --db-host "${FIXTURE_NAME}-pg:5432"
+python - <<'PY'
+import json,psycopg
+with psycopg.connect(open('/fixture/admin.dsn').read()) as c:
+ with c.cursor() as q:
+  q.execute('SELECT system_identifier FROM pg_control_system()')
+  cluster=str(q.fetchone()[0])
+with open('/fixture/provenance.json','w') as f:
+ json.dump({'kind':'isolated-container','receipt':'/fixture/receipt.json','cluster_id':cluster},f)
+PY
+set -- --grafana-error-log /fixture/grafana-logs/grafana.log --disposable-fixture-file /fixture/provenance.json --receipt /fixture/receipt.json --approved-admin admin --pg-admin-dsn-file /fixture/admin.dsn --grafana-url "http://${FIXTURE_NAME}-grafana:3000" --grafana-token-file /fixture/grafana.token --importer-secret-file /fixture/importer.secret --dashboard-secret-file /fixture/dashboard.secret --ca-file /fixture/ca.crt --db-host "${FIXTURE_NAME}-pg:5432"
 python /src/operations/activate_private.py apply "$@"
 python /src/operations/activate_private.py verify "$@"
 python /src/operations/activate_private.py apply "$@"
@@ -73,6 +82,30 @@ query={'from':'now-1h','to':'now','queries':[{'refId':'A','datasource':{'uid':ds
 code,result=request('/api/ds/query','admin',admin.split(':',1)[1],'POST',query,oid); assert code==200 and result['results']['A'].get('frames'),(code,result)
 code,_=request('/api/ds/query','outsider',password,'POST',query,oid); assert code in (401,403),code
 print('isolated cross-org query: admin 200, outsider denied',code)
+PY
+# Refuse destructive cleanup while any known or unknown relation holds data.
+python - <<'PY'
+import psycopg
+with psycopg.connect(open('/fixture/admin.dsn').read(),dbname='hermes_mcp_analytics_private') as db:
+ with db.cursor() as q:
+  q.execute("INSERT INTO telemetry_checkpoint(source_key,device,inode,position,prefix_hash) VALUES ('fixture',1,1,1,'fixture')")
+PY
+if python /src/operations/activate_private.py rollback "$@" > /fixture/blocked.out 2>&1; then echo 'populated checkpoint rollback unexpectedly completed' >&2; exit 1; fi
+grep -q 'retention decision required' /fixture/blocked.out
+python - <<'PY'
+import psycopg
+with psycopg.connect(open('/fixture/admin.dsn').read(),dbname='hermes_mcp_analytics_private') as db:
+ with db.cursor() as q:
+  q.execute('DELETE FROM telemetry_checkpoint')
+  q.execute('CREATE TABLE unexpected_data (id integer)')
+  q.execute('INSERT INTO unexpected_data VALUES (1)')
+PY
+if python /src/operations/activate_private.py rollback "$@" > /fixture/blocked.out 2>&1; then echo 'foreign table rollback unexpectedly completed' >&2; exit 1; fi
+grep -q 'retention decision required' /fixture/blocked.out
+python - <<'PY'
+import psycopg
+with psycopg.connect(open('/fixture/admin.dsn').read(),dbname='hermes_mcp_analytics_private') as db:
+ with db.cursor() as q:q.execute('DROP TABLE unexpected_data')
 PY
 for attempt in 1 2; do
   if python /src/operations/activate_private.py rollback "$@" > /fixture/rollback.out 2>&1; then echo 'rollback unexpectedly completed' >&2; exit 1; fi
@@ -139,6 +172,26 @@ with psycopg.connect(open('/fixture/admin.dsn').read()) as db:
   cursor.execute("SELECT count(*) FROM pg_database WHERE datname='hermes_mcp_analytics_private'")
   assert cursor.fetchone()[0]==0
 print('isolated fresh-process crash recovery: DB absent, receipt empty')
+PY
+# Missing event relation cannot conceal retained checkpoint data.
+cp /fixture/retained-receipt.json /fixture/receipt.json
+python /src/operations/activate_private.py apply "$@"
+python - <<'PY'
+import psycopg
+with psycopg.connect(open('/fixture/admin.dsn').read(),dbname='hermes_mcp_analytics_private') as db:
+ with db.cursor() as q:
+  q.execute("INSERT INTO telemetry_checkpoint(source_key,device,inode,position,prefix_hash) VALUES ('fixture',1,1,1,'fixture')")
+  q.execute('DROP TABLE telemetry_event CASCADE')
+PY
+if python /src/operations/activate_private.py rollback "$@" > /fixture/blocked.out 2>&1; then echo 'missing event table rollback unexpectedly completed' >&2; exit 1; fi
+grep -q 'retention decision required' /fixture/blocked.out
+python - <<'PY'
+import psycopg
+with psycopg.connect(open('/fixture/admin.dsn').read()) as db:
+ with db.cursor() as q:
+  q.execute("SELECT count(*) FROM pg_database WHERE datname='hermes_mcp_analytics_private'")
+  assert q.fetchone()[0]==1
+print('isolated negative cases: checkpoint, unknown table, absent event with data all retained')
 PY
 RUN
 chmod 755 "$root/run.sh"
