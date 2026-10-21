@@ -1,0 +1,33 @@
+[Unit]
+Description=Private analytics collector recurrence (reviewed, manual enable only)
+AssertPathExists=/opt/analytics-private-data/telemetry.jsonl
+AssertPathExists=/etc/analytics-recurring/recurrence.conf
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=analytics-import
+Group=analytics-import
+EnvironmentFile=/etc/analytics-recurring/recurrence.conf
+WorkingDirectory=/opt/analytics-reviewed/operations
+ExecStart=/usr/bin/python3 /opt/analytics-reviewed/operations/recurring_import.py \
+  --source /opt/analytics-private-data/telemetry.jsonl \
+  --state /opt/analytics-private-data/collector-identity.json \
+  --receipt /opt/analytics-private-data/recurrence-receipt.json \
+  --host ${COLLECTOR_SSH_HOST} \
+  --key /etc/analytics-recurring/collector-key \
+  --known-hosts /etc/analytics-recurring/known_hosts \
+  --dsn-file /etc/analytics-recurring/restricted-dsn \
+  --importer /opt/analytics-reviewed/import_jsonl.py \
+  --classification /etc/analytics-recurring/classification.json \
+  --collector-hash ${COLLECTOR_SEGMENT_SHA256} \
+  --transfer-hash ${INCREMENTAL_TRANSFER_SHA256} \
+  --importer-hash ${IMPORTER_SHA256}
+TimeoutStartSec=600
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/analytics-private-data
+PrivateTmp=yes

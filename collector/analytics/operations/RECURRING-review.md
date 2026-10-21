@@ -1,6 +1,6 @@
 # Recurring private analytics import — review gate
 
-**Not installed or scheduled.** Production source, checkpoint, and database remain unchanged. The intended single owner is the PostgreSQL host (192.168.100.81), not a Hermes/LLM cron job. Direct TCP/22 from the controller to collector 192.168.100.38 and PG 192.168.100.81 was observed; paperclip-srv1 also reached both ports over an established WinRM session. TCP reachability does not establish SSH authorization or PostgreSQL privileges. No credential or production task was created by this PR.
+**Not installed or scheduled.** Production source, checkpoint, and database remain unchanged. Disabled, installable systemd templates and protected configuration/namespace contract are in `systemd/README.md`. The intended single owner is the PostgreSQL host (192.168.100.81), not a Hermes/LLM cron job. Direct TCP/22 from the controller to collector 192.168.100.38 and PG 192.168.100.81 was observed; paperclip-srv1 also reached both ports over an established WinRM session. TCP reachability does not establish SSH authorization or PostgreSQL privileges. No credential or production task was created by this PR.
 
 ## Constrained transport requested for review
 

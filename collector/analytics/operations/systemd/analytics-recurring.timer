@@ -1,0 +1,11 @@
+[Unit]
+Description=Private analytics recurrence schedule (disabled until commissioned)
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+RandomizedDelaySec=30
+Unit=analytics-recurring.service
+
+[Install]
+WantedBy=timers.target

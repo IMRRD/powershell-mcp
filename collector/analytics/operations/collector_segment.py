@@ -29,6 +29,10 @@ def extract(source, offset, output, limit=MAX_CHUNK, expected_prefix=None):
             raise ValueError('collector historical prefix changed')
         data = stream.read(min(limit, before.st_size - offset))
         complete = data.rfind(b'\n') + 1
+        if not complete and data and before.st_size - offset > limit:
+            raise ValueError('collector record exceeds segment limit')
+        if not complete and data:
+            raise ValueError('collector incomplete trailing record')
         data = data[:complete]
         after = os.fstat(stream.fileno())
         if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino) or after.st_size < offset + len(data):

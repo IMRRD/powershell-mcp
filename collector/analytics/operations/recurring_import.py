@@ -20,10 +20,73 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 
 from incremental_transfer import append_verified, digest, MAX_CHUNK
 
 HERE = Path(__file__).resolve().parent
+
+
+def bounded_process(command, payload, *, stdout_limit, stderr_limit, timeout, env=None):
+    """Drain both pipes concurrently, killing and reaping on overflow or timeout."""
+    child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, env=env)
+    buffers = [bytearray(), bytearray()]
+    limits = [stdout_limit, stderr_limit]
+    overflow = threading.Event()
+    write_error = threading.Event()
+
+    def drain(pipe, index):
+        try:
+            while block := pipe.read(4096):
+                remaining = limits[index] - len(buffers[index])
+                buffers[index].extend(block[:max(0, remaining)])
+                if len(block) > remaining:
+                    overflow.set()
+                    child.kill()
+                    break
+        except OSError:
+            overflow.set()
+        finally:
+            pipe.close()
+
+    def feed():
+        try:
+            child.stdin.write(payload)
+            child.stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            write_error.set()
+
+    readers = [threading.Thread(target=drain, args=(pipe, i), daemon=True)
+               for i, pipe in enumerate((child.stdout, child.stderr))]
+    writer = threading.Thread(target=feed, daemon=True)
+    for reader in readers:
+        reader.start()
+    writer.start()
+    deadline = time.monotonic() + timeout
+    try:
+        try:
+            child.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            raise TimeoutError('child timed out') from None
+        writer.join(timeout=max(0, deadline - time.monotonic()))
+        for reader in readers:
+            reader.join(timeout=max(0, deadline - time.monotonic()))
+        if overflow.is_set():
+            raise RuntimeError('child output limit exceeded')
+        if writer.is_alive() or write_error.is_set() or any(r.is_alive() for r in readers):
+            raise RuntimeError('child I/O incomplete')
+        return subprocess.CompletedProcess(command, child.returncode, bytes(buffers[0]), bytes(buffers[1]))
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.wait()
+        writer.join(timeout=1)
+        for reader in readers:
+            reader.join(timeout=1)
+        if not writer.is_alive() and not child.stdin.closed:
+            child.stdin.close()
 
 
 def now():
@@ -62,8 +125,8 @@ def read_segment(ssh, host, key, known_hosts, offset, prefix):
                '-o', 'IdentitiesOnly=yes', '-o', 'UserKnownHostsFile=' + known_hosts,
                '-i', key, host, 'segment-v1']
     request = json.dumps({'offset': offset, 'limit': MAX_CHUNK, 'expected_prefix': prefix}).encode() + b'\n'
-    result = subprocess.run(command, input=request, capture_output=True, timeout=90, check=False)
-    if result.returncode or len(result.stdout) > MAX_CHUNK + 1024 or len(result.stderr) > 4096:
+    result = bounded_process(command, request, stdout_limit=MAX_CHUNK + 1024, stderr_limit=4096, timeout=90)
+    if result.returncode:
         raise RuntimeError('collector transport failed')
     header, separator, chunk = result.stdout.partition(b'\n')
     if not separator or len(header) > 1024:
@@ -109,15 +172,14 @@ def run(args):
                     payload = Path(temp) / 'segment'
                     payload.write_bytes(chunk)
                     append_verified(source, payload, metadata, state)
-                if len(chunk) < MAX_CHUNK:
-                    break
+
             else:
                 raise RuntimeError('segment budget exhausted; retry next cycle')
             env = dict(os.environ)
             env['ANALYTICS_DSN'] = Path(args.dsn_file).read_text().strip()
-            result = subprocess.run([sys.executable, args.importer, '--source', str(source),
+            result = bounded_process([sys.executable, args.importer, '--source', str(source),
                                      '--classification', args.classification], env=env,
-                                    capture_output=True, timeout=300, check=False)
+                                    payload=b'', stdout_limit=65536, stderr_limit=4096, timeout=300)
             if result.returncode:
                 raise RuntimeError('reviewed importer failed')
             receipt.update(status='success', last_success=now(), last_error=None)
