@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
-describe("v0.6.0 release contract", () => {
+describe("v0.7.0 release contract", () => {
   it("pins a trusted-publishing-compatible Node and npm toolchain", () => {
     const workflow = readFileSync(resolve(root, ".github/workflows/publish.yml"), "utf8");
 
@@ -22,9 +22,9 @@ describe("v0.6.0 release contract", () => {
     const manifest = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
     const lockfile = JSON.parse(readFileSync(resolve(root, "package-lock.json"), "utf8"));
 
-    expect(manifest.version).toBe("0.6.0");
-    expect(lockfile.version).toBe("0.6.0");
-    expect(lockfile.packages[""].version).toBe("0.6.0");
+    expect(manifest.version).toBe("0.7.0");
+    expect(lockfile.version).toBe("0.7.0");
+    expect(lockfile.packages[""].version).toBe("0.7.0");
   });
 
   it("does not retain a credentialed legacy release workflow", () => {
