@@ -13,6 +13,26 @@ Most tools that let an agent run Windows commands spawn a visible console window
 
 ## Tools
 
+All ten tools advertise a versioned MCP `outputSchema` and return the same
+`structuredContent` contract (`schemaVersion: 1`) alongside their original
+human-readable text. Fields are `executionId` (per call), `transport`, `target`,
+`stdout`, `stderr`, nullable `exitCode`, `durationMs`, `timedOut`, `truncation`
+(`truncated`, nullable `limitBytesPerStream`), `terminationStatus`, and `detail`.
+`terminationStatus` is one of `completed`, `nonzero_exit`, `remote_error`, `timeout`,
+`cancelled`, `transport_error`, or `unknown`. Any status other than `completed`
+sets MCP `isError`; this is execution status, **not** proof that an application
+operation succeeded. A null exit code never means success. SSH includes a
+signal or connection error in `detail`; an unsolicited signal is `unknown`, not
+caller cancellation. SFTP includes direction and verified local file size where
+available. WinRM validates a locally framed invocation result: successful
+invocation is `completed`, remote script errors are `remote_error`, and connection
+failures are `transport_error`. Its *local* PowerShell host exit is in
+`detail.localExitCode`; remote native `exitCode` remains null. Missing or truncated
+frames fail closed. `terminationCertainty` is `root_exited` only for an observed
+local child exit, otherwise `unknown`; neither status proves descendants or remote
+execution stopped after a timeout. These
+results never include authentication options or credential values.
+
 | Tool | Description |
 |------|-------------|
 | `run_powershell` | Run any PowerShell script/command (hidden). `{ script, cwd?, timeoutMs? }` |

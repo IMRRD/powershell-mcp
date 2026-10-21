@@ -13,6 +13,8 @@ export interface PsResult {
   shell: string;
   /** True if stdout/stderr was truncated at maxOutputBytes. */
   truncated: boolean;
+  spawnError?: string;
+  invocationStatus?: "completed" | "remote_error" | "transport_error";
 }
 
 export interface RunOptions {
@@ -92,6 +94,7 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
       durationMs: Date.now() - started,
       shell: exe,
       truncated: false,
+      spawnError: (err as Error).message,
     });
 
     const attempt = (candidateIndex: number): void => {
@@ -166,6 +169,7 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
         resolve({
           stdout: out,
           stderr: errStr + `\n[spawn error] ${(err as Error).message}`,
+          spawnError: (err as Error).message,
           exitCode: null,
           timedOut,
           durationMs: Date.now() - started,

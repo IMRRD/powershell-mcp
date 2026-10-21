@@ -33,6 +33,7 @@ export function runProgram(program: string, args: string[] = [], opts: RunOption
       resolve({
         stdout: "",
         stderr: `Failed to spawn ${program}: ${(err as Error).message}`,
+        spawnError: (err as Error).message,
         exitCode: null,
         timedOut: false,
         durationMs: Date.now() - started,
@@ -80,6 +81,7 @@ export function runProgram(program: string, args: string[] = [], opts: RunOption
       resolve({
         stdout: out,
         stderr: errStr + `\n[spawn error] ${(err as Error).message}`,
+        spawnError: (err as Error).message,
         exitCode: null,
         timedOut,
         durationMs: Date.now() - started,
