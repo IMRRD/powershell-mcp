@@ -106,3 +106,32 @@ class AnalyticsTest(unittest.TestCase):
         finally:
             self.db.execute(f'SET search_path TO {self.schema}')
             self.db.execute(f'DROP SCHEMA {restored} CASCADE')
+
+    def test_metric_axes_are_preserved_without_triple_counting(self):
+        self.append([dict(event='tool_metrics', ts='2026-01-01T00:00:00.000Z', metrics={'ssh_exec': {'outcomes': {'success': 2, 'error': 1}, 'durations': {'lt100': 1, 'lt1000': 2}, 'features': {'remote': 3}}})])
+        self.assertEqual(ingest(self.db, self.source, self.classes), 1)
+        self.assertEqual(self.db.execute("SELECT axis, bucket, calls FROM dashboard_metric_axes ORDER BY axis,bucket").fetchall(), [('durations', 'lt100', 1), ('durations', 'lt1000', 2), ('features', 'remote', 3), ('outcomes', 'error', 1), ('outcomes', 'success', 2)])
+        self.assertEqual(self.db.execute('SELECT sum(calls) FROM dashboard_tools').fetchone()[0], 3)
+        self.assertEqual(ingest(self.db, self.source, self.classes), 0)
+
+    def test_malformed_metric_axis_rolls_back_checkpoint(self):
+        self.append([dict(event='tool_metrics', ts='2026-01-01T00:00:00.000Z', metrics={'ssh_exec': {'outcomes': {'success': 2}, 'durations': {'lt100': 1}, 'features': {'remote': 2}}})])
+        with self.assertRaises(ValueError):
+            ingest(self.db, self.source, self.classes)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM telemetry_checkpoint').fetchone()[0], 0)
+        self.assertEqual(self.db.execute('SELECT count(*) FROM telemetry_event').fetchone()[0], 0)
+
+    def test_invalid_event_and_receipt_times_are_visible_quality(self):
+        self.append([dict(event='startup', ts='not-a-time', _receivedAt='2026-02-30T00:00:00.000Z')])
+        self.assertEqual(ingest(self.db, self.source, self.classes), 1)
+        self.assertEqual(self.db.execute('SELECT event_time_quality, receipt_time_quality FROM dashboard_events').fetchone(), ('invalid', 'invalid'))
+        self.assertEqual(self.db.execute("SELECT event_time_quality, receipt_time_quality, count(*) FROM dashboard_events GROUP BY 1,2").fetchone(), ('invalid', 'invalid', 1))
+
+    def test_delivery_health_empty_stale_and_partial(self):
+        self.assertEqual(self.db.execute("SELECT status FROM delivery_health_utc('2026-01-02', '2026-01-01', interval '1 hour')").fetchone()[0], 'Unknown: no feed/checkpoint')
+        self.append([dict(event='startup', ts='2026-01-01T00:00:00.000Z', _receivedAt='2026-01-01T00:00:01.000Z')])
+        ingest(self.db, self.source, self.classes)
+        self.assertEqual(self.db.execute("SELECT status FROM delivery_health_utc('2026-01-02', '2026-01-01', interval '1 hour')").fetchone()[0], 'Stale')
+        self.append([dict(event='startup', ts='bad', _receivedAt='2026-01-02T00:00:00.000Z')])
+        ingest(self.db, self.source, self.classes)
+        self.assertEqual(self.db.execute("SELECT status FROM delivery_health_utc('2026-01-02', '2026-01-01', interval '1 hour')").fetchone()[0], 'Partial: invalid event time')
