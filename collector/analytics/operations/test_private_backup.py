@@ -3,6 +3,9 @@ import json
 from pathlib import Path
 import tempfile
 import types
+import subprocess
+import sys
+import configparser
 import unittest
 from unittest.mock import patch
 
@@ -74,6 +77,73 @@ class BackupTests(unittest.TestCase):
                 backup.run(self.args)
         self.assertEqual(list(self.offhost.iterdir()), [])
         self.assertEqual(json.loads((self.state / 'latest-attempt.json').read_text())['status'], 'failed')
+
+    def test_expired_budget_prevents_dump_and_keeps_failed_receipt(self):
+        self.args.total_timeout = 0
+        with patch.object(backup, 'run_command') as command:
+            with self.assertRaises(TimeoutError):
+                backup.run(self.args)
+        command.assert_not_called()
+        self.assertEqual(json.loads((self.state / 'latest-attempt.json').read_text())['status'], 'failed')
+
+    def test_budget_applies_to_hash_chunks(self):
+        with patch.object(backup.time, 'monotonic', side_effect=[0, 2]):
+            with self.assertRaises(TimeoutError):
+                backup.sha(self.schema, deadline=1)
+
+    def test_service_bound_exceeds_coordinator_and_cleanup(self):
+        config = configparser.ConfigParser(interpolation=None)
+        config.read(Path(__file__).parent / 'systemd' / 'analytics-private-backup.service')
+        start = config['Service']['ExecStart']
+        total = int(start.split('--total-timeout ')[1].split()[0])
+        service = config['Service']['TimeoutStartSec']
+        seconds = int(service.removesuffix('min')) * 60 if service.endswith('min') else int(service.removesuffix('s'))
+        self.assertGreaterEqual(seconds, total + backup.CLEANUP_MARGIN_SECONDS)
+
+    def test_subprocess_timeout_reaps_child(self):
+        with self.assertRaises(subprocess.TimeoutExpired):
+            backup.run_command([sys.executable, '-c', 'import time; time.sleep(10)'], .01)
+
+    def test_directory_sync_failure_after_replace_is_not_success(self):
+        self.state.mkdir()
+        target = self.state / 'latest-attempt.json'
+        with patch.object(backup, 'sync_directory', side_effect=OSError('directory fsync failed')):
+            with self.assertRaises(OSError):
+                backup.atomic_json(target, {'status': 'success'})
+        self.assertEqual(json.loads(target.read_text())['status'], 'success')
+        # Caller must fail closed: replacement is visible but persistence is uncertain.
+
+    @unittest.skipIf(backup.os.name == 'nt', 'POSIX directory fsync requires POSIX runner')
+    def test_posix_receipt_syncs_parent_directory(self):
+        self.state.mkdir()
+        with patch.object(backup.os, 'fsync', wraps=backup.os.fsync) as sync:
+            backup.atomic_json(self.state / 'latest-attempt.json', {'status': 'unknown'})
+        self.assertGreaterEqual(sync.call_count, 2)
+
+    def test_success_receipt_sync_failure_preserves_prior_archive(self):
+        with patch.object(backup, 'run_command', self.commands):
+            first = backup.run(self.args)
+            original = self.offhost / first['remote']
+            real = backup.atomic_json
+            calls = 0
+            def failing_receipt(path, value):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    with patch.object(backup, 'sync_directory', side_effect=OSError('uncertain')):
+                        return real(path, value)
+                return real(path, value)
+            with patch.object(backup, 'atomic_json', failing_receipt):
+                with self.assertRaises(OSError):
+                    backup.run(self.args)
+            self.assertEqual(backup.sha(original), first['sha256'])
+            self.assertEqual(json.loads((self.state / 'latest-attempt.json').read_text())['status'], 'failed')
+
+    def test_expired_transfer_budget_does_not_launch_sftp(self):
+        with patch.object(backup.time, 'monotonic', return_value=10), patch.object(backup, 'run_command') as command:
+            with self.assertRaises(TimeoutError):
+                backup.transfer(self.args, self.schema, 'backups/new.dump', 1)
+        command.assert_not_called()
 
     def test_schema_pin_and_capacity(self):
         self.schema.write_text('changed')
