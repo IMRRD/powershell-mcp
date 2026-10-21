@@ -30,7 +30,7 @@ export const resultShape = {
   errorRecordsTruncated: z.boolean().optional(),
   terminationCertainty: z.enum(["unknown", "root_exited"]),
   log: z.object({ handle: z.string(), complete: z.boolean(), stdoutBytes: z.number(), stderrBytes: z.number(), expiresAt: z.string() }).optional(),
-  detail: z.object({ shell: z.string().optional(), version: z.string().optional(), signal: z.string().optional(), error: z.string().optional(), direction: z.enum(["upload", "download"]).optional(), bytes: z.number().optional(), localExitCode: z.number().nullable().optional() }),
+  detail: z.object({ shell: z.string().optional(), version: z.string().optional(), signal: z.string().optional(), error: z.string().optional(), direction: z.enum(["upload", "download"]).optional(), bytes: z.number().optional(), verification: z.enum(["not_started", "sha256_matched", "failed"]).optional(), finalized: z.boolean().optional(), cleanup: z.enum(["not_needed", "removed", "failed", "unknown"]).optional(), sha256: z.string().optional(), localExitCode: z.number().nullable().optional() }),
 };
 export type ExecutionResult = z.infer<ReturnType<typeof z.object<typeof resultShape>>>;
 
@@ -67,7 +67,7 @@ export function fromSftp(r: SftpResult, target: string, direction: "upload" | "d
   const status = r.timedOut ? "timeout" : r.ok ? "completed" : "transport_error";
   return { ...base("sftp", target, r.durationMs), stdout: "", stderr: r.error ?? "", exitCode: null,
     timedOut: r.timedOut ?? false, truncation: { truncated: false, limitBytesPerStream: null }, terminationStatus: status, terminationCertainty: "unknown",
-    detail: { direction, ...(r.bytes !== undefined ? { bytes: r.bytes } : {}), ...(r.error ? { error: r.error } : {}) },
+    detail: { direction, ...(r.bytes !== undefined ? { bytes: r.bytes } : {}), ...(r.verification ? { verification: r.verification } : {}), ...(r.finalized !== undefined ? { finalized: r.finalized } : {}), ...(r.cleanup ? { cleanup: r.cleanup } : {}), ...(r.sha256 ? { sha256: r.sha256 } : {}), ...(r.error ? { error: r.error } : {}) },
   };
 }
 export function toolResult(data: ExecutionResult, text: string) {

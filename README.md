@@ -92,6 +92,38 @@ this is **not** an end-to-end bounded-memory guarantee for remoting.
 | `sftp_upload` | Upload a local file to a remote host over SFTP, in-process (ssh2 â€” no scp.exe/WSL, headless). `{ localPath, remotePath, host, username, port?, privateKeyPath?, passphrase?, password?, timeoutMs? }` |
 | `sftp_download` | Download a remote file to this host over SFTP, in-process. Same params as `sftp_upload`. |
 
+### Opt-in verified staged SFTP
+
+`sftp_upload` and `sftp_download` accept `staged: true` (default false).
+The default retains the legacy direct `fastPut`/`fastGet` behavior; it does not
+promise destination preservation or content verification. Staged transfers create
+an exclusive, unpredictable `.part` file beside the destination, verify SHA-256
+against a readback, and finalize without replacing an existing destination.
+Upload uses the server's `hardlink@openssh.com` extension for no-clobber
+finalization; servers without that capability fail closed rather than falling
+back to an overwriting rename. Download uses a local hard link for no-clobber
+finalization. The staging and destination paths must support hard links on the
+same filesystem; filesystem permissions, server extension behavior and
+concurrent external writers can still cause failure. Only an exclusively created
+temporary path is eligible for cleanup; an existing destination is not deleted.
+
+Structured `detail` adds `verification` (`not_started`, `failed`, or
+`sha256_matched`), `finalized` (true/false, or absent when a remote finalization
+request was sent but its outcome is unknown), `cleanup` (`not_needed`, `removed`,
+or `failed`, or `unknown` when remote staging may remain), `sha256` on verified success, and `bytes` when the staged copy's
+size was observed. A cleanup failure **after** successful finalization may
+report a failed operation with `finalized: true`; reconcile the destination and
+orphaned staging file separately. On timeout or connection loss, the reported
+cleanup is not proof that remote work stopped or no orphan remains. In particular,
+do not retry an ambiguous finalization as though `finalized: false` had been
+proved. SHA-256 readback checks observed bytes, not an immutable source snapshot:
+source files must be kept stable by the caller; concurrent mutation outside the
+observed comparison window is not prevented, and there is no source lock.
+
+Only synthetic loopback SFTP fixtures exercise this feature in the repository;
+live-server extension behavior, filesystem semantics, and permissions remain
+unverified and require operator validation before deployment.
+
 > **Native programs:** Windows PowerShell routes a native command's stdout to the console, so run hidden it is lost. Use `run_program` (direct-exec) for console binaries like `gh`/`git`/`docker`; use `run_powershell` for PowerShell/cmdlet logic.
 
 **Typed inputs:** `run_powershell` accepts `engine: "pwsh" | "powershell"` (Windows; only `pwsh` elsewhere). An explicit choice selects only that engine and overrides `PWSH_MCP_EXE`; if it is missing, execution fails without fallback. When `engine` is omitted and `PWSH_MCP_EXE` is configured, only that executable is attempted; a missing configured executable fails without fallback. Only when neither is selected does automatic discovery try `pwsh`, then `powershell.exe` on Windows (only `pwsh` on other platforms). `runtime_capabilities.availableEngines` reports detected named engines, not whether the configured override is runnable. Its result `detail.shell` reports the actual executable used and `detail.version` the version when detectable. `parameters` is an optional named JSON object of strings, finite numbers, booleans, nulls, arrays and nested objects (max 8 levels, 1 MiB serialized UTF-8). Declare matching `param($name)` in the script. Values are sent on stdin and bound as data, not interpolated into source; the default remains legacy (strict must be requested explicitly). `winrm_exec` accepts the same `parameters` and sends them inside its protected stdin payload for remote binding. Never deliberately print secrets: emitted output may enter results or opt-in output logs.
