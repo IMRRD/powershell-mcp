@@ -7,3 +7,5 @@ coverage/
 *.bat
 *.ps1
 tidy_done.txt
+
+collector/analytics/__pycache__/
