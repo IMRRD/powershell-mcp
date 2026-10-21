@@ -9,7 +9,7 @@ EXPECTED = {
     'schema.sql': 'bbb62ecdb50c1f9bf461784fdbaa49733587933b',
     'roles.sql': '239b8e8718351950e8a22e139315a0c15e3d9ad3',
     'import_jsonl.py': '9d734555790ce54a537c21e29e14522143a6e68d',
-    'dashboard.json': '405284453e5ab75528b4de1f4f22beb8222b9430',
+    'dashboard.json': 'f556a0986ac6383396e041d9adb307ce2126baca',
     'datasource.yaml': 'c200b89cbe01d277790ff571753544bba5eda962',
 }
 
