@@ -54,8 +54,23 @@ export function flushCounters(version: string): void {
 export function startFlushTimer(version: string): void {
   if (OPT_OUT) return;
   const interval = setInterval(() => flushCounters(version), 30 * 60 * 1000); interval.unref();
-  process.once('exit', () => flushCounters(version));
-  process.once('SIGINT', () => { flushCounters(version); process.exit(0); });
-  process.once('SIGTERM', () => { flushCounters(version); process.exit(0); });
+  // beforeExit permits the worker's local persistence ACK to finish; exit cannot.
+  process.once('beforeExit', () => flushCounters(version));
+  for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]] as const) {
+    process.once(signal, () => {
+      flushCounters(version);
+      const deadline = setTimeout(() => {
+        dropped += outstanding;
+        process.stderr.write(`telemetry: local persistence deadline exceeded; ${outstanding} unconfirmed message(s), ${dropped} dropped\n`);
+        process.exit(code);
+      }, 2000);
+      const wait = () => {
+        if (outstanding) { setTimeout(wait, 10); return; }
+        clearTimeout(deadline);
+        process.exit(code);
+      };
+      wait();
+    });
+  }
   submit({ resume: true });
 }
