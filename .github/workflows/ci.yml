@@ -27,6 +27,16 @@ jobs:
         with:
           python-version: '3.11'
       - run: python -m pip install 'psycopg[binary]==3.3.6'
+      - name: Require frozen reviewed blobs for operations tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          reviewed=f15badda9095cc00f20e056d43e6e5d6216e74cd
+          git fetch --no-tags --depth=1 origin "$reviewed"
+          git cat-file -e "$reviewed^{commit}"
+          for path in operations/activate_private.py operations/prepare-private-activation.py schema.sql roles.sql queries.sql dashboard.json; do
+            git cat-file -e "$reviewed:collector/analytics/$path"
+          done
       - run: python -m unittest discover -s collector/analytics -v
       - run: python -m unittest discover -s collector/analytics/operations -p 'test_*.py' -v
   build-test:
