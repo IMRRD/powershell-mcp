@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import pathlib
 import tempfile
 import unittest
@@ -50,6 +51,53 @@ class Fake:
 
 
 class ActivationTests(unittest.TestCase):
+    def test_ssh_mutation_timeout_keeps_pending_receipt_and_does_not_retry(self):
+        backend = Fake()
+        adapter = mod.SSHAdapter('pg-host', 'grafana-host', 'identity')
+        attempts = []
+        def execute(host, identity, request):
+            if request['action'] == 'create':
+                attempts.append(request['key'])
+                raise TimeoutError('unknown outcome')
+            return {'value': backend.get(request['key'])}
+        adapter.execute = execute
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt = pathlib.Path(tmp) / 'receipt.json'
+            for _ in range(2):
+                with self.assertRaises((TimeoutError, ValueError)):
+                    mod.apply(adapter, receipt, mod.resources('admin'))
+            self.assertEqual(attempts, ['database'])
+            self.assertIn('database', json.loads(receipt.read_text())['pending'])
+
+    def test_ssh_controller_routes_existing_apply_verify_rollback(self):
+        import tempfile
+        from pathlib import Path
+        backend = Fake()
+        calls = []
+        adapter = mod.SSHAdapter('pg-host', 'grafana-host', 'identity')
+        def execute(host, identity, request):
+            key, action = request['key'], request['action']
+            self.assertEqual(host, 'pg-host' if key in ('database', 'importer', 'dashboard_role', 'roles') else 'grafana-host')
+            calls.append((host, action, key))
+            if action in ('create', 'delete'):
+                getattr(backend, action)(key, request['value'])
+                return {'value': backend.get(key)}
+            if action == 'org_empty':
+                return {'value': backend.org_empty(backend.identity('org'), request['value']['admin'])}
+            if action == 'revoke_credentials':
+                backend.revoke_credentials()
+                return {'value': True}
+            return {'value': getattr(backend, action)(key)}
+        adapter.execute = execute
+        desired = mod.resources('admin')
+        with tempfile.TemporaryDirectory() as tmp:
+            receipt = Path(tmp) / 'receipt.json'
+            mod.apply(adapter, receipt, desired)
+            mod.apply(adapter, receipt, desired)
+            owned = json.loads(receipt.read_text())['owned']
+            self.assertTrue(all(adapter.get(k) == v['value'] and adapter.identity(k) == v['identity'] for k, v in owned.items()))
+            self.assertTrue(any(host == 'pg-host' and action == 'create' for host, action, _ in calls))
+            self.assertTrue(any(host == 'grafana-host' and action == 'create' for host, action, _ in calls))
     def test_positive_idempotent_and_owned_rollback(self):
         with tempfile.TemporaryDirectory() as directory:
             adapter = Fake()

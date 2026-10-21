@@ -42,6 +42,23 @@ class TransportTests(unittest.TestCase):
                 transport.execute('host', 'key', {'operation': 'grafana', 'method': 'POST', 'path': '/api/orgs', 'payload': {'name': 'private'}})
         self.assertEqual(run.call_count, 1)
 
+    def test_org_unsupported_delete_marker_is_only_classified_for_org_delete(self):
+        marker = subprocess.CompletedProcess([], 0, b'{"ok":false,"error":"unsupported DeleteCollection"}\n', b'')
+        with patch.object(transport.subprocess, 'run', return_value=marker):
+            with self.assertRaisesRegex(RuntimeError, 'unsupported DeleteCollection'):
+                transport.execute('host', 'key', {'operation': 'activation', 'action': 'delete', 'key': 'org', 'value': {}})
+            with self.assertRaises(transport.UnknownOutcome):
+                transport.execute('host', 'key', {'operation': 'activation', 'action': 'delete', 'key': 'database', 'value': {}})
+
+    def test_helper_rejects_arbitrary_activation_and_never_echoes_secret(self):
+        for request in ({'operation': 'activation', 'action': 'create', 'key': 'database', 'value': {'name': 'evil-secret'}},
+                        {'operation': 'activation', 'action': 'delete', 'key': 'org', 'path': '/api/orgs/1'},
+                        {'operation': 'activation', 'action': 'query', 'key': 'database', 'query': 'evil-secret'}):
+            result = subprocess.run([sys.executable, str(HERE / 'ssh_command_helper.py')],
+                                    input=json.dumps(request), text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertNotIn('evil-secret', result.stdout + result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

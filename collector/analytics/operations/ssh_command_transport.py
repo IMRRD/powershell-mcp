@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Controller-side bounded, single-shot SSH command transport (read-only pilot)."""
+"""Controller-side bounded, single-shot SSH command transport."""
 import json
 from pathlib import Path
 import subprocess
@@ -13,7 +13,7 @@ class UnknownOutcome(RuntimeError):
 
 
 def execute(host, identity_file, request):
-    if not isinstance(request, dict) or request.get('operation') not in ('pg', 'grafana'):
+    if not isinstance(request, dict) or request.get('operation') not in ('pg', 'grafana', 'activation'):
         raise ValueError('invalid operation')
     script = HELPER.read_bytes()
     body = json.dumps(request, separators=(',', ':')).encode()
@@ -24,13 +24,15 @@ def execute(host, identity_file, request):
             '-i', str(identity_file), host, REMOTE_COMMAND]
     try:
         result = subprocess.run(argv, input=str(len(script)).encode() + b'\n' + script + body,
-                                capture_output=True, timeout=15, check=False)
+                                capture_output=True, timeout=60, check=False)
     except (subprocess.TimeoutExpired, OSError) as exc:
         raise UnknownOutcome('SSH outcome unknown; reconcile before retry') from None
     if result.returncode or len(result.stdout) > 65536 or len(result.stderr) > 65536:
         raise UnknownOutcome('SSH outcome unknown; reconcile before retry')
     try:
         response = json.loads(result.stdout)
+        if not response['ok'] and response.get('error') == 'unsupported DeleteCollection' and request.get('action') == 'delete' and request.get('key') == 'org':
+            raise RuntimeError('Grafana org deletion: unsupported DeleteCollection (HTTP 500)')
         if not response['ok'] or not isinstance(response['result'], dict):
             raise ValueError()
     except (ValueError, KeyError, TypeError):
