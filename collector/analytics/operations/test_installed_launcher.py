@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -9,6 +10,18 @@ ROOT = Path(__file__).parent
 
 
 class InstalledTransportTests(unittest.TestCase):
+    def test_reviewed_source_pins_match_frozen_commit_and_refuse_drift(self):
+        import sys
+        sys.path.insert(0, str(ROOT))
+        import install_reviewed_helper as installer
+        installer.check_source()
+        for name, digest in installer.REVIEWED_BLOBS.items():
+            self.assertEqual(hashlib.sha256(installer.reviewed_bytes(name)).hexdigest(), digest)
+        original = installer.reviewed_bytes
+        with patch.object(installer, 'reviewed_bytes', side_effect=lambda name: b'unreviewed' if name == 'dashboard.json' else original(name)):
+            with self.assertRaisesRegex(ValueError, 'reviewed source drift: dashboard.json'):
+                installer.check_source()
+
     def launcher(self):
         import sys
         sys.path.insert(0, str(ROOT))
