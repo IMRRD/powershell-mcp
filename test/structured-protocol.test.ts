@@ -39,7 +39,7 @@ describe("built-artifact stdio structured tool contract", () => {
       expect(tools.find(t => t.name === tool)?.inputSchema.properties).toHaveProperty(property);
     expect(tools.map(t => t.name)).toContain("runtime_capabilities");
     const response = await client.callTool({ name: "runtime_capabilities", arguments: {} });
-    expect(response.structuredContent).toMatchObject({ packageVersion: "0.5.3", protocolVersion: 1, limits: { inputBytes: 1_048_576 },
+    expect(response.structuredContent).toMatchObject({ packageVersion: "0.6.0", protocolVersion: 1, limits: { inputBytes: 1_048_576 },
       defaultEnginePolicy: "Explicit engine selects only that engine; otherwise configured PWSH_MCP_EXE selects only that executable; without either, try pwsh then powershell.exe on Windows (pwsh only elsewhere)." });
     expect(JSON.stringify(response)).not.toContain("nonexistent-mcp-shell-15-secret");
     const missing = await client.callTool({ name: "run_powershell", arguments: { script: "echo 'LAUNCHED'", engine: "pwsh" } });

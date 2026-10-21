@@ -227,7 +227,7 @@ Or install the CLI globally:
 npm install -g @imrrd/powershell-mcp
 ```
 
-> **Migrating:** `powershell-mcp` is deprecated and will not receive a patched legacy release. Remove it and install `@imrrd/powershell-mcp@0.5.3` or later.
+> **Migrating:** `powershell-mcp` is deprecated and will not receive a patched legacy release. Remove it and install the approved scoped release (`@imrrd/powershell-mcp@0.6.0` after publication).
 
 For development from source:
 
@@ -256,7 +256,7 @@ CI requires three lanes: Windows PowerShell 5.1 (`powershell.exe`), Windows Powe
 
 ### Release compatibility and operator gates
 
-The candidate remains canonical `@imrrd/powershell-mcp@0.5.3` with MCP output `schemaVersion: 1`; existing text `content` accompanies structured results. The frozen unscoped `powershell-mcp` compatibility package receives no changes or release. The CI tarball is a local build artifact, not proof of a published registry version. Before any separately authorized release, compare the candidate tag/commit, package and lockfile version, `server.json` identity/version and packed manifest; preserve the CI run and tarball digest as provenance. Verify clients consuming text-only responses and schema v1, credential/trust migrations, and runtime behavior against an approved previous version. Roll back by pinning/reinstalling the previously approved **scoped** package version and restoring its client configuration; do not publish or revive the legacy name. Persisted lifecycle records and credential stores are not automatically reversible: reconcile running/unknown jobs and back up/reprovision DPAPI entries through approved operator processes before switching versions. A tag or CI pass does not authorize publishing, deployment, or production rollover. On a real interactive Windows desktop, manually verify no popup and unchanged foreground focus for `run_powershell`/`run_program` and cancellation; headless CI cannot prove foreground focus preservation.
+The candidate is canonical `@imrrd/powershell-mcp@0.6.0` with MCP output `schemaVersion: 1`; existing text `content` accompanies structured results. The frozen unscoped `powershell-mcp` compatibility package receives no changes or release. The CI tarball is a local build artifact, not proof of a published registry version. Before any separately authorized release, compare the candidate tag/commit, package and lockfile version, `server.json` identity/version and packed manifest; preserve the CI run and tarball digest as provenance. Verify clients consuming text-only responses and schema v1, credential/trust migrations, and runtime behavior against an approved previous version. Roll back by pinning/reinstalling the previously approved **scoped** package version and restoring its client configuration; do not publish or revive the legacy name. Persisted lifecycle records and credential stores are not automatically reversible: reconcile running/unknown jobs and back up/reprovision DPAPI entries through approved operator processes before switching versions. A tag or CI pass does not authorize publishing, deployment, or production rollover. On a real interactive Windows desktop, manually verify no popup and unchanged foreground focus for `run_powershell`/`run_program` and cancellation; headless CI cannot prove foreground focus preservation.
 
 ## SSH/SFTP host trust (breaking secure default)
 

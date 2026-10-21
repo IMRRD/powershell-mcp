@@ -12,7 +12,7 @@ describe("canonical package identity", () => {
     const server = JSON.parse(text("server.json"));
 
     expect(pkg.name).toBe("@imrrd/powershell-mcp");
-    expect(pkg.version).toBe("0.5.3");
+    expect(pkg.version).toBe("0.6.0");
     expect(server.name).toBe(pkg.mcpName);
     expect(server.version).toBe(pkg.version);
     expect(server.description.length).toBeLessThanOrEqual(100);
@@ -54,7 +54,7 @@ describe("canonical package identity", () => {
     expect(legacyReadme).toContain("receives no further releases");
     expect(legacyReadme).toContain("@imrrd/powershell-mcp@0.5.3");
     expect(readme).toContain("will not receive a patched legacy release");
-    expect(readme).toContain("@imrrd/powershell-mcp@0.5.3");
+    expect(readme).toContain("@imrrd/powershell-mcp@0.6.0");
   });
 
   it("publishes a private security reporting policy", () => {
