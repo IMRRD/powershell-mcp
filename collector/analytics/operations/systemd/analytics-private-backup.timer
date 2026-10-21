@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily private analytics backup (disabled until reviewed)
+
+[Timer]
+OnCalendar=*-*-* 02:35:00
+Persistent=true
+RandomizedDelaySec=15min
+Unit=analytics-private-backup.service
+
+[Install]
+WantedBy=timers.target
