@@ -43,6 +43,14 @@ def _save(path, receipt):
     os.replace(tmp, path)
 
 
+def _empty_owned_org(adapter, receipt):
+    org = receipt['owned']['org']
+    if adapter.get('org') != org['value'] or adapter.identity('org') != org['identity']:
+        raise ValueError('retained org ownership drift')
+    if not adapter.org_empty(org['identity'], org['value']['admin']):
+        raise ValueError('retained org is not empty and admin-only')
+
+
 def apply(adapter, path, desired):
     if not path.exists():
         _save(path, {'owned': {}, 'pending': {}, 'desired': desired})
@@ -50,11 +58,15 @@ def apply(adapter, path, desired):
     if receipt['desired'] != desired:
         raise ValueError('receipt belongs to another activation')
     receipt.setdefault('pending', {})
+    if receipt.get('retained_org'):
+        _empty_owned_org(adapter, receipt)
     for key, value in desired.items():
         actual = adapter.get(key)
         if key in receipt['owned']:
             if actual != receipt['owned'][key]['value'] or adapter.identity(key) != receipt['owned'][key]['identity']:
                 raise ValueError(f'{key}: owned resource drift')
+            if key in ('importer', 'dashboard_role') and not adapter.credential_active(key):
+                raise ValueError(f'{key}: credential disabled by rollback; manual recovery required')
             continue
         if key in receipt['pending']:
             raise ValueError(f'{key}: creation outcome unknown; reconcile manually before retry')
@@ -65,13 +77,18 @@ def apply(adapter, path, desired):
         adapter.create(key, value)
         if adapter.get(key) != value:
             raise RuntimeError(f'{key}: failed readback')
+        if key == 'org':
+            receipt.pop('retained_org', None)
         receipt['owned'][key] = {'value': value, 'identity': adapter.identity(key)}
         del receipt['pending'][key]
+        _save(path, receipt)
+    if receipt.get('retained_org'):
+        receipt.pop('retained_org')
         _save(path, receipt)
     return receipt
 
 
-def rollback(adapter, path):
+def rollback(adapter, path, *, drop_empty_database=False):
     if not path.exists():
         return
     receipt = json.loads(path.read_text(encoding='utf-8'))
@@ -89,11 +106,58 @@ def rollback(adapter, path):
         value = receipt['owned'][key]['value']
         if adapter.get(key) != value or adapter.identity(key) != receipt['owned'][key]['identity']:
             raise ValueError(f'{key}: ownership drift; manual recovery required')
-        adapter.delete(key, value)
+        if key == 'org' and receipt.get('retained_org'):
+            _empty_owned_org(adapter, receipt)
+            continue
+        if key == 'org':
+            _empty_owned_org(adapter, receipt)
+            receipt['credentials_revocation_pending'] = True
+            _save(path, receipt)
+            for role in ('importer', 'dashboard_role'):
+                if role in receipt['owned'] and (adapter.get(role) != receipt['owned'][role]['value']
+                                                 or adapter.identity(role) != receipt['owned'][role]['identity']):
+                    raise ValueError(f'{role}: ownership drift before credential revocation')
+            adapter.revoke_credentials()
+            receipt.pop('credentials_revocation_pending', None)
+            _save(path, receipt)
+            receipt['org_delete_pending'] = True
+            _save(path, receipt)
+            try:
+                adapter.delete(key, value)
+            except RuntimeError as exc:
+                # Grafana 13.1.1 returns 500 unsupported DeleteCollection even
+                # for an empty org. No other 500 is safe to classify this way.
+                if 'unsupported DeleteCollection' not in str(exc):
+                    raise
+                _empty_owned_org(adapter, receipt)
+                receipt['retained_org'] = {'id': receipt['owned']['org']['identity'],
+                                           'name': value['name'], 'admin': value['admin'],
+                                           'reason': 'Grafana 13.1.1 unsupported DeleteCollection'}
+                receipt.pop('org_delete_pending', None)
+                _save(path, receipt)
+                continue
+        elif key == 'database':
+            # Destructive cleanup is opt-in for an isolated rehearsal only.
+            if not drop_empty_database:
+                raise ValueError('database retained: explicit isolated rehearsal cleanup or data retention decision required')
+            if not adapter.database_empty(value['name']):
+                raise ValueError('database contains telemetry; retention decision required')
+            receipt['delete_pending'] = key
+            _save(path, receipt)
+            adapter.delete(key, value)
+        else:
+            receipt['delete_pending'] = key
+            _save(path, receipt)
+            adapter.delete(key, value)
         if adapter.get(key) is not None:
             raise RuntimeError(f'{key}: deletion not verified')
         del receipt['owned'][key]
+        receipt.pop('delete_pending', None)
+        receipt.pop('org_delete_pending', None)
         _save(path, receipt)
+    if receipt.get('retained_org'):
+        _empty_owned_org(adapter, receipt)
+        raise RuntimeError('rollback incomplete: retained empty private org (Grafana 13.1.1 unsupported DeleteCollection)')
 
 
 class LiveAdapter:
@@ -127,6 +191,9 @@ class LiveAdapter:
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return None
+            body = exc.read(4096).decode('utf-8', errors='replace')
+            if method == 'DELETE' and path.startswith('/api/orgs/') and exc.code == 500 and 'DeleteCollection' in body and 'unsupported' in body.lower():
+                raise RuntimeError('Grafana org deletion: unsupported DeleteCollection (HTTP 500)') from None
             raise RuntimeError(f'Grafana {method} {path}: HTTP {exc.code}') from None
 
     def _org(self):
@@ -186,6 +253,47 @@ class LiveAdapter:
         if len(admins) != 1 or any(u['role'] != 'Admin' for u in users):
             raise ValueError('org membership drift: non-admin or multiple administrators')
         return admins[0]
+
+    def org_empty(self, oid, admin):
+        if self._approved_admin(oid) != admin:
+            return False
+        # Search includes dashboards outside our known folder; datasource list is
+        # org-scoped. Fail closed on any foreign content instead of adopting it.
+        return (not self.api('GET', '/api/search?type=dash-db', org=oid)
+                and not self.api('GET', '/api/search?type=dash-folder', org=oid)
+                and not self.api('GET', '/api/datasources', org=oid))
+
+    def database_empty(self, name):
+        import psycopg
+        with psycopg.connect(self.admin_dsn, dbname=name) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('public.telemetry_event')")
+                if cur.fetchone()[0] is None:
+                    return True
+                cur.execute('SELECT EXISTS (SELECT 1 FROM telemetry_event LIMIT 1)')
+                return not cur.fetchone()[0]
+
+    def credential_active(self, key):
+        name = resources('placeholder')[key]['name']
+        row = self._db('SELECT rolcanlogin FROM pg_roles WHERE rolname=%s', (name,))
+        if not row or not row[0]:
+            return False
+        return bool(self._db('SELECT has_database_privilege(%s, %s, %s)',
+                             (name, 'hermes_mcp_analytics_private', 'CONNECT'))[0])
+
+    def revoke_credentials(self):
+        for key in ('importer', 'dashboard_role'):
+            name = resources('placeholder')[key]['name']
+            if self.get(key) is not None:
+                self._db(self.sql.SQL('ALTER ROLE {} NOLOGIN').format(self.sql.Identifier(name)))
+                if self.get('database') is not None:
+                    self._db(self.sql.SQL('REVOKE CONNECT ON DATABASE {} FROM {}').format(
+                        self.sql.Identifier('hermes_mcp_analytics_private'), self.sql.Identifier(name)))
+                row = self._db('SELECT rolcanlogin FROM pg_roles WHERE rolname=%s', (name,))
+                if row[0] or (self.get('database') is not None and
+                              self._db('SELECT has_database_privilege(%s,%s,%s)',
+                                       (name, 'hermes_mcp_analytics_private', 'CONNECT'))[0]):
+                    raise RuntimeError(f'{key}: credential revocation not verified')
 
     def create(self, key, value):
         if key == 'database':
@@ -278,6 +386,8 @@ def main():
     parser.add_argument('--dashboard-secret-file', type=Path, required=True)
     parser.add_argument('--ca-file', type=Path, required=True)
     parser.add_argument('--db-host', required=True)
+    parser.add_argument('--isolated-empty-rehearsal', action='store_true',
+                        help='Permit DROP DATABASE only after empty-data verification in an isolated rehearsal')
     args = parser.parse_args()
     script = ROOT / 'operations' / 'prepare-private-activation.py'
     spec = spec_from_file_location('pinned', script)
@@ -289,7 +399,7 @@ def main():
     if args.mode == 'apply':
         apply(adapter, args.receipt, desired)
     elif args.mode == 'rollback':
-        rollback(adapter, args.receipt)
+        rollback(adapter, args.receipt, drop_empty_database=args.isolated_empty_rehearsal)
     else:
         receipt = json.loads(args.receipt.read_text())
         if (receipt['desired'] != desired or receipt.get('pending') or set(receipt['owned']) != set(desired)
