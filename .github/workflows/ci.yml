@@ -51,5 +51,7 @@ jobs:
           set -euo pipefail
           npm test -- --reporter=json --outputFile=vitest-report.json
           node scripts/check-test-report.mjs vitest-report.json
+      - name: Isolated collector fixtures (explicit nonzero discovery)
+        run: node scripts/check-collector-tests.mjs
       - name: Pack, install and exercise the actual artifact over MCP stdio
         run: node scripts/installed-smoke.mjs

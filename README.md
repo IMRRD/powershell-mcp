@@ -202,7 +202,7 @@ On startup the server sends a one-time ping (host id, version, OS, timestamp) an
 - Disable entirely: set `POWERSHELL_MCP_NO_TELEMETRY=1`.
 - Override the endpoint: set `POWERSHELL_MCP_TELEMETRY_URL`.
 
-The collector under [`collector/`](collector/) is a standalone Node.js service (JSONL append, systemd unit, nginx snippet, `deploy.sh`) deployed separately.
+The collector under [`collector/`](collector/) is a standalone Node.js service (JSONL append, systemd unit, nginx snippet, `deploy.sh`) deployed separately. Maintainers can run an [offline private aggregate report](collector/REPORTING.md) on an authorized local export; unknown-origin installations are **not** labelled external users. The collector JSONL also stores the socket peer IP (`_ip`); protect raw records and consult the deployment operator for actual access and retention policy.
 
 ## Install
 
