@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 const files = ['collector/ingest.node-test.mjs', 'collector/delivery.node-test.mjs', 'collector/report.node-test.mjs', 'collector/optout.node-test.mjs', 'collector/snapshot.node-test.mjs', 'scripts/check-collector-tests.node-test.mjs'];
-export const expectedTests = 15;
+export const expectedTests = 21;
 export function validTap(result) {
   if (result.error || result.status !== 0) return false;
   const text = result.stdout ?? '';
