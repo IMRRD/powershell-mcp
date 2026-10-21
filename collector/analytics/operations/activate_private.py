@@ -166,18 +166,25 @@ def rollback(adapter, path, *, disposable_fixture=None):
 
 class LiveAdapter:
     """Local approved PostgreSQL administration and Grafana API; private org only."""
-    def __init__(self, pg_admin_dsn, grafana_url, token_file, importer_secret, dashboard_secret, ca_file, db_host, grafana_error_log=None):
-        import psycopg
-        from psycopg import sql
+    def __init__(self, pg_admin_dsn, grafana_url, token_file, importer_secret, dashboard_secret, ca_file, db_host, grafana_error_log=None, *, backend='both'):
+        if backend not in ('both', 'pg', 'grafana'):
+            raise ValueError('invalid backend')
         self.admin_dsn = pg_admin_dsn
-        self.pg = psycopg.connect(pg_admin_dsn, autocommit=True)
-        self.sql = sql
+        self.pg = None
+        self.sql = None
+        if backend in ('both', 'pg'):
+            import psycopg
+            from psycopg import sql
+            self.pg = psycopg.connect(pg_admin_dsn, autocommit=True)
+            self.sql = sql
         self.url = grafana_url.rstrip('/')
-        self.token = Path(token_file).read_text().strip()
-        self.secrets = {'importer': Path(importer_secret).read_text().strip(), 'dashboard_role': Path(dashboard_secret).read_text().strip()}
+        self.token = Path(token_file).read_text().strip() if backend in ('both', 'grafana') else ''
+        self.secrets = {key: Path(file).read_text().strip() for key, file in
+                        (('importer', importer_secret), ('dashboard_role', dashboard_secret))
+                        if backend in ('both', 'pg') or key == 'dashboard_role'}
         self.ca = str(Path(ca_file).resolve())
         self.host = db_host
-        if not self.token or not all(self.secrets.values()):
+        if (backend in ('both', 'grafana') and not self.token) or not all(self.secrets.values()):
             raise ValueError('empty protected secret')
         self.org_id = None
         self.grafana_error_log = Path(grafana_error_log) if grafana_error_log else None
@@ -411,18 +418,74 @@ class LiveAdapter:
             raise KeyError(key)
 
 
+class SSHAdapter:
+    """Controller-owned receipt with fixed, target-local PostgreSQL/Grafana operations."""
+    def __init__(self, pg_host, grafana_host, identity_file):
+        spec = spec_from_file_location('ssh_command_transport', Path(__file__).with_name('ssh_command_transport.py'))
+        transport = module_from_spec(spec)
+        spec.loader.exec_module(transport)
+        self.execute = transport.execute
+        self.pg_host = pg_host
+        self.grafana_host = grafana_host
+        self.identity_file = identity_file
+
+    def _call(self, key, action, value=None):
+        host = self.pg_host if key in ('database', 'importer', 'dashboard_role', 'roles') else self.grafana_host
+        request = {'operation': 'activation', 'action': action, 'key': key}
+        if value is not None:
+            request['value'] = value
+        result = self.execute(host, self.identity_file, request)
+        if set(result) != {'value'}:
+            raise ValueError('invalid activation response')
+        return result['value']
+
+    def get(self, key):
+        return self._call(key, 'get')
+
+    def identity(self, key):
+        return self._call(key, 'identity')
+
+    def create(self, key, value):
+        self._call(key, 'create', value)
+
+    def delete(self, key, value):
+        self._call(key, 'delete', value)
+
+    def org_empty(self, oid, admin):
+        if self.identity('org') != oid:
+            return False
+        return self._call('org', 'org_empty', resources(admin)['org'])
+
+    def cluster_identity(self):
+        return self._call('database', 'cluster_identity')
+
+    def disposable_database_empty(self, name):
+        if name != resources('placeholder')['database']['name']:
+            return False
+        return self._call('database', 'disposable_database_empty')
+
+    def credential_active(self, key):
+        return self._call(key, 'credential_active')
+
+    def revoke_credentials(self):
+        self._call('roles', 'revoke_credentials')
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('mode', choices=('apply', 'verify', 'rollback'))
     parser.add_argument('--receipt', type=Path, required=True)
     parser.add_argument('--approved-admin', required=True)
-    parser.add_argument('--pg-admin-dsn-file', type=Path, required=True)
-    parser.add_argument('--grafana-url', required=True)
-    parser.add_argument('--grafana-token-file', type=Path, required=True)
-    parser.add_argument('--importer-secret-file', type=Path, required=True)
-    parser.add_argument('--dashboard-secret-file', type=Path, required=True)
-    parser.add_argument('--ca-file', type=Path, required=True)
-    parser.add_argument('--db-host', required=True)
+    parser.add_argument('--pg-admin-dsn-file', type=Path)
+    parser.add_argument('--grafana-url')
+    parser.add_argument('--grafana-token-file', type=Path)
+    parser.add_argument('--importer-secret-file', type=Path)
+    parser.add_argument('--dashboard-secret-file', type=Path)
+    parser.add_argument('--ca-file', type=Path)
+    parser.add_argument('--db-host')
+    parser.add_argument('--ssh-pg-host', help='Enable controller SSH transport to the PostgreSQL host')
+    parser.add_argument('--ssh-grafana-host', help='Enable controller SSH transport to the Grafana host')
+    parser.add_argument('--ssh-identity-file', type=Path, help='SSH private key for both fixed hosts')
     parser.add_argument('--grafana-error-log', type=Path,
                         help='Local Grafana server log; required to prove the specific unsupported org DELETE 500')
     parser.add_argument('--disposable-fixture-file', type=Path,
@@ -433,7 +496,17 @@ def main():
     module = module_from_spec(spec)
     spec.loader.exec_module(module)
     module.build(ROOT)  # reject unreviewed SQL/dashboard bytes before any mutation
-    adapter = LiveAdapter(args.pg_admin_dsn_file.read_text().strip(), args.grafana_url, args.grafana_token_file, args.importer_secret_file, args.dashboard_secret_file, args.ca_file, args.db_host, args.grafana_error_log)
+    ssh_selected = (args.ssh_pg_host, args.ssh_grafana_host, args.ssh_identity_file)
+    if any(ssh_selected) and not all(ssh_selected):
+        parser.error('SSH transport requires both hosts and an identity file')
+    if not all(ssh_selected) and not all((args.pg_admin_dsn_file, args.grafana_url, args.grafana_token_file,
+                                         args.importer_secret_file, args.dashboard_secret_file, args.ca_file,
+                                         args.db_host)):
+        parser.error('local transport requires PostgreSQL, Grafana, CA and protected secret arguments')
+    adapter = (SSHAdapter(*ssh_selected) if all(ssh_selected) else
+               LiveAdapter(args.pg_admin_dsn_file.read_text().strip(), args.grafana_url, args.grafana_token_file,
+                           args.importer_secret_file, args.dashboard_secret_file, args.ca_file, args.db_host,
+                           args.grafana_error_log))
     desired = resources(args.approved_admin)
     fixture = None
     if args.disposable_fixture_file:

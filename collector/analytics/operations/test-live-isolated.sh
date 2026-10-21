@@ -44,6 +44,10 @@ cat > "$root/run.sh" <<'RUN'
 #!/bin/sh
 set -eu
 pip -q install --no-index --find-links /fixture/wheels 'psycopg[binary]==3.3.6'
+mkdir -p /opt/reviewed
+cp -R /src/operations /opt/reviewed/
+cp /src/schema.sql /src/roles.sql /src/queries.sql /src/dashboard.json /opt/reviewed/
+chmod -R go-w /opt/reviewed
 for n in $(seq 1 60); do
   if python -c 'import psycopg;psycopg.connect(open("/fixture/admin.dsn").read()).close()' 2>/dev/null && python -c 'import urllib.request,os; urllib.request.urlopen("http://"+os.environ["FIXTURE_NAME"]+"-grafana:3000/api/health",timeout=2)' 2>/dev/null; then break; fi
   sleep 2
@@ -59,9 +63,67 @@ with open('/fixture/provenance.json','w') as f:
  json.dump({'kind':'isolated-container','receipt':'/fixture/receipt.json','cluster_id':cluster},f)
 PY
 set -- --grafana-error-log /fixture/grafana-logs/grafana.log --disposable-fixture-file /fixture/provenance.json --receipt /fixture/receipt.json --approved-admin admin --pg-admin-dsn-file /fixture/admin.dsn --grafana-url "http://${FIXTURE_NAME}-grafana:3000" --grafana-token-file /fixture/grafana.token --importer-secret-file /fixture/importer.secret --dashboard-secret-file /fixture/dashboard.secret --ca-file /fixture/ca.crt --db-host "${FIXTURE_NAME}-pg:5432"
-python /src/operations/activate_private.py apply "$@"
-python /src/operations/activate_private.py verify "$@"
-python /src/operations/activate_private.py apply "$@"
+python - <<'PY'
+import json,os
+config={'approved_admin':'admin','pg_admin_dsn_file':'/fixture/admin.dsn',
+        'grafana_url':'http://'+os.environ['FIXTURE_NAME']+'-grafana:3000',
+        'grafana_token_file':'/fixture/grafana.token',
+        'importer_secret_file':'/fixture/importer.secret',
+        'dashboard_secret_file':'/fixture/dashboard.secret',
+        'ca_file':'/fixture/ca.crt', 'db_host':os.environ['FIXTURE_NAME']+'-pg:5432',
+        'grafana_error_log':'/fixture/grafana-logs/grafana.log'}
+open('/fixture/helper.json','w').write(json.dumps(config))
+open('/opt/reviewed/helper.json','w').write(json.dumps(config))
+PY
+cat > /fixture/controller.py <<'PY'
+import json,os,subprocess,sys
+sys.path.insert(0,'/src/operations')
+import activate_private as activation
+from ssh_command_transport import UnknownOutcome, REVIEWED_BLOBS
+def execute(host, identity_file, request):
+    backend = {'pg-fixture':'pg', 'grafana-fixture':'grafana'}[host]
+    environment = dict(os.environ, ANALYTICS_HELPER_BACKEND=backend, ANALYTICS_HELPER_CONFIG='/opt/reviewed/helper.json', ANALYTICS_HELPER_ROOT='/opt/reviewed', PYTHONPATH='')
+    bootstrap='import sys; from pathlib import Path; b=Path("/opt/reviewed/operations/ssh_command_helper.py").read_bytes(); exec(compile(b,"<helper>","exec"),{"__name__":"__main__","REVIEWED_BLOBS":'+repr(REVIEWED_BLOBS)+'})'
+    result = subprocess.run([sys.executable,'-I','-c',bootstrap],
+                            input=json.dumps(request).encode(),capture_output=True,env=environment,timeout=30)
+    try:
+        response=json.loads(result.stdout)
+    except (ValueError,TypeError):
+        raise UnknownOutcome('helper outcome unknown') from None
+    if response.get('error') == 'unsupported DeleteCollection' and request.get('key') == 'org' and request.get('action') == 'delete':
+        raise RuntimeError('Grafana org deletion: unsupported DeleteCollection (HTTP 500)')
+    if result.returncode or not response.get('ok'):
+        raise UnknownOutcome('helper outcome unknown')
+    return response['result']
+real_init=activation.SSHAdapter.__init__
+def init(self,*args):
+    real_init(self,*args)
+    self.execute=execute
+activation.SSHAdapter.__init__=init
+if sys.argv[1] == 'apply' and not os.path.exists('/fixture/attested'):
+    from pathlib import Path
+    source=Path('/opt/reviewed/operations/activate_private.py')
+    original=source.read_bytes()
+    def refused():
+        try: execute('pg-fixture',None,{'operation':'attest'})
+        except UnknownOutcome: return
+        raise AssertionError('untrusted installation accepted')
+    assert execute('pg-fixture',None,{'operation':'attest'})=={'verified':True}
+    assert execute('grafana-fixture',None,{'operation':'attest'})=={'verified':True}
+    source.write_bytes(original+b'\n# mutated\n'); refused(); source.write_bytes(original)
+    source.rename(str(source)+'.missing'); refused(); Path(str(source)+'.missing').rename(source)
+    os.chown(source,65534,65534); refused(); os.chown(source,0,0)
+    shadow=Path('/fixture/activate_private.py'); shadow.write_text('raise Exception("shadow executed")')
+    assert execute('pg-fixture',None,{'operation':'attest'})=={'verified':True}
+    shadow.unlink()
+    Path('/fixture/attested').touch()
+    print('isolated binding: positive both targets; mutation, missing, wrong owner refused; shadow ignored')
+sys.argv=['activate_private.py',*sys.argv[1:],'--ssh-pg-host','pg-fixture','--ssh-grafana-host','grafana-fixture','--ssh-identity-file','/fixture/identity']
+activation.main()
+PY
+python /fixture/controller.py apply "$@"
+python /fixture/controller.py verify "$@"
+python /fixture/controller.py apply "$@"
 python - <<'PY'
 import base64,json,os,urllib.request,urllib.error
 host='http://'+os.environ['FIXTURE_NAME']+'-grafana:3000'
@@ -90,7 +152,7 @@ with psycopg.connect(open('/fixture/admin.dsn').read(),dbname='hermes_mcp_analyt
  with db.cursor() as q:
   q.execute("INSERT INTO telemetry_checkpoint(source_key,device,inode,position,prefix_hash) VALUES ('fixture',1,1,1,'fixture')")
 PY
-if python /src/operations/activate_private.py rollback "$@" > /fixture/blocked.out 2>&1; then echo 'populated checkpoint rollback unexpectedly completed' >&2; exit 1; fi
+if python /fixture/controller.py rollback "$@" > /fixture/blocked.out 2>&1; then echo 'populated checkpoint rollback unexpectedly completed' >&2; exit 1; fi
 grep -q 'retention decision required' /fixture/blocked.out
 python - <<'PY'
 import psycopg
@@ -100,7 +162,7 @@ with psycopg.connect(open('/fixture/admin.dsn').read(),dbname='hermes_mcp_analyt
   q.execute('CREATE TABLE unexpected_data (id integer)')
   q.execute('INSERT INTO unexpected_data VALUES (1)')
 PY
-if python /src/operations/activate_private.py rollback "$@" > /fixture/blocked.out 2>&1; then echo 'foreign table rollback unexpectedly completed' >&2; exit 1; fi
+if python /fixture/controller.py rollback "$@" > /fixture/blocked.out 2>&1; then echo 'foreign table rollback unexpectedly completed' >&2; exit 1; fi
 grep -q 'retention decision required' /fixture/blocked.out
 python - <<'PY'
 import psycopg
@@ -108,7 +170,7 @@ with psycopg.connect(open('/fixture/admin.dsn').read(),dbname='hermes_mcp_analyt
  with db.cursor() as q:q.execute('DROP TABLE unexpected_data')
 PY
 for attempt in 1 2; do
-  if python /src/operations/activate_private.py rollback "$@" > /fixture/rollback.out 2>&1; then echo 'rollback unexpectedly completed' >&2; exit 1; fi
+  if python /fixture/controller.py rollback "$@" > /fixture/rollback.out 2>&1; then echo 'rollback unexpectedly completed' >&2; exit 1; fi
   grep -q 'rollback incomplete: retained empty private org' /fixture/rollback.out || { cat /fixture/rollback.out >&2; exit 1; }
 done
 python - <<'PY'
@@ -135,7 +197,7 @@ PY
 python /src/operations/activate_private.py apply "$@"
 python /src/operations/activate_private.py verify "$@"
 for attempt in 1 2; do
-  if python /src/operations/activate_private.py rollback "$@" > /fixture/rollback.out 2>&1; then echo 'rollback unexpectedly completed' >&2; exit 1; fi
+  if python /fixture/controller.py rollback "$@" > /fixture/rollback.out 2>&1; then echo 'rollback unexpectedly completed' >&2; exit 1; fi
   grep -q 'rollback incomplete: retained empty private org' /fixture/rollback.out || { cat /fixture/rollback.out >&2; exit 1; }
 done
 # Separate receipt/fixture is required for the fresh database-create crash path.
@@ -162,7 +224,7 @@ receipt=json.load(open('/fixture/receipt.json'))
 assert 'database' in receipt['pending'] and 'database' not in receipt['owned']
 print('isolated crash: child SIGKILL after DB mutation, before receipt save')
 PY
-python /src/operations/activate_private.py rollback "$@"
+python /fixture/controller.py rollback "$@"
 python - <<'PY'
 import json,psycopg
 receipt=json.load(open('/fixture/receipt.json'))
@@ -183,7 +245,7 @@ with psycopg.connect(open('/fixture/admin.dsn').read(),dbname='hermes_mcp_analyt
   q.execute("INSERT INTO telemetry_checkpoint(source_key,device,inode,position,prefix_hash) VALUES ('fixture',1,1,1,'fixture')")
   q.execute('DROP TABLE telemetry_event CASCADE')
 PY
-if python /src/operations/activate_private.py rollback "$@" > /fixture/blocked.out 2>&1; then echo 'missing event table rollback unexpectedly completed' >&2; exit 1; fi
+if python /fixture/controller.py rollback "$@" > /fixture/blocked.out 2>&1; then echo 'missing event table rollback unexpectedly completed' >&2; exit 1; fi
 grep -q 'retention decision required' /fixture/blocked.out
 python - <<'PY'
 import psycopg
