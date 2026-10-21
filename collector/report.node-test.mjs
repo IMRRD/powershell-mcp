@@ -28,7 +28,7 @@ test('offline report deduplicates hosts and segregates internal, test and unknow
   ]);
   assert.equal(result.status, 0, result.stderr);
   const r = JSON.parse(result.stdout);
-  assert.deepEqual(r.groups.internal, { observedInstallations: 1, activeInstallations: 1, startupOnlyInstallations: 0, versions: { '0.5.3': 1 }, os: { win32: 1 }, toolCounts: { run_program: 2 } });
+  assert.deepEqual(r.groups.internal, { observedInstallations: 1, activeInstallations: 1, startupOnlyInstallations: 0, versions: { '0.5.3': 1 }, os: { win32: 1 }, toolCounts: { run_program: 2 }, toolMetrics: {} });
   assert.equal(r.groups.test.observedInstallations, 1);
   assert.equal(r.groups.unknownOrigin.observedInstallations, 1);
   assert.equal(r.groups.unknownOrigin.activeInstallations, 1);
@@ -36,6 +36,19 @@ test('offline report deduplicates hosts and segregates internal, test and unknow
   assert.equal(r.groups.externalUsers, undefined);
   assert.doesNotMatch(result.stdout + result.stderr, /internal-id|test-id|unknown-secret|outside-secret/);
 });
+test('versioned metric outcomes, durations and features aggregate without doubling legacy counts', () => {
+  const row = event('internal-id','tool_metrics','2026-10-02T00:00:00.000Z', { schemaVersion: 2, eventId: '12345678-1234-4234-8234-123456789012', metrics: { runtime_capabilities: { outcomes: { success: 2 }, durations: { lt100: 2 }, features: { inspection: 2 } } } });
+  const result = fixture([row, event('internal-id','tool_counts','2026-10-02T00:00:00.000Z',{ counts: { runtime_capabilities: 2 } })]);
+  assert.equal(result.status, 0, result.stderr);
+  const group = JSON.parse(result.stdout).groups.internal;
+  assert.equal(group.toolCounts.runtime_capabilities, 2);
+  assert.deepEqual(group.toolMetrics.runtime_capabilities, row.metrics.runtime_capabilities);
+  assert.equal(group.activeInstallations, 1);
+  const bad = fixture([{ ...row, metrics: { runtime_capabilities: { ...row.metrics.runtime_capabilities, secret: 'private' } } }]);
+  assert.notEqual(bad.status, 0);
+  assert.equal(bad.stdout, '');
+});
+
 test('ambiguous classification and invalid windows fail closed', () => {
   const row = event('private-id', 'startup', '2026-10-01T00:00:00.000Z');
   for (const [classification, args] of [

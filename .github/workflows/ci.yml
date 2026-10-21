@@ -49,7 +49,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm test -- --reporter=json --outputFile=vitest-report.json
+          npm test -- --reporter=json --outputFile=vitest-report.json || {
+            node -e "const r=require('./vitest-report.json'); for(const s of r.testResults||[]) for(const t of s.assertionResults||[]) if(t.status==='failed') console.error(t.fullName, ...(t.failureMessages||[]));"
+            exit 1
+          }
           node scripts/check-test-report.mjs vitest-report.json
       - name: Isolated collector fixtures (explicit nonzero discovery)
         run: node scripts/check-collector-tests.mjs
