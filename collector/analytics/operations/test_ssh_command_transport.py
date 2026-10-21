@@ -6,6 +6,7 @@ import sys
 import unittest
 import tempfile
 import os
+import time
 from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
@@ -53,6 +54,10 @@ class TransportTests(unittest.TestCase):
     def test_reader_deadline_and_invalid_frames_fail_closed(self):
         with self.assertRaisesRegex(transport.UnknownOutcome, 'unknown'):
             transport._bounded_process([sys.executable, '-c', 'import time;time.sleep(10)'], b'', timeout=.1)
+        start = time.monotonic()
+        with self.assertRaisesRegex(transport.UnknownOutcome, 'unknown'):
+            transport._bounded_process([sys.executable, '-c', 'import time;time.sleep(10)'], b'x' * 131072, timeout=.1)
+        self.assertLess(time.monotonic() - start, 2)
         for response in (b'', b'{"ok":true,"ok":false,"result":{}}', b'{"ok":true,"result":'):
             with patch.object(transport, '_bounded_process', return_value=subprocess.CompletedProcess([], 0, response, b'')):
                 with self.assertRaises(transport.UnknownOutcome):

@@ -63,19 +63,24 @@ def _bounded_process(argv, payload, *, timeout=60):
             pipe.close()
     readers = [threading.Thread(target=drain, args=(pipe, i), daemon=True)
                for i, pipe in enumerate((child.stdout, child.stderr))]
-    for reader in readers:
-        reader.start()
-    deadline = time.monotonic() + timeout
-    try:
+    write_error = threading.Event()
+    def feed():
         try:
             child.stdin.write(payload)
             child.stdin.close()
-        except BrokenPipeError:
-            pass
+        except (BrokenPipeError, OSError, ValueError):
+            write_error.set()
+    writer = threading.Thread(target=feed, daemon=True)
+    for reader in readers:
+        reader.start()
+    deadline = time.monotonic() + timeout
+    writer.start()
+    try:
         child.wait(timeout=max(0, deadline - time.monotonic()))
+        writer.join(timeout=max(0, deadline - time.monotonic()))
         for reader in readers:
             reader.join(timeout=max(0, deadline - time.monotonic()))
-        if overflow.is_set() or any(reader.is_alive() for reader in readers):
+        if overflow.is_set() or writer.is_alive() or write_error.is_set() or any(reader.is_alive() for reader in readers):
             raise UnknownOutcome('SSH outcome unknown; reconcile before retry')
         return subprocess.CompletedProcess(argv, child.returncode, bytes(output[0]), bytes(output[1]))
     except (subprocess.TimeoutExpired, OSError):
@@ -84,6 +89,9 @@ def _bounded_process(argv, payload, *, timeout=60):
         if child.poll() is None:
             child.kill()
         child.wait()
+        writer.join(timeout=1)
+        if not writer.is_alive() and not child.stdin.closed:
+            child.stdin.close()
         for reader in readers:
             reader.join(timeout=1)
 
