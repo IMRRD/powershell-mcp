@@ -87,7 +87,14 @@ class DigestTests(unittest.TestCase):
             self.assertEqual(len(sent), 1)
             self.assertEqual(len(list(state.glob('*.attempted'))), 1)
     def test_missing_recipient(self):
-        self.assertNotRegex('private@example.invalid', r'^$')
+        f = fixture()
+        def connect(): return Conn([f['adoption'], f['events'], f['tools'], f['axes'], f['quality'], f['receipts'], [(f['imported'],)]])
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / 'config.json'
+            config.write_text(json.dumps({'enabled': True}))
+            with self.assertRaisesRegex(ValueError, 'approved private recipient required'):
+                w.main(['--config', str(config), '--state-dir', str(Path(tmp) / 'state')], NOW, connect)
+            self.assertFalse((Path(tmp) / 'state').exists())
 
 
 if __name__ == '__main__': unittest.main()
