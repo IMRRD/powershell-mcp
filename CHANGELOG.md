@@ -6,11 +6,21 @@ This minor release adds reliable, privacy-bounded telemetry delivery on top of 0
 
 The v2-compatible collector was deployed before any v2 client activation. After any v2 client has transmitted or queued events, **do not roll the collector back to a v1-only image**, even if clients themselves are rolled back: queued v2 events can replay later. Preserve the append-only history, sidecar recovery semantics, and backup when changing the collector. Disable client reporting with the existing telemetry opt-out where required; do not discard pending events as a release rollback shortcut.
 
-This candidate changes only scoped package and MCP Registry release metadata. The deprecated unscoped package stays frozen. Cross-engine CI, packed-artifact checks, interactive hidden-window acceptance, and separate parent review precede any tag or publication; this PR does not publish or activate clients.
+This candidate changes only scoped package and MCP Registry release metadata. The deprecated unscoped package stays frozen. Cross-engine CI and packed-artifact checks passed on the original candidate head `9d2ee45c10348dc59faa4f864ed835b24ea4935c` (tree `03daf9a39d9601a0f8fa30151c8abff72779522f`; CI run `39591903012`). The independently packed artifact SHA-256 is `525ff137a116d1affa4efb85397a762f35afd00e7588ff6f0896677ca83bc303`.
 
-## 0.6.0 — release candidate (not published)
+### Interactive Windows acceptance (October 21, 2026 UTC)
 
-This minor version reflects a breaking secure default relative to 0.5.3: SSH and SFTP fail closed without independently verified host trust. The version is prepared from merged main; neither an npm nor MCP Registry publication is implied.
+The exact locally installed 0.7.0 tarball above was exercised with telemetry opted out in active RDP session 2, not a Session 0/headless surrogate. A same-session out-of-context WinEvent observer recorded foreground, top-level CREATE and SHOW events (UTC timestamps, handles, PIDs and window classes only; no titles/screens). A real, off-screen, nonactivating 1-pixel control window generated a captured SHOW event, establishing that the hook detects genuine window visibility events; a synthetic NotifyWinEvent was attempted separately but had no console HWND and is not positive evidence. During the MCP calls (11:41:44–11:41:47 UTC), the foreground remained handle `0x10258`, PID `3416`; no foreground change or SHOW event was captured. CREATE events for nonvisual `OleMainThreadWndClass` were observed and are not treated as popups. The hook cannot prove the absence of an event outside its 15-second observation interval or a window invisible to these WinEvent categories.
+
+- `run_powershell` (Windows PowerShell 5.1): success, exit 0, `interactive-ps-ok`, MCP execution ID `573f0452-ea75-41d4-b5cd-b23321360286`.
+- `run_program` (installed Node executable): success, exit 0, `interactive-native-ok`, MCP execution ID `02c07fac-fba7-4d4b-85c3-632e3c145a2f`.
+- `start_execution` → `cancel_execution`: job `04c428063cdba8b5a5253e91e4a30cd8249e849b7681d875` changed running → cancelled. Owned parent PID `13756` and native child PID `6932` were recorded before cancellation; both were absent in an independent process readback afterward. An earlier exploratory run reported cancelled but had not identified its child; it is not the child-termination proof.
+
+Evidence (local, not committed; privacy-limited): `C:/Users/aegis/AppData/Local/hermes/cache/scratch/pr46-interactive-events-v3.jsonl`, `pr46-interactive-results.json`, and `pr46-interactive-session.json` in the same directory; observer/client source `pr46-interactive-observer.py` and `pr46-interactive-run.mjs`. The session receipt establishes that the launch session was the active RDP session 2 (distinct from console session 1). An initial observer failed before observation (incorrect DLL binding) and its failure is not counted as acceptance; the subsequent v2/v3 receipts distinguish exploratory from final child-termination proof. Separate parent review and fresh CI against this documentation commit remain required before any tag or publication. This PR does not publish or activate clients.
+
+## 0.6.0 — published
+
+This minor version reflects a breaking secure default relative to 0.5.3: SSH and SFTP fail closed without independently verified host trust. The scoped npm package `@imrrd/powershell-mcp@0.6.0` and GitHub release `v0.6.0` were published on October 21, 2026; no MCP Registry publication is implied.
 
 ### Migration checklist
 
@@ -23,6 +33,6 @@ This minor version reflects a breaking secure default relative to 0.5.3: SSH and
 
 ### Release gates and rollback
 
-Run cross-engine CI, explicit nonzero collector discovery and installed-tarball smoke before tagging. Manually verify hidden execution and unchanged foreground focus on an interactive Windows desktop; headless tests cannot establish this. Live host trust/credential migration and production behavior remain operator acceptance gates. This release does not include the unmerged batch/jump work from PR #35 (or any #23 batch/jump scope).
+For this historical release, cross-engine CI, explicit nonzero collector discovery, installed-tarball smoke, and manual interactive hidden-execution/unchanged-focus checks were required before tagging. Headless tests alone cannot establish foreground preservation. Live host trust/credential migration and production behavior remain operator acceptance responsibilities. This release does not include the unmerged batch/jump work from PR #35 (or any #23 batch/jump scope).
 
-Rollback means pinning the previously approved scoped package (for example `@imrrd/powershell-mcp@0.5.3`) and restoring its client configuration, after reconciling running/unknown jobs and credential state. Older trust behavior may be less secure: do not remove host-key verification merely to make rollback work. No tag, publish, or production switch follows automatically from this candidate.
+Rollback of a 0.6.0 client means pinning the previously approved scoped package (for example `@imrrd/powershell-mcp@0.5.3`) and restoring its client configuration, after reconciling running/unknown jobs and credential state. Older trust behavior may be less secure: do not remove host-key verification merely to make rollback work. Publication did not automatically switch production clients.
