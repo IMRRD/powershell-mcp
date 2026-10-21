@@ -14,6 +14,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { logStore } from "./full-logs.js";
+import { executionStore } from "./execution-lifecycle.js";
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
@@ -204,6 +205,21 @@ server.registerTool(
     return toolResult(fromProcess(r, "program", program), formatResult(r));
   },
 );
+const executionId = z.string().regex(/^[0-9a-f]{48}$/);
+const executionOwner = z.string().min(1).max(256).describe("Private caller namespace token; keep secret and stable across restarts. This is a bearer secret, not authenticated MCP identity.");
+const executionReply = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] });
+server.registerTool("start_execution", { description: "Start a local executable directly with durable idempotency and bounded output. No shell; remote targets unsupported.", inputSchema: {
+  owner: executionOwner, idempotencyKey: z.string().min(1).max(256), program: z.string().min(1), args: z.array(z.string()).optional(), cwd: z.string().optional(),
+} }, async ({ owner, idempotencyKey, program, args, cwd }) => executionReply(executionStore.start(owner, idempotencyKey, program, args ?? [], cwd)));
+server.registerTool("execution_status", { description: "Read a local execution state. Unknown after restart means no automatic replay or verified ownership.", inputSchema: {
+  owner: executionOwner, id: executionId,
+} }, async ({ owner, id }) => executionReply(executionStore.status(owner, id)));
+server.registerTool("read_execution_output", { description: "Read a bounded base64 output page, including while running.", inputSchema: {
+  owner: executionOwner, id: executionId, stream: z.enum(["stdout", "stderr"]), offset: z.number().int().nonnegative(), length: z.number().int().positive().max(65536),
+} }, async ({ owner, id, stream, offset, length }) => executionReply(executionStore.read(owner, id, stream, offset, length)));
+server.registerTool("cancel_execution", { description: "Request local cancellation. Windows confirms Job Object tree termination asynchronously; failures remain unknown.", inputSchema: {
+  owner: executionOwner, id: executionId,
+} }, async ({ owner, id }) => executionReply(executionStore.cancel(owner, id)));
 server.registerTool("read_output_log", { description: "Read a bounded raw byte page from an opt-in session log; base64 encoded. Handles are process-local and expire after one hour.", inputSchema: {
   handle: z.string().regex(/^[0-9a-f]{48}$/), stream: z.enum(["stdout", "stderr"]),
   offset: z.number().int().nonnegative(), length: z.number().int().positive().max(65536),

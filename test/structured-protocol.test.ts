@@ -52,12 +52,32 @@ describe("built-artifact stdio structured tool contract", () => {
     const response = await client.callTool({ name: "run_program", arguments: { program: process.execPath, maxOutputBytes: 0 } });
     expect(response.isError).toBe(true);
   });
+  it("runs the local lifecycle over built stdio", async () => {
+    const owner = "protocol-owner", idempotencyKey = `protocol-${Date.now()}`;
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const response = await client.callTool({ name, arguments: args });
+      expect(response.isError ?? false).toBe(false);
+      return JSON.parse((response.content[0] as { text: string }).text);
+    };
+    const args = { owner, idempotencyKey, program: process.execPath, args: ["-e", "process.stdout.write('protocol-ready')"] };
+    const started = await call("start_execution", args);
+    expect((await call("start_execution", args)).id).toBe(started.id);
+    let status = started;
+    for (let i = 0; i < 100 && status.state === "running"; i++) {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      status = await call("execution_status", { owner, id: started.id });
+    }
+    expect(status).toMatchObject({ state: "completed", exitCode: 0 });
+    const page = await call("read_execution_output", { owner, id: started.id, stream: "stdout", offset: 0, length: 32 });
+    expect(Buffer.from(page.data, "base64").toString()).toBe("protocol-ready");
+    expect((await call("cancel_execution", { owner, id: started.id })).state).toBe("completed");
+  });
   it("advertises a shared output schema on every tool", async () => {
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(12);
+    expect(tools).toHaveLength(16);
     expect(tools.map(t => t.name)).toContain("read_output_log");
     expect(tools.map(t => t.name)).toContain("delete_output_log");
-    for (const tool of tools.filter(t => !["read_output_log", "delete_output_log"].includes(t.name))) {
+    for (const tool of tools.filter(t => !["read_output_log", "delete_output_log", "start_execution", "execution_status", "read_execution_output", "cancel_execution"].includes(t.name))) {
       expect(tool.outputSchema?.properties).toHaveProperty("terminationStatus");
       expect(tool.outputSchema?.properties).toHaveProperty("executionId");
     }

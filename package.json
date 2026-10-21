@@ -20,7 +20,7 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && node -e \"require('node:fs').copyFileSync('assets/job-supervisor.ps1','dist/job-supervisor.ps1')\"",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest run",
