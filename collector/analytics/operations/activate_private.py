@@ -162,7 +162,7 @@ def rollback(adapter, path, *, drop_empty_database=False):
 
 class LiveAdapter:
     """Local approved PostgreSQL administration and Grafana API; private org only."""
-    def __init__(self, pg_admin_dsn, grafana_url, token_file, importer_secret, dashboard_secret, ca_file, db_host):
+    def __init__(self, pg_admin_dsn, grafana_url, token_file, importer_secret, dashboard_secret, ca_file, db_host, grafana_error_log=None):
         import psycopg
         from psycopg import sql
         self.admin_dsn = pg_admin_dsn
@@ -176,6 +176,7 @@ class LiveAdapter:
         if not self.token or not all(self.secrets.values()):
             raise ValueError('empty protected secret')
         self.org_id = None
+        self.grafana_error_log = Path(grafana_error_log) if grafana_error_log else None
 
     def api(self, method, path, payload=None, org=None):
         credential = ('Basic ' + base64.b64encode(self.token[6:].encode()).decode()) if self.token.startswith('basic:') else ('Bearer ' + self.token)
@@ -183,6 +184,7 @@ class LiveAdapter:
         if org is not None:
             headers['X-Grafana-Org-Id'] = str(org)
         data = json.dumps(payload).encode() if payload is not None else None
+        log_offset = self.grafana_error_log.stat().st_size if (self.grafana_error_log and self.grafana_error_log.exists() and method == 'DELETE' and path.startswith('/api/orgs/')) else None
         req = urllib.request.Request(self.url + path, data=data, headers=headers, method=method)
         try:
             with urllib.request.urlopen(req, timeout=20) as response:
@@ -192,8 +194,14 @@ class LiveAdapter:
             if exc.code == 404:
                 return None
             body = exc.read(4096).decode('utf-8', errors='replace')
-            if method == 'DELETE' and path.startswith('/api/orgs/') and exc.code == 500 and 'DeleteCollection' in body and 'unsupported' in body.lower():
-                raise RuntimeError('Grafana org deletion: unsupported DeleteCollection (HTTP 500)') from None
+            if method == 'DELETE' and path.startswith('/api/orgs/') and exc.code == 500:
+                specific = 'failed to delete dashboards for org ' + path.rsplit('/', 1)[1] + ': the server does not allow this method on the requested resource'
+                if log_offset is not None:
+                    with self.grafana_error_log.open('rb') as log:
+                        log.seek(log_offset)
+                        recent = log.read(65536).decode('utf-8', errors='replace')
+                    if any(specific in line and 'status=500' in line and 'method=DELETE' in line and 'path=' + path in line for line in recent.splitlines()):
+                        raise RuntimeError('Grafana org deletion: unsupported DeleteCollection (HTTP 500)') from None
             raise RuntimeError(f'Grafana {method} {path}: HTTP {exc.code}') from None
 
     def _org(self):
@@ -386,6 +394,8 @@ def main():
     parser.add_argument('--dashboard-secret-file', type=Path, required=True)
     parser.add_argument('--ca-file', type=Path, required=True)
     parser.add_argument('--db-host', required=True)
+    parser.add_argument('--grafana-error-log', type=Path,
+                        help='Local Grafana server log; required to prove the specific unsupported org DELETE 500')
     parser.add_argument('--isolated-empty-rehearsal', action='store_true',
                         help='Permit DROP DATABASE only after empty-data verification in an isolated rehearsal')
     args = parser.parse_args()
@@ -394,7 +404,7 @@ def main():
     module = module_from_spec(spec)
     spec.loader.exec_module(module)
     module.build(ROOT)  # reject unreviewed SQL/dashboard bytes before any mutation
-    adapter = LiveAdapter(args.pg_admin_dsn_file.read_text().strip(), args.grafana_url, args.grafana_token_file, args.importer_secret_file, args.dashboard_secret_file, args.ca_file, args.db_host)
+    adapter = LiveAdapter(args.pg_admin_dsn_file.read_text().strip(), args.grafana_url, args.grafana_token_file, args.importer_secret_file, args.dashboard_secret_file, args.ca_file, args.db_host, args.grafana_error_log)
     desired = resources(args.approved_admin)
     if args.mode == 'apply':
         apply(adapter, args.receipt, desired)

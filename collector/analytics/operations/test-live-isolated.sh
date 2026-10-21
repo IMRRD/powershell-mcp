@@ -10,7 +10,7 @@ cleanup() {
   if [ "$?" != 0 ]; then sudo -n docker logs "$name-grafana" 2>&1 | grep -E 'DELETE /api/orgs|failed to delete org|logger=org|status=500' | tail -8 || :; fi
   sudo -n docker rm -f "$name-run" "$name-grafana" "$name-pg" >/dev/null 2>&1 || :
   sudo -n docker network rm "$name" >/dev/null 2>&1 || :
-  rm -rf "$root"
+  sudo -n rm -rf -- "$root"
 }
 trap cleanup EXIT
 sudo -n docker network create --internal "$name" >/dev/null
@@ -33,7 +33,9 @@ chmod 600 "$root/server.key"
 printf 'local all postgres trust\nhostssl all all all scram-sha-256\n' > "$root/pg_hba.conf"
 chmod 644 "$root/pg_hba.conf"
 sudo -n docker run -d --name "$name-pg" --network "$name" -v "$root:/fixture:ro" -e POSTGRES_PASSWORD_FILE=/fixture/pg.container.secret postgres:17.11-bookworm -c ssl=on -c ssl_cert_file=/fixture/server.crt -c ssl_key_file=/fixture/server.key -c ssl_ca_file=/fixture/ca.crt -c hba_file=/fixture/pg_hba.conf >/dev/null
-sudo -n docker run -d --name "$name-grafana" --network "$name" -v "$root:/fixture:ro" -e GF_SECURITY_ADMIN_PASSWORD__FILE=/fixture/grafana.container.secret -e GF_SECURITY_ALLOW_EMBEDDING=false -e GF_AUTH_ANONYMOUS_ENABLED=false grafana/grafana:13.1.1 >/dev/null
+mkdir "$root/grafana-logs"
+sudo -n chown 472:472 "$root/grafana-logs"
+sudo -n docker run -d --name "$name-grafana" --network "$name" -v "$root:/fixture" -e GF_LOG_MODE=file -e GF_PATHS_LOGS=/fixture/grafana-logs -e GF_SECURITY_ADMIN_PASSWORD__FILE=/fixture/grafana.container.secret -e GF_SECURITY_ALLOW_EMBEDDING=false -e GF_AUTH_ANONYMOUS_ENABLED=false grafana/grafana:13.1.1 >/dev/null
 printf 'host=%s-pg port=5432 user=postgres dbname=postgres password=%s sslmode=verify-full sslrootcert=/fixture/ca.crt\n' "$name" "$(<"$root/pg.secret")" > "$root/admin.dsn"
 printf 'basic:admin:%s\n' "$(<"$root/grafana.secret")" > "$root/grafana.token"
 mkdir "$root/wheels"
@@ -47,7 +49,7 @@ for n in $(seq 1 60); do
   sleep 2
 done
 python -c 'import psycopg;psycopg.connect(open("/fixture/admin.dsn").read()).close()'
-set -- --receipt /fixture/receipt.json --approved-admin admin --pg-admin-dsn-file /fixture/admin.dsn --grafana-url "http://${FIXTURE_NAME}-grafana:3000" --grafana-token-file /fixture/grafana.token --importer-secret-file /fixture/importer.secret --dashboard-secret-file /fixture/dashboard.secret --ca-file /fixture/ca.crt --db-host "${FIXTURE_NAME}-pg:5432"
+set -- --grafana-error-log /fixture/grafana-logs/grafana.log --isolated-empty-rehearsal --receipt /fixture/receipt.json --approved-admin admin --pg-admin-dsn-file /fixture/admin.dsn --grafana-url "http://${FIXTURE_NAME}-grafana:3000" --grafana-token-file /fixture/grafana.token --importer-secret-file /fixture/importer.secret --dashboard-secret-file /fixture/dashboard.secret --ca-file /fixture/ca.crt --db-host "${FIXTURE_NAME}-pg:5432"
 python /src/operations/activate_private.py apply "$@"
 python /src/operations/activate_private.py verify "$@"
 python /src/operations/activate_private.py apply "$@"
@@ -72,11 +74,14 @@ code,result=request('/api/ds/query','admin',admin.split(':',1)[1],'POST',query,o
 code,_=request('/api/ds/query','outsider',password,'POST',query,oid); assert code in (401,403),code
 print('isolated cross-org query: admin 200, outsider denied',code)
 PY
-python /src/operations/activate_private.py rollback "$@"
+for attempt in 1 2; do
+  if python /src/operations/activate_private.py rollback "$@" > /fixture/rollback.out 2>&1; then echo 'rollback unexpectedly completed' >&2; exit 1; fi
+  grep -q 'rollback incomplete: retained empty private org' /fixture/rollback.out || { cat /fixture/rollback.out >&2; exit 1; }
+done
 python - <<'PY'
-import json,psycopg,urllib.request,base64,os
+import json,psycopg,urllib.request,base64,os,urllib.error
 r=json.load(open('/fixture/receipt.json'))
-assert not r['owned'] and not r['pending'],r
+assert set(r['owned'])=={'org'} and not r['pending'] and r['retained_org']['reason']=='Grafana 13.1.1 unsupported DeleteCollection',r
 with psycopg.connect(open('/fixture/admin.dsn').read()) as c:
  with c.cursor() as q:
   q.execute("SELECT count(*) FROM pg_database WHERE datname='hermes_mcp_analytics_private'"); assert q.fetchone()[0]==0
@@ -84,9 +89,25 @@ with psycopg.connect(open('/fixture/admin.dsn').read()) as c:
 token=open('/fixture/grafana.token').read().strip().removeprefix('basic:')
 req=urllib.request.Request('http://'+os.environ['FIXTURE_NAME']+'-grafana:3000/api/orgs',headers={'Authorization':'Basic '+base64.b64encode(token.encode()).decode()})
 with urllib.request.urlopen(req) as response: orgs=json.load(response)
-assert all(org['name']!='Private telemetry analytics' for org in orgs)
-print('isolated rollback: zero DB, roles, org; receipt empty')
+oid=r['retained_org']['id']
+assert any(org['id']==oid and org['name']=='Private telemetry analytics' for org in orgs)
+for path in ('/api/search?type=dash-db','/api/search?type=dash-folder','/api/datasources'):
+ req=urllib.request.Request('http://'+os.environ['FIXTURE_NAME']+'-grafana:3000'+path,headers={'Authorization':'Basic '+base64.b64encode(token.encode()).decode(),'X-Grafana-Org-Id':str(oid)})
+ with urllib.request.urlopen(req) as response: assert json.load(response)==[],path
+req=urllib.request.Request('http://'+os.environ['FIXTURE_NAME']+'-grafana:3000/api/orgs/'+str(oid)+'/users',headers={'Authorization':'Basic '+base64.b64encode(token.encode()).decode()})
+with urllib.request.urlopen(req) as response: users=json.load(response)
+assert len(users)==1 and users[0]['login']=='admin' and users[0]['role']=='Admin',users
+print('isolated rollback: zero DB and roles; retained empty admin-only org, receipt-owned residual; repeat stable')
 PY
+python /src/operations/activate_private.py apply "$@"
+python /src/operations/activate_private.py verify "$@"
+for attempt in 1 2; do
+  if python /src/operations/activate_private.py rollback "$@" > /fixture/rollback.out 2>&1; then echo 'rollback unexpectedly completed' >&2; exit 1; fi
+  grep -q 'rollback incomplete: retained empty private org' /fixture/rollback.out || { cat /fixture/rollback.out >&2; exit 1; }
+done
+# Separate receipt/fixture is required for the fresh database-create crash path.
+cp /fixture/receipt.json /fixture/retained-receipt.json
+rm /fixture/receipt.json
 python - "$@" <<'PY'
 import json,os,subprocess,sys
 args=sys.argv[1:]
