@@ -19,6 +19,9 @@ class Fake:
     def get(self, key):
         return self.state.get(key)
 
+    def identity(self, key):
+        return key if key in self.state else None
+
     def create(self, key, value):
         self.calls.append(('create', key))
         if self.fail == key:
@@ -54,8 +57,11 @@ class ActivationTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     mod.apply(adapter, path, mod.resources('approved-admin'))
                 adapter.fail = None
-                mod.rollback(adapter, path)
-                self.assertEqual(adapter.state, {})
+                receipt = __import__('json').loads(path.read_text())
+                self.assertIn(key, receipt['pending'])
+                with self.assertRaisesRegex(ValueError, 'unknown creation outcome'):
+                    mod.rollback(adapter, path)
+                self.assertEqual(set(adapter.state), set(receipt['owned']))
 
     def test_foreign_resources_and_drift_are_never_overwritten_or_deleted(self):
         with tempfile.TemporaryDirectory() as directory:

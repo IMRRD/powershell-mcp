@@ -10,11 +10,13 @@ import os
 from pathlib import Path
 import urllib.request
 import urllib.error
+import base64
 
 from importlib.util import module_from_spec, spec_from_file_location
 
 ROOT = Path(__file__).resolve().parent.parent
 ORDER = ('database', 'importer', 'dashboard_role', 'org', 'folder', 'datasource', 'dashboard')
+DELETE_ORDER = ('dashboard', 'datasource', 'folder', 'org', 'database', 'dashboard_role', 'importer')
 
 
 def resources(admin):
@@ -43,22 +45,28 @@ def _save(path, receipt):
 
 def apply(adapter, path, desired):
     if not path.exists():
-        _save(path, {'owned': {}, 'desired': desired})
+        _save(path, {'owned': {}, 'pending': {}, 'desired': desired})
     receipt = json.loads(path.read_text(encoding='utf-8'))
     if receipt['desired'] != desired:
         raise ValueError('receipt belongs to another activation')
+    receipt.setdefault('pending', {})
     for key, value in desired.items():
         actual = adapter.get(key)
         if key in receipt['owned']:
-            if actual != value:
+            if actual != receipt['owned'][key]['value'] or adapter.identity(key) != receipt['owned'][key]['identity']:
                 raise ValueError(f'{key}: owned resource drift')
             continue
+        if key in receipt['pending']:
+            raise ValueError(f'{key}: creation outcome unknown; reconcile manually before retry')
         if actual is not None:
             raise ValueError(f'{key}: existing resource is not owned by receipt')
+        receipt['pending'][key] = value
+        _save(path, receipt)
         adapter.create(key, value)
         if adapter.get(key) != value:
             raise RuntimeError(f'{key}: failed readback')
-        receipt['owned'][key] = value
+        receipt['owned'][key] = {'value': value, 'identity': adapter.identity(key)}
+        del receipt['pending'][key]
         _save(path, receipt)
     return receipt
 
@@ -67,9 +75,13 @@ def rollback(adapter, path):
     if not path.exists():
         return
     receipt = json.loads(path.read_text(encoding='utf-8'))
-    for key in reversed(list(receipt['owned'])):
-        value = receipt['owned'][key]
-        if adapter.get(key) != value:
+    if receipt.get('pending'):
+        raise ValueError('unknown creation outcome; manual reconciliation required')
+    for key in DELETE_ORDER:
+        if key not in receipt['owned']:
+            continue
+        value = receipt['owned'][key]['value']
+        if adapter.get(key) != value or adapter.identity(key) != receipt['owned'][key]['identity']:
             raise ValueError(f'{key}: ownership drift; manual recovery required')
         adapter.delete(key, value)
         if adapter.get(key) is not None:
@@ -83,6 +95,7 @@ class LiveAdapter:
     def __init__(self, pg_admin_dsn, grafana_url, token_file, importer_secret, dashboard_secret, ca_file, db_host):
         import psycopg
         from psycopg import sql
+        self.admin_dsn = pg_admin_dsn
         self.pg = psycopg.connect(pg_admin_dsn, autocommit=True)
         self.sql = sql
         self.url = grafana_url.rstrip('/')
@@ -95,7 +108,8 @@ class LiveAdapter:
         self.org_id = None
 
     def api(self, method, path, payload=None, org=None):
-        headers = {'Authorization': 'Bearer ' + self.token, 'Content-Type': 'application/json'}
+        credential = ('Basic ' + base64.b64encode(self.token[6:].encode()).decode()) if self.token.startswith('basic:') else ('Bearer ' + self.token)
+        headers = {'Authorization': credential, 'Content-Type': 'application/json'}
         if org is not None:
             headers['X-Grafana-Org-Id'] = str(org)
         data = json.dumps(payload).encode() if payload is not None else None
@@ -117,6 +131,22 @@ class LiveAdapter:
         with self.pg.cursor() as cur:
             cur.execute(query, args)
             return cur.fetchone() if cur.description else None
+
+    def identity(self, key):
+        if key == 'database':
+            return self._db('SELECT oid FROM pg_database WHERE datname=%s', ('hermes_mcp_analytics_private',))[0]
+        if key in self.secrets:
+            return self._db('SELECT oid FROM pg_roles WHERE rolname=%s', (resources('placeholder')[key]['name'],))[0]
+        if key == 'org':
+            return self._org()['id']
+        oid = self._org()['id']
+        if key == 'folder':
+            return [oid, self.api('GET', '/api/folders/private-telemetry', org=oid)['id']]
+        if key == 'datasource':
+            return [oid, self.api('GET', '/api/datasources/uid/private-telemetry-pg', org=oid)['id']]
+        if key == 'dashboard':
+            return [oid, self.api('GET', '/api/dashboards/uid/private-telemetry-42', org=oid)['dashboard']['id']]
+        raise KeyError(key)
 
     def get(self, key):
         names = resources('placeholder')
@@ -158,7 +188,7 @@ class LiveAdapter:
                 cur.execute(self.sql.SQL('REVOKE CONNECT ON DATABASE {} FROM PUBLIC').format(self.sql.Identifier(value['name'])))
             return
         if key in self.secrets:
-            self._db(self.sql.SQL('CREATE ROLE {} LOGIN PASSWORD %s').format(self.sql.Identifier(value['name'])), (self.secrets[key],))
+            self._db(self.sql.SQL('CREATE ROLE {} LOGIN PASSWORD {}').format(self.sql.Identifier(value['name']), self.sql.Literal(self.secrets[key])))
             self._db(self.sql.SQL('GRANT CONNECT ON DATABASE {} TO {}').format(self.sql.Identifier('hermes_mcp_analytics_private'), self.sql.Identifier(value['name'])))
             if key == 'dashboard_role':
                 self._install_schema()
@@ -182,27 +212,29 @@ class LiveAdapter:
         oid = self._org()['id']
         if key == 'folder':
             self.api('POST', '/api/folders', value, org=oid)
-            self.api('POST', '/api/folders/private-telemetry/permissions', {'items': [{'basicRole': 'Admin', 'permission': 4}]}, org=oid)
+            self.api('POST', '/api/folders/private-telemetry/permissions', {'items': []}, org=oid)
             acl = self.api('GET', '/api/folders/private-telemetry/permissions', org=oid)
             if any(i.get('basicRole') in ('Viewer', 'Editor') for i in acl):
                 raise ValueError('folder ACL not private')
             return
         if key == 'datasource':
             password = self.secrets['dashboard_role']
-            self.api('POST', '/api/datasources', {'name': 'Private Telemetry PostgreSQL', 'uid': value['uid'], 'type': 'postgres', 'access': 'proxy', 'url': self.host, 'user': 'hermes_analytics_dashboard', 'database': value['database'], 'jsonData': {'database': value['database'], 'sslmode': 'verify-full', 'postgresVersion': 1700, 'maxOpenConns': 5, 'maxIdleConns': 2, 'tlsAuthWithCACert': True}, 'secureJsonData': {'password': password, 'tlsCACert': Path(self.ca).read_text()}, 'editable': False}, org=oid)
+            self.api('POST', '/api/datasources', {'name': 'Private Telemetry PostgreSQL', 'uid': value['uid'], 'type': 'postgres', 'access': 'proxy', 'url': self.host, 'user': 'hermes_analytics_dashboard', 'database': value['database'], 'jsonData': {'database': value['database'], 'sslmode': 'verify-full', 'tlsConfigurationMethod': 'file-content', 'postgresVersion': 1700, 'maxOpenConns': 5, 'maxIdleConns': 2, 'tlsAuthWithCACert': True}, 'secureJsonData': {'password': password, 'tlsCACert': Path(self.ca).read_text()}, 'editable': False}, org=oid)
             result = self.api('GET', f'/api/datasources/uid/{value["uid"]}/health', org=oid)
             if result is None or result.get('status') != 'OK':
                 raise ValueError('datasource health did not pass')
             return
         if key == 'dashboard':
             dashboard = json.loads((ROOT / 'dashboard.json').read_text())
+            if dashboard.get('uid') != value['uid'] or any(p.get('datasource', {}).get('uid') != 'private-telemetry-pg' for p in dashboard['panels']):
+                raise ValueError('dashboard source UID/datasource mismatch')
             self.api('POST', '/api/dashboards/db', {'dashboard': dashboard, 'folderUid': value['folderUid'], 'overwrite': False}, org=oid)
             return
         raise KeyError(key)
 
     def _install_schema(self):
         import psycopg
-        conn = psycopg.connect(self.pg.info.dsn + ' dbname=hermes_mcp_analytics_private')
+        conn = psycopg.connect(self.admin_dsn, dbname='hermes_mcp_analytics_private')
         try:
             with conn:
                 with conn.cursor() as cur:
@@ -254,7 +286,8 @@ def main():
         rollback(adapter, args.receipt)
     else:
         receipt = json.loads(args.receipt.read_text())
-        if receipt['desired'] != desired or any(adapter.get(k) != v for k, v in receipt['owned'].items()):
+        if (receipt['desired'] != desired or receipt.get('pending') or set(receipt['owned']) != set(desired)
+                or any(adapter.get(k) != v['value'] or adapter.identity(k) != v['identity'] for k, v in receipt['owned'].items())):
             raise ValueError('activation readback failed')
     print(args.mode + ': verified')
 
