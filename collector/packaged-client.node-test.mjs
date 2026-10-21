@@ -6,7 +6,7 @@ import { join, resolve } from 'node:path';
 import { spawn, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const delay = ms => new Promise(r => setTimeout(r, ms));
@@ -33,11 +33,13 @@ test('installed tarball persists through real collector ACK; wrong/lost ACK reta
   let collector, proxy;
   try {
     const { mkdirSync } = await import('node:fs'); mkdirSync(home); mkdirSync(install);
-    const npm = resolve(process.execPath, '../node_modules/npm/bin/npm-cli.js');
-    const packed = execFileSync(process.execPath, [npm, 'pack', '--pack-destination', dir, '--json'], { cwd: repo, encoding: 'utf8' });
+    const npm = process.platform === 'win32' ? resolve(process.execPath, '../node_modules/npm/bin/npm-cli.js') : 'npm';
+    const command = process.platform === 'win32' ? process.execPath : npm;
+    const args = process.platform === 'win32' ? [npm] : [];
+    const packed = execFileSync(command, [...args, 'pack', '--pack-destination', dir, '--json'], { cwd: repo, encoding: 'utf8' });
     const tar = join(dir, JSON.parse(packed)[0].filename);
-    execFileSync(process.execPath, [npm, 'install', '--no-audit', '--no-fund', '--prefix', install, tar], { encoding: 'utf8' });
-    const module = new URL(`file:///${resolve(install, 'node_modules/@imrrd/powershell-mcp/dist/telemetry.js').replaceAll('\\', '/')}`).href;
+    execFileSync(command, [...args, 'install', '--no-audit', '--no-fund', '--prefix', install, tar], { encoding: 'utf8' });
+    const module = pathToFileURL(resolve(install, 'node_modules/@imrrd/powershell-mcp/dist/telemetry.js')).href;
     const startup = `import {startupPing,telemetryStatus} from ${JSON.stringify(module)}; startupPing('0.6.0'); while(telemetryStatus().outstanding) await new Promise(r=>setTimeout(r,20)); await new Promise(r=>setTimeout(r,2500));`;
     const resume = `import {startFlushTimer,telemetryStatus} from ${JSON.stringify(module)}; startFlushTimer('0.6.0'); while(telemetryStatus().outstanding) await new Promise(r=>setTimeout(r,20)); await new Promise(r=>setTimeout(r,2500));`;
     const port = 18000 + Math.floor(Math.random() * 25000);
