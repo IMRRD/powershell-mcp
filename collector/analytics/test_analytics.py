@@ -44,7 +44,7 @@ class AnalyticsTest(unittest.TestCase):
         self.assertEqual(ingest(self.db, self.source, self.classes), 5)
         self.assertEqual(ingest(self.db, self.source, self.classes), 0)
         self.assertEqual(self.db.execute('SELECT count(*) FROM telemetry_event').fetchone()[0], 5)
-        self.assertEqual(self.db.execute("SELECT origin FROM telemetry_event WHERE event = 'probe'").fetchone()[0], 'unknown_origin')
+        self.assertEqual(self.db.execute("SELECT origin FROM telemetry_event WHERE event = 'historical_other'").fetchone()[0], 'unknown_origin')
         self.assertEqual(self.db.execute('SELECT count(*) FROM telemetry_event WHERE raw::text LIKE %s', ('%private%',)).fetchone()[0], 0)
         self.assertEqual(self.db.execute("SELECT sum(calls) FROM telemetry_tool WHERE stream = 'metrics'").fetchone()[0], 2)
         self.assertEqual(self.db.execute("SELECT sum(calls) FROM telemetry_tool WHERE stream = 'counts'").fetchone()[0], 3)
@@ -73,3 +73,36 @@ class AnalyticsTest(unittest.TestCase):
         self.source.write_text('')
         with self.assertRaises(ValueError):
             ingest(self.db, self.source, self.classes)
+
+    def test_dashboard_role_denies_raw_reads_and_writes(self):
+        role = 'dashboard_' + os.urandom(8).hex()
+        self.db.execute(f'CREATE ROLE {role}')
+        try:
+            self.db.execute(f'GRANT USAGE ON SCHEMA {self.schema} TO {role}')
+            self.db.execute(f'GRANT SELECT ON {self.schema}.dashboard_events, {self.schema}.dashboard_tools TO {role}')
+            self.db.execute(f'GRANT EXECUTE ON FUNCTION {self.schema}.adoption_utc(timestamptz,timestamptz) TO {role}')
+            self.db.execute(f'SET ROLE {role}')
+            with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                self.db.execute(f'SELECT * FROM {self.schema}.telemetry_event')
+            with self.assertRaises(psycopg.errors.InsufficientPrivilege):
+                self.db.execute(f'INSERT INTO {self.schema}.telemetry_event(event_key) VALUES (\'x\')')
+            self.assertEqual(self.db.execute(f'SELECT count(*) FROM {self.schema}.dashboard_events').fetchone()[0], 0)
+            self.assertEqual(self.db.execute(f'SELECT count(*) FROM {self.schema}.adoption_utc(now() - interval \'1 day\', now())').fetchone()[0], 0)
+        finally:
+            self.db.execute('RESET ROLE')
+            self.db.execute(f'DROP OWNED BY {role}')
+            self.db.execute(f'DROP ROLE {role}')
+
+    def test_restore_from_immutable_source_preserves_old_window(self):
+        self.append([dict(event='startup', hostId='one', version='0.7.0', os='linux', ts='2020-01-01T00:00:00.000Z')])
+        self.assertEqual(ingest(self.db, self.source, self.classes), 1)
+        restored = 'restore_' + os.urandom(8).hex()
+        self.db.execute(f'CREATE SCHEMA {restored}')
+        try:
+            self.db.execute(f'SET search_path TO {restored}')
+            self.db.execute((ROOT / 'schema.sql').read_text().replace('SET search_path = public, pg_temp', f'SET search_path = {restored}, pg_temp'))
+            self.assertEqual(ingest(self.db, self.source, self.classes), 1)
+            self.assertEqual(self.db.execute("SELECT count(*) FROM telemetry_event WHERE event_at < '2021-01-01'").fetchone()[0], 1)
+        finally:
+            self.db.execute(f'SET search_path TO {self.schema}')
+            self.db.execute(f'DROP SCHEMA {restored} CASCADE')
