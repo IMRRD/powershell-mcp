@@ -1,0 +1,17 @@
+[Unit]
+Description=Private telemetry weekly digest (review required before activation)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=analytics-digest
+Group=analytics-digest
+EnvironmentFile=/etc/analytics-private/digest.env
+ExecStart=/opt/analytics-private-data/venv/bin/python /opt/analytics-private-data/weekly_digest.py --config /etc/analytics-private/digest.json --state-dir /var/lib/analytics-private/digest
+TimeoutStartSec=90
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/analytics-private/digest

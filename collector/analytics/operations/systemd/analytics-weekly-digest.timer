@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly private telemetry digest (disabled candidate)
+
+[Timer]
+OnCalendar=Mon *-*-* 03:00:00 UTC
+Persistent=false
+Unit=analytics-weekly-digest.service
+
+[Install]
+WantedBy=timers.target
