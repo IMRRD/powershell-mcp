@@ -16,7 +16,9 @@ export const resultShape = {
   durationMs: z.number().nonnegative(),
   timedOut: z.boolean(),
   truncation: z.object({ truncated: z.boolean(), limitBytesPerStream: z.number().nullable() }),
-  terminationStatus: z.enum(["completed", "nonzero_exit", "remote_error", "timeout", "cancelled", "transport_error", "unknown"]),
+  terminationStatus: z.enum(["completed", "nonzero_exit", "script_error", "remote_error", "timeout", "cancelled", "transport_error", "unknown"]),
+  errorRecords: z.array(z.object({ category: z.string(), fullyQualifiedErrorId: z.string(), exceptionType: z.string(), message: z.string() })).optional(),
+  errorRecordsTruncated: z.boolean().optional(),
   terminationCertainty: z.enum(["unknown", "root_exited"]),
   detail: z.object({ shell: z.string().optional(), signal: z.string().optional(), error: z.string().optional(), direction: z.enum(["upload", "download"]).optional(), bytes: z.number().optional(), localExitCode: z.number().nullable().optional() }),
 };
@@ -27,10 +29,11 @@ function base(transport: Transport, target: string, durationMs: number) {
   return { schemaVersion: 1 as const, executionId: randomUUID(), transport, target, durationMs };
 }
 export function fromProcess(r: PsResult, transport: "powershell" | "program" | "winrm", target: string): ExecutionResult {
-  const status = r.timedOut ? "timeout" : r.spawnError ? "transport_error"
+  const status = r.timedOut ? "timeout" : r.spawnError || r.protocolError ? "transport_error"
     : transport === "winrm" ? (r.invocationStatus ?? "unknown")
-    : r.exitCode === null ? "unknown" : r.exitCode === 0 ? "completed" : "nonzero_exit";
+    : r.scriptError ? "script_error" : r.exitCode === null ? "unknown" : r.exitCode === 0 ? "completed" : "nonzero_exit";
   return { ...base(transport, target, r.durationMs), stdout: r.stdout, stderr: r.stderr,
+    ...(r.errorRecords ? { errorRecords: r.errorRecords, errorRecordsTruncated: r.errorRecordsTruncated } : {}),
     // WinRM reports a local PowerShell host exit, not a remote command exit.
     exitCode: transport === "winrm" ? null : r.exitCode, timedOut: r.timedOut,
     truncation: { truncated: r.truncated, limitBytesPerStream: 1_048_576 },

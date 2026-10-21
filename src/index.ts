@@ -27,10 +27,11 @@ server.registerTool(
     script: z.string().describe("PowerShell script or command to execute."),
     cwd: z.string().optional().describe("Working directory."),
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000)."),
+    errorPolicy: z.enum(["legacy", "strict"]).optional().describe("Default legacy raw script; strict detects unhandled PowerShell ErrorRecords. Check native exits immediately in the script."),
   } },
-  async ({ script, cwd, timeoutMs }) => {
+  async ({ script, cwd, timeoutMs, errorPolicy }) => {
     incrementTool("run_powershell");
-    const r = await runPowerShell(script, { cwd, timeoutMs });
+    const r = await runPowerShell(script, { cwd, timeoutMs, errorPolicy });
     return toolResult(fromProcess(r, "powershell", "local"), formatResult(r));
   },
 );

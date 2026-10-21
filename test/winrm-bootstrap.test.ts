@@ -36,20 +36,33 @@ for (const exe of engines) describe(`native WinRM bootstrap (${exe}, isolated In
     expect(result.invocationStatus).toBe("remote_error");
     expect(result.stdout).toContain("before throw");
     expect(result.stdout).toContain("remote script failure");
+    expect(result.errorRecords?.[0].message).toContain("remote script failure");
   });
   it("retains nonterminating errors and following output", async () => {
     const result = await exercise(exe, "Write-Error 'ordinary error'; Write-Output 'after error'");
     expect(result.invocationStatus).toBe("remote_error");
     expect(result.stdout).toContain("ordinary error");
     expect(result.stdout).toContain("after error");
+    expect(result.errorRecords?.[0].category).toBe("NotSpecified");
     const nested = await exercise(exe, "& { Write-Error 'nested error'; Write-Output 'nested after' }");
     expect(nested.invocationStatus).toBe("remote_error");
     expect(nested.stdout).toContain("nested after");
   });
-  it("rejects missing and malformed wrapper results", async () => {
-    for (const body of ["$null", "[pscustomobject]@{ Output = 'x' }", "[pscustomobject]@{ Output = 1; RemoteError = $false }", "[pscustomobject]@{ Output = 'x'; RemoteError = 'false' }", "[pscustomobject]@{ Output = 'x'; RemoteError = $false }; [pscustomobject]@{ Output = 'y'; RemoteError = $false }"]) {
-      expect((await exercise(exe, "Write-Output x", body)).invocationStatus).toBe("transport_error");
-    }
+  it("never formats a source-only literal in remote errors", async () => {
+    const result = await exercise(exe, "Write-Error boom; $unused='SECRET_NOT_EMITTED_62091'; Write-Output after");
+    expect(result.invocationStatus).toBe("remote_error");
+    expect(JSON.stringify(result)).not.toContain("SECRET_NOT_EMITTED_62091");
+  });
+  it.each([
+    "$null",
+    "[pscustomobject]@{ Output = 'x' }",
+    "[pscustomobject]@{ Output = 1; RemoteError = $false }",
+    "[pscustomobject]@{ Output = 'x'; RemoteError = 'false' }",
+    "[pscustomobject]@{ Output = 'x'; RemoteError = $false }; [pscustomobject]@{ Output = 'y'; RemoteError = $false }",
+  ])("rejects invalid wrapper result: %s", async (body) => {
+    expect((await exercise(exe, "Write-Output x", body)).invocationStatus).toBe("transport_error");
+  });
+  it("reports connection failure", async () => {
     expect((await exercise(exe, "Write-Output x", "throw 'synthetic connection failure'")).invocationStatus).toBe("transport_error");
   });
   it("keeps spoof-like remote output as data and rejects forged frames", async () => {
