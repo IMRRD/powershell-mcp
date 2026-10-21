@@ -7,7 +7,7 @@ import threading
 import time
 
 HELPER = Path(__file__).with_name('ssh_command_helper.py')
-REMOTE_COMMAND = "python3 -I -c 'import sys; n=int(sys.stdin.buffer.readline()); exec(compile(sys.stdin.buffer.read(n),\"<reviewed-helper>\",\"exec\"))'"
+REMOTE_COMMAND = 'sudo -n -- /opt/analytics-reviewed/bin/helper'
 LIMIT = 65536
 # Frozen from reviewed source, never supplied by the target.
 REVIEWED_BLOBS = {
@@ -99,14 +99,13 @@ def _bounded_process(argv, payload, *, timeout=60):
 def execute(host, identity_file, request):
     if not isinstance(request, dict) or request.get('operation') not in ('pg', 'grafana', 'activation', 'attest'):
         raise ValueError('invalid operation')
-    script = b'REVIEWED_BLOBS = ' + repr(REVIEWED_BLOBS).encode('ascii') + b'\n' + HELPER.read_bytes()
     body = json.dumps(request, separators=(',', ':')).encode()
-    if len(body) > 65536 or len(script) > 65536:
-        raise ValueError('request or helper too large')
+    if len(body) > 65536:
+        raise ValueError('request too large')
     argv = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
             '-o', 'StrictHostKeyChecking=yes', '-o', 'ConnectTimeout=5',
             '-i', str(identity_file), host, REMOTE_COMMAND]
-    result = _bounded_process(argv, str(len(script)).encode() + b'\n' + script + body)
+    result = _bounded_process(argv, body)
     if result.returncode or len(result.stdout) > 65536 or len(result.stderr) > 65536:
         raise UnknownOutcome('SSH outcome unknown; reconcile before retry')
     try:

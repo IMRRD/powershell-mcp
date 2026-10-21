@@ -1,0 +1,7 @@
+# Issue 42 installed-helper staging boundary
+
+`install_reviewed_helper.py` stages exact Git blobs from `cf86def716ba36fc6724f655a52e4bc20e2272ab`, validates the frozen digest map and installs root-owned `/opt/analytics-reviewed/bin/helper`, dependencies, fixed backend config, inert `target.json` (`{}`), and a private venv with psycopg 3.3.6. Run with `--host 192.168.100.81 --backend pg` and `--host golem --backend grafana`, each using `--identity C:/Users/aegis/.ssh/aegis_golem_ed25519`. It uses existing authorized sudo, adds no sudoers rule, and creates no analytics resource.
+
+The controller now invokes `sudo -n -- /opt/analytics-reviewed/bin/helper` and sends only bounded JSON. The launcher checks root ownership, non-writable ancestry, reviewed hashes, fixed backend and config, then clears inherited environment before importing reviewed code. `verify-target-install.py` performs native read-only SSH attestation on both hosts.
+
+**Attestation is not activation readiness.** The inert target file lacks a PG admin DSN, Grafana token, secrets and approved admin. Provision them in a separately reviewed target-specific change. PG administration must stay inside the intended isolated PG17 namespace, not a generic host DSN; Grafana must remain loopback. No production `--apply` before review. The exact psycopg version is pinned, but interpreter and Python 3.12 transitive wheel hashes are not pinned yet; this remains a runtime review gate.
