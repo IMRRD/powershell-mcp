@@ -26,11 +26,28 @@ const DATA_FILE = process.env.TELEMETRY_FILE ?? path.join(
   "telemetry.jsonl",
 );
 
+const MAX_BODY_BYTES = 16 * 1024;
+const TOOLS = new Set(['run_powershell', 'list_services', 'get_service', 'control_service', 'system_info', 'ssh_exec', 'winrm_exec', 'sftp_upload', 'sftp_download', 'run_program']);
+const OS = new Set(['win32', 'linux', 'darwin', 'freebsd', 'openbsd', 'sunos', 'aix', 'android']);
+const date = s => typeof s === 'string' && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(s) && !Number.isNaN(Date.parse(s)) && new Date(s).toISOString() === s;
+const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);
+function validPayload(p) {
+  if (!object(p) || !['startup', 'tool_counts'].includes(p.event)) return false;
+  const expected = p.event === 'startup' ? ['event', 'hostId', 'os', 'ts', 'version'] : ['counts', 'event', 'hostId', 'os', 'ts', 'version'];
+  if (Object.keys(p).sort().join(',') !== expected.join(',')) return false;
+  if (typeof p.hostId !== 'string' || !p.hostId || p.hostId.length > 256 || typeof p.version !== 'string' || !p.version || p.version.length > 256 || !OS.has(p.os) || !date(p.ts)) return false;
+  return p.event === 'startup' || (object(p.counts) && Object.keys(p.counts).length > 0 && Object.entries(p.counts).every(([name, count]) => TOOLS.has(name) && Number.isSafeInteger(count) && count > 0));
+}
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (c) => chunks.push(c));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    let bytes = 0;
+    req.on("data", c => {
+      bytes += c.length;
+      if (bytes > MAX_BODY_BYTES) { reject(Error('too large')); req.resume(); return; }
+      chunks.push(c);
+    });
+    req.on("end", () => { if (bytes <= MAX_BODY_BYTES) resolve(Buffer.concat(chunks).toString('utf8')); });
     req.on("error", reject);
   });
 }
@@ -59,8 +76,8 @@ const server = http.createServer(async (req, res) => {
   let body;
   try {
     body = await readBody(req);
-  } catch {
-    res.writeHead(400);
+  } catch (err) {
+    res.writeHead(err.message === 'too large' ? 413 : 400);
     res.end("Bad request");
     return;
   }
@@ -75,10 +92,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Enforce expected shape (loose — future fields allowed)
-  if (!payload || typeof payload !== "object" || !payload.event) {
+  // Accept only the legacy allowlisted envelope; never persist arbitrary submitted fields.
+  if (!validPayload(payload)) {
     res.writeHead(422);
-    res.end("Missing event field");
+    res.end("Invalid telemetry payload");
     return;
   }
 
@@ -86,7 +103,6 @@ const server = http.createServer(async (req, res) => {
   const line = JSON.stringify({
     ...payload,
     _receivedAt: new Date().toISOString(),
-    _ip: req.socket.remoteAddress,
   }) + "\n";
 
   try {
