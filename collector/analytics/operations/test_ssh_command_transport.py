@@ -50,6 +50,9 @@ class TransportTests(unittest.TestCase):
             code = 'import sys;sys.stdout.buffer.write(b"x"*32768);sys.stderr.buffer.write(b"y"*32768)'
             result = transport._bounded_process([sys.executable, '-c', code], b'', timeout=5)
             self.assertEqual(len(result.stdout) + len(result.stderr), 65536)
+            code = 'import sys;sys.stdout.buffer.write("é".encode()*32768)'
+            result = transport._bounded_process([sys.executable, '-c', code], b'', timeout=5)
+            self.assertEqual(len(result.stdout), 65536)
 
     def test_reader_deadline_and_invalid_frames_fail_closed(self):
         with self.assertRaisesRegex(transport.UnknownOutcome, 'unknown'):
@@ -62,6 +65,10 @@ class TransportTests(unittest.TestCase):
             with patch.object(transport, '_bounded_process', return_value=subprocess.CompletedProcess([], 0, response, b'')):
                 with self.assertRaises(transport.UnknownOutcome):
                     transport.execute('host', 'key', {'operation':'attest'})
+        with patch.object(transport, '_bounded_process', return_value=subprocess.CompletedProcess([], 1, b'', b'private-secret')):
+            with self.assertRaisesRegex(transport.UnknownOutcome, 'reconcile') as failure:
+                transport.execute('host', 'key', {'operation':'attest'})
+        self.assertNotIn('private-secret', str(failure.exception))
 
     def test_controller_uses_fixed_command_and_frames_no_secret_argv(self):
         with patch.object(transport, '_bounded_process') as run:
