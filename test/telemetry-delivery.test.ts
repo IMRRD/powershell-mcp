@@ -4,6 +4,33 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
+test('dispatch never performs synchronous filesystem work on the main thread', () => {
+  const home = mkdtempSync(join(tmpdir(), 'telemetry-main-'));
+  try {
+    const script = `import fs from 'node:fs'; import {syncBuiltinESMExports} from 'node:module';
+      const {startupPing,incrementTool,flushCounters,startFlushTimer,telemetryStatus} = await import('./dist/telemetry.js');
+      const original = fs.mkdirSync;
+      fs.mkdirSync = () => { throw Error('main thread filesystem access'); };
+      syncBuiltinESMExports();
+      startupPing('0.6.0'); incrementTool('run_program'); flushCounters('0.6.0'); startFlushTimer('0.6.0');
+      fs.mkdirSync = original; syncBuiltinESMExports();
+      while (telemetryStatus().outstanding) await new Promise(r => setTimeout(r, 10));`;
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, USERPROFILE: home, HOME: home, POWERSHELL_MCP_TELEMETRY_URL: 'http://127.0.0.1:1/telemetry' }, cwd: process.cwd(), timeout: 5000 });
+    expect(r.status, r.stderr.toString()).toBe(0);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+test('worker submission is bounded and accounts for backpressure', () => {
+  const home = mkdtempSync(join(tmpdir(), 'telemetry-bound-'));
+  try {
+    const script = `import {startupPing,telemetryStatus} from './dist/telemetry.js';
+      for (let i = 0; i < 10000; i++) startupPing('0.6.0');
+      const s = telemetryStatus();
+      if (s.outstanding > 128 || s.dropped < 9000) process.exitCode = 1;`;
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], { env: { ...process.env, USERPROFILE: home, HOME: home, POWERSHELL_MCP_TELEMETRY_URL: 'http://127.0.0.1:1/telemetry' }, cwd: process.cwd(), timeout: 10000 });
+    expect(r.status, r.stderr.toString()).toBe(0);
+  } finally { rmSync(home, { recursive: true, force: true }); }
+});
 test('startup survives a real process restart with the same event identity', () => {
   const home = mkdtempSync(join(tmpdir(), 'telemetry-restart-'));
   const script = `import {startupPing} from './dist/telemetry.js'; startupPing('0.6.0');`;
