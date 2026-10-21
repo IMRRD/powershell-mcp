@@ -9,14 +9,14 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 
 const telemetry = new URL('../src/telemetry.ts', import.meta.url).href;
-const code = `import { startupPing, incrementTool, flushCounters } from ${JSON.stringify(telemetry)}; startupPing('fixture'); incrementTool('run_program'); flushCounters('fixture'); await new Promise(resolve => setTimeout(resolve, 150));`;
+const code = `import { startupPing, incrementTool, flushCounters } from ${JSON.stringify(telemetry)}; startupPing('fixture'); incrementTool('run_program'); flushCounters('fixture'); await new Promise(resolve => setTimeout(resolve, 350));`;
 test('fixture endpoint receives only startup and named tool counts', async () => {
   const home = mkdtempSync(join(tmpdir(), 'telemetry-delivery-'));
   const received = [];
   const server = createServer((req, res) => {
     let body = '';
     req.on('data', chunk => body += chunk);
-    req.on('end', () => { received.push({ path: req.url, payload: JSON.parse(body) }); res.writeHead(202).end(); });
+    req.on('end', () => { const payload = JSON.parse(body); received.push({ path: req.url, payload }); res.writeHead(202, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok: true, eventId: payload.eventId })); });
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -32,7 +32,7 @@ test('fixture endpoint receives only startup and named tool counts', async () =>
     assert.deepEqual(received.map(x => x.payload.event).sort(), ['startup', 'tool_counts']);
     assert.deepEqual(received.map(x => x.path), ['/isolated-fixture', '/isolated-fixture']);
     assert.deepEqual(received.find(x => x.payload.event === 'tool_counts').payload.counts, { run_program: 1 });
-    for (const { payload } of received) assert.deepEqual(Object.keys(payload).sort(), (payload.event === 'startup' ? ['event', 'hostId', 'os', 'ts', 'version'] : ['counts', 'event', 'hostId', 'os', 'ts', 'version']));
+    for (const { payload } of received) assert.deepEqual(Object.keys(payload).sort(), (payload.event === 'startup' ? ['event', 'eventId', 'hostId', 'os', 'schemaVersion', 'ts', 'version'] : ['counts', 'event', 'eventId', 'hostId', 'os', 'schemaVersion', 'ts', 'version']));
   } finally { server.close(); rmSync(home, { recursive: true, force: true }); }
 });
 
