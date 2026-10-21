@@ -114,6 +114,23 @@ class ActivationTests(unittest.TestCase):
                 mod.rollback(adapter, path)
             self.assertEqual(adapter.state['database'], {'name': 'foreign'})
 
+    def test_org_delete_http_500_preserves_receipt_and_database_credentials(self):
+        class BrokenOrg(Fake):
+            def delete(self, key, value):
+                if key == 'org':
+                    raise RuntimeError('Grafana DELETE /api/orgs/2: HTTP 500')
+                super().delete(key, value)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'receipt.json'
+            adapter = BrokenOrg()
+            mod.apply(adapter, path, mod.resources('approved-admin'))
+            with self.assertRaisesRegex(RuntimeError, 'Grafana DELETE /api/orgs/2: HTTP 500'):
+                mod.rollback(adapter, path)
+            receipt = __import__('json').loads(path.read_text())
+            self.assertEqual(set(receipt['owned']), {'org', 'database', 'dashboard_role', 'importer'})
+            self.assertEqual(set(adapter.state), set(receipt['owned']))
+
 
 if __name__ == '__main__':
     unittest.main()

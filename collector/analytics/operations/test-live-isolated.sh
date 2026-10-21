@@ -33,7 +33,7 @@ chmod 600 "$root/server.key"
 printf 'local all postgres trust\nhostssl all all all scram-sha-256\n' > "$root/pg_hba.conf"
 chmod 644 "$root/pg_hba.conf"
 sudo -n docker run -d --name "$name-pg" --network "$name" -v "$root:/fixture:ro" -e POSTGRES_PASSWORD_FILE=/fixture/pg.container.secret postgres:17.11-bookworm -c ssl=on -c ssl_cert_file=/fixture/server.crt -c ssl_key_file=/fixture/server.key -c ssl_ca_file=/fixture/ca.crt -c hba_file=/fixture/pg_hba.conf >/dev/null
-sudo -n docker run -d --name "$name-grafana" --network "$name" -v "$root:/fixture:ro" -e GF_SECURITY_ADMIN_PASSWORD__FILE=/fixture/grafana.container.secret -e GF_SECURITY_ALLOW_EMBEDDING=false -e GF_AUTH_ANONYMOUS_ENABLED=false grafana/grafana:11.6.7 >/dev/null
+sudo -n docker run -d --name "$name-grafana" --network "$name" -v "$root:/fixture:ro" -e GF_SECURITY_ADMIN_PASSWORD__FILE=/fixture/grafana.container.secret -e GF_SECURITY_ALLOW_EMBEDDING=false -e GF_AUTH_ANONYMOUS_ENABLED=false grafana/grafana:13.1.1 >/dev/null
 printf 'host=%s-pg port=5432 user=postgres dbname=postgres password=%s sslmode=verify-full sslrootcert=/fixture/ca.crt\n' "$name" "$(<"$root/pg.secret")" > "$root/admin.dsn"
 printf 'basic:admin:%s\n' "$(<"$root/grafana.secret")" > "$root/grafana.token"
 mkdir "$root/wheels"
