@@ -214,7 +214,7 @@ server.registerTool(
 
 server.registerTool(
   "run_program",
-  { description: "Run a native executable DIRECTLY (no shell) in a hidden process and capture clean stdout/stderr + exit code. Use this for console programs like gh, git, docker, node, python, etc. -- their output is captured reliably, unlike when the same program is run inside run_powershell (where a hidden PowerShell swallows native stdout). Provide the program and an args array (no shell quoting needed).", outputSchema: resultShape, inputSchema: {
+  { description: "Run a native executable DIRECTLY (no shell) in a hidden process and capture clean stdout/stderr + exit code. Use this for console programs like gh, git, docker, node, python, etc. -- direct execution captures their stdout/stderr without PowerShell pipeline semantics. Historical hidden-shell native stdout loss is executable/environment-specific; it is not universal. Provide the program and an args array (no shell quoting needed).", outputSchema: resultShape, inputSchema: {
     program: z.string().describe("Executable name on PATH or a full path, e.g. 'git' or 'C:\\Program Files\\GitHub CLI\\gh.exe'."),
     args: z.array(z.string()).optional().describe("Arguments as an array; each element is passed verbatim (no shell quoting)."),
     stdin: z.string().max(INPUT_LIMIT).optional().describe("UTF-8 stdin, max 1 MiB bytes. Empty string still opens stdin and sends EOF; no stdin in argv, environment or logs."),

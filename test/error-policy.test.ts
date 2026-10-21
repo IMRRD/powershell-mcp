@@ -1,11 +1,11 @@
+import { selectIntegrationEngines } from "./integration-engine.js";
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
 import { runPowerShell } from "../src/powershell.js";
 import { fromProcess } from "../src/result.js";
 
 const nativeExe = `'${process.execPath.replace(/'/g, "''")}'`;
-const engines = (process.platform === "win32" ? ["powershell.exe", "pwsh.exe"] : ["pwsh"])
-  .filter(exe => spawnSync(exe, ["-NoProfile", "-Command", "exit 0"], { timeout: 10000 }).status === 0);
+const engines = selectIntegrationEngines().map(engine => engine.exe);
 for (const exe of engines) describe(`error policy (${exe})`, () => {
   const run = (script: string, strict = true) => runPowerShell(script, { exe, errorPolicy: strict ? "strict" : "legacy" });
   it("preserves default raw semantics and detects opt-in Write-Error with following output", async () => {
@@ -16,7 +16,7 @@ for (const exe of engines) describe(`error policy (${exe})`, () => {
     expect(strict.stdout).not.toContain("after failure");
     expect(fromProcess(strict, "powershell", "local").terminationStatus).toBe("script_error");
     expect(strict.errorRecords?.[0]).toMatchObject({ category: "NotSpecified" });
-  });
+  }, 10000);
   it("detects throw and parser failures, without printing the source in metadata", async () => {
     for (const script of ["Write-Output 'before'; throw 'secret-ish failure'", "function broken( {"]) {
       const result = await run(script);
@@ -24,14 +24,14 @@ for (const exe of engines) describe(`error policy (${exe})`, () => {
       expect(result.errorRecords?.length).toBeGreaterThan(0);
       expect(JSON.stringify(result.errorRecords)).not.toContain("function broken(");
     }
-  });
+  }, 10000);
   it("does not confuse handled errors, stderr, or an earlier native exit with strict failure", async () => {
     expect((await run("try { throw 'handled' } catch { Write-Output 'recovered' }")).errorRecords).toEqual([]);
     expect((await run("[Console]::Error.WriteLine('diagnostic'); Write-Output 'ok'")).errorRecords).toEqual([]);
     const native = await run(`& ${nativeExe} -e 'process.exit(7)'; Write-Output 'later cmdlet'`);
     expect(native.stdout).toContain("later cmdlet");
     expect(native.errorRecords).toEqual([]);
-  });
+  }, 10000);
   it("keeps prior output but never formats source-only literals", async () => {
     const result = await run("Write-Output 'BEFORE_ERROR'; Write-Error boom; $unused='SECRET_NOT_EMITTED_62091'; Write-Output AFTER_ERROR");
     expect(result.stdout).toContain("BEFORE_ERROR");

@@ -1,10 +1,11 @@
+import { selectIntegrationEngines } from "./integration-engine.js";
 import { describe, expect, it } from "vitest";
 import { runProgram } from "../src/program.js";
 import { runPowerShell } from "../src/powershell.js";
 import { WINRM_BOOTSTRAP, decodeWinRmResult } from "../src/winrm.js";
 import { logStore } from "../src/full-logs.js";
 
-const shell = process.platform === "win32" ? "powershell.exe" : "pwsh";
+const shell = selectIntegrationEngines()[0]?.exe ?? (process.platform === "win32" ? "powershell.exe" : "pwsh");
 
 describe("bounded production pipes", () => {
   it("drains simultaneous large stdout/stderr and counts exact raw bytes", async () => {

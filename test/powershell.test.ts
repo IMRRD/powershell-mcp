@@ -1,25 +1,11 @@
+import { selectIntegrationEngines } from "./integration-engine.js";
 import { describe, it, expect, afterEach } from "vitest";
 import { execSync } from "node:child_process";
 import os from "node:os";
 import { resolvePowerShellCandidates, resolvePowerShellExe, buildArgs, runPowerShell } from "../src/powershell.js";
 import { formatResult } from "../src/format.js";
 
-// Detect whether a PowerShell is available so integration tests can run
-// locally / in CI on Windows, and be skipped on machines without it.
-function detectPwsh(): string | null {
-  for (const exe of ["pwsh", os.platform() === "win32" ? "powershell.exe" : ""]) {
-    if (!exe) continue;
-    try {
-      execSync(`${exe} -NoProfile -Command "$PSVersionTable.PSVersion.Major"`, {
-        stdio: "ignore",
-        timeout: 15_000,
-      });
-      return exe;
-    } catch { /* not available */ }
-  }
-  return null;
-}
-const PWSH = detectPwsh();
+const PWSH = selectIntegrationEngines()[0]?.exe ?? null;
 
 describe("resolvePowerShellExe", () => {
   const orig = process.env.PWSH_MCP_EXE;
@@ -99,8 +85,20 @@ describe("formatResult", () => {
 });
 
 describe.skipIf(!PWSH)("runPowerShell (integration)", () => {
+  it("executes required engine and verifies child version", async () => {
+    const required = process.env.MCP_REQUIRED_ENGINE;
+    const evidence = selectIntegrationEngines()[0];
+    const r = await runPowerShell("$PSVersionTable.PSVersion.ToString()", { exe: evidence?.exe });
+    expect(r.shell).toBe(evidence?.exe);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout.trim()).toBe(evidence?.version);
+    if (required) expect(r.stdout.trim().startsWith(required === "powershell" ? "5." : "7.")).toBe(true);
+    console.log("INTEGRATION_EXECUTION executable=" + r.shell + " version=" + r.stdout.trim());
+  });
   it("captures stdout and a zero exit code", async () => {
     const r = await runPowerShell("Write-Output 'hello-mcp'", { exe: PWSH! });
+    expect(r.shell).toBe(PWSH);
+    if (process.env.MCP_REQUIRED_ENGINE) console.log("INTEGRATION_EXECUTION executable=" + r.shell + " stdout=" + r.stdout.trim());
     expect(r.exitCode).toBe(0);
     expect(r.stdout).toContain("hello-mcp");
     expect(r.timedOut).toBe(false);

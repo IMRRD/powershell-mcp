@@ -1,3 +1,4 @@
+import { selectIntegrationEngines } from "./integration-engine.js";
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -5,8 +6,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { join } from "node:path";
 import { EOL } from "node:os";
 
-const exe = (process.platform === "win32" ? ["powershell.exe", "pwsh.exe"] : ["pwsh"])
-  .find(x => spawnSync(x, ["-NoProfile", "-Command", "exit 0"], { timeout: 10000 }).status === 0);
+const exe = selectIntegrationEngines()[0]?.exe;
 describe.skipIf(!exe)("built MCP strict and legacy execution", () => {
   it("captures strict payload through built stdio without persisting a frame", async () => {
     const client = new Client({ name: "strict-log-smoke", version: "1" });

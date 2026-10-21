@@ -2,17 +2,20 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { join } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 
+const executionParent = mkdtempSync(join(tmpdir(), "mcp-protocol-executions-"));
 const client = new Client({ name: "contract-test", version: "1" });
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: [join(process.cwd(), "dist/index.js")],
-  env: { ...process.env, POWERSHELL_MCP_NO_TELEMETRY: "1", PWSH_MCP_EXE: "nonexistent-mcp-shell-15" },
+  env: { ...process.env, POWERSHELL_MCP_NO_TELEMETRY: "1", PWSH_MCP_EXE: "nonexistent-mcp-shell-15", POWERSHELL_MCP_EXEC_PARENT: executionParent },
   stderr: "pipe",
 });
 
 beforeAll(async () => { await client.connect(transport); });
-afterAll(async () => { await client.close(); });
+afterAll(async () => { await client.close(); rmSync(executionParent, { recursive: true, force: true }); });
 
 async function check(name: string, args: Record<string, unknown>, status: string, error: boolean) {
   const result = await client.callTool({ name, arguments: args });
@@ -104,7 +107,7 @@ describe("built-artifact stdio structured tool contract", () => {
     const owner = "protocol-owner", idempotencyKey = `protocol-${Date.now()}`;
     const call = async (name: string, args: Record<string, unknown>) => {
       const response = await client.callTool({ name, arguments: args });
-      expect(response.isError ?? false).toBe(false);
+      expect(response.isError ?? false, `${name}: ${JSON.stringify(response.content)}`).toBe(false);
       return JSON.parse((response.content[0] as { text: string }).text);
     };
     const args = { owner, idempotencyKey, program: process.execPath, args: ["-e", "process.stdout.write('protocol-ready')"] };
