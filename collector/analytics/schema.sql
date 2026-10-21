@@ -35,13 +35,13 @@ RETURNS TABLE(status text, last_receipt timestamptz, last_import timestamptz, in
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
  SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM telemetry_checkpoint) THEN 'Unknown: no feed/checkpoint'
              WHEN NOT EXISTS (SELECT 1 FROM telemetry_event) THEN 'Unknown: no receipts'
-             WHEN (SELECT max(received_at) FROM telemetry_event) IS NULL THEN 'Unknown: no valid receipts'
-             WHEN (SELECT max(received_at) FROM telemetry_event) < as_of - freshness THEN 'Stale'
+             WHEN max(e.received_at) IS NULL THEN 'Unknown: no valid receipts'
+             WHEN max(e.received_at) < as_of - freshness THEN 'Stale'
              WHEN count(*) FILTER (WHERE e.event_time_quality = 'invalid') > 0 THEN 'Partial: invalid event time'
              WHEN count(*) FILTER (WHERE e.receipt_time_quality = 'invalid') > 0 THEN 'Partial: invalid receipt time'
              ELSE 'Recent receipts (not end-to-end proof)' END,
-        (SELECT max(received_at) FROM telemetry_event), (SELECT max(imported_at) FROM telemetry_checkpoint),
+        max(e.received_at), (SELECT max(imported_at) FROM telemetry_checkpoint),
         count(*) FILTER (WHERE e.event_time_quality = 'invalid'), count(*) FILTER (WHERE e.receipt_time_quality = 'invalid')
- FROM telemetry_event e WHERE e.received_at >= from_utc OR e.receipt_time_quality = 'invalid'
+ FROM telemetry_event e WHERE e.received_at >= from_utc AND e.received_at <= as_of
 $$;
 -- Run role.sql as an operator after replacing the password placeholder via secret provisioning.
