@@ -51,7 +51,8 @@ def install(host, identity, backend):
         launcher = Path(temp) / 'helper'
         launcher.write_bytes(render_launcher())
         configuration = Path(temp) / 'config.json'
-        configuration.write_text(json.dumps({'backend': backend, 'config_file': '/opt/analytics-reviewed/target.json'}))
+        configuration.write_text(json.dumps({'backend': backend, 'config_file': '/opt/analytics-reviewed/target.json',
+                                             **({'pg_service': 'telemetry_storage_postgres'} if backend == 'pg' else {})}))
         # Placeholder permits read-only attestation, not activation. Operator must separately
         # provision target-local secret paths/approved administrator after review.
         target = Path(temp) / 'target.json'

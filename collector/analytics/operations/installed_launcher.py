@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import stat
 import sys
+import ctypes
+import subprocess
 
 ROOT = Path('/opt/analytics-reviewed')
 MAX_REQUEST = 65536
@@ -48,6 +50,46 @@ def unique_pairs(pairs):
     return result
 
 
+def _running_pg_containers(service):
+    ids = subprocess.check_output(['/usr/bin/docker', 'ps', '-q', '--no-trunc',
+                                   '--filter', 'label=com.docker.swarm.service.name=' + service],
+                                  timeout=5).decode().splitlines()
+    if len(ids) != 1 or len(ids[0]) != 64 or any(c not in '0123456789abcdef' for c in ids[0]):
+        raise ValueError('expected exactly one service container')
+    containers = json.loads(subprocess.check_output(['/usr/bin/docker', 'inspect', ids[0]], timeout=5))
+    if len(containers) != 1 or containers[0].get('Id') != ids[0]:
+        raise ValueError('container identity drift')
+    return containers
+
+
+def _process_identity(pid):
+    # Field 22 (starttime); comm may contain spaces and parentheses.
+    data = Path(f'/proc/{pid}/stat').read_text()
+    return data[data.rfind(')') + 2:].split()[19]
+
+
+def bind_pg_namespace(service):
+    if service != 'telemetry_storage_postgres':
+        raise ValueError('service identity mismatch')
+    container, = _running_pg_containers(service)
+    if container.get('Config', {}).get('Labels', {}).get('com.docker.swarm.service.name') != service:
+        raise ValueError('service identity mismatch')
+    state = container.get('State', {})
+    pid = state.get('Pid')
+    if state.get('Running') is not True or type(pid) is not int or pid <= 1:
+        raise ValueError('service stopped')
+    start = _process_identity(pid)
+    fd = os.open(f'/proc/{pid}/ns/net', os.O_RDONLY | os.O_CLOEXEC)
+    try:
+        if _process_identity(pid) != start or os.stat(f'/proc/{pid}/ns/net').st_ino != os.fstat(fd).st_ino:
+            raise ValueError('container PID drift')
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.setns(fd, 0x40000000) != 0:  # CLONE_NEWNET only
+            raise OSError(ctypes.get_errno(), 'setns network failed')
+    finally:
+        os.close(fd)
+
+
 def run():
     raw = sys.stdin.buffer.read(MAX_REQUEST + 1)
     if len(raw) > MAX_REQUEST:
@@ -63,7 +105,7 @@ def run():
     config_path = ROOT / 'config.json'
     protected(config_path)
     config = json.loads(config_path.read_bytes(), object_pairs_hook=unique_pairs)
-    if set(config) != {'backend', 'config_file'} or config['backend'] not in ('pg', 'grafana') or config['config_file'] != str(ROOT / 'target.json'):
+    if set(config) != ({'backend', 'config_file', 'pg_service'} if config.get('backend') == 'pg' else {'backend', 'config_file'}) or config['backend'] not in ('pg', 'grafana') or config['config_file'] != str(ROOT / 'target.json') or (config['backend'] == 'pg' and config['pg_service'] != 'telemetry_storage_postgres'):
         raise ValueError('invalid target configuration')
     protected(ROOT / 'target.json')
     if request['operation'] == 'activation' and request['key'] not in ({'database', 'importer', 'dashboard_role', 'roles'} if config['backend'] == 'pg' else {'org', 'folder', 'datasource', 'dashboard'}):
@@ -82,6 +124,20 @@ def run():
         raise ValueError('wrong backend')
     if request['operation'] == 'grafana' and config['backend'] != 'grafana':
         raise ValueError('wrong backend')
+    if config['backend'] == 'pg' and request['operation'] != 'attest':
+        target = json.loads((ROOT / 'target.json').read_bytes(), object_pairs_hook=unique_pairs)
+        dsn_path = Path(target['pg_admin_dsn_file'])
+        protected(dsn_path)
+        from psycopg.conninfo import conninfo_to_dict
+        dsn = dsn_path.read_text().strip()
+        connection = conninfo_to_dict(dsn)
+        if (connection.get('host') != 'docker-xrv3' or connection.get('hostaddr') != '127.0.0.1'
+                or connection.get('port') != '5432' or connection.get('sslmode') != 'verify-full'
+                or not connection.get('sslrootcert')):
+            raise ValueError('invalid local PG connection authority')
+        protected(Path(connection['sslrootcert']))
+        bind_pg_namespace(config['pg_service'])
+        os.environ['ANALYTICS_LOCAL_PG_DSN'] = dsn
     spec = importlib.util.spec_from_file_location('installed_reviewed_helper', helper)
     module = importlib.util.module_from_spec(spec)
     module.REVIEWED_BLOBS = BLOBS
