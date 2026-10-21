@@ -59,9 +59,8 @@ class ActivationTests(unittest.TestCase):
                 adapter.fail = None
                 receipt = __import__('json').loads(path.read_text())
                 self.assertIn(key, receipt['pending'])
-                with self.assertRaisesRegex(ValueError, 'unknown creation outcome'):
-                    mod.rollback(adapter, path)
-                self.assertEqual(set(adapter.state), set(receipt['owned']))
+                mod.rollback(adapter, path)
+                self.assertEqual(adapter.state, {})
 
     def test_foreign_resources_and_drift_are_never_overwritten_or_deleted(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -81,6 +80,39 @@ class ActivationTests(unittest.TestCase):
     def test_missing_admin_fails_before_mutation(self):
         with self.assertRaises(ValueError):
             mod.resources('')
+
+    def test_fresh_process_recovers_pending_creation_after_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'receipt.json'
+            desired = mod.resources('approved-admin')
+            adapter = Fake()
+            original = mod._save
+            def interrupted(target, receipt):
+                if 'database' in receipt['owned'] and 'database' not in receipt['pending']:
+                    raise RuntimeError('process killed before receipt save')
+                return original(target, receipt)
+            mod._save = interrupted
+            try:
+                with self.assertRaisesRegex(RuntimeError, 'process killed'):
+                    mod.apply(adapter, path, desired)
+            finally:
+                mod._save = original
+            self.assertIn('database', adapter.state)
+            self.assertIn('database', __import__('json').loads(path.read_text())['pending'])
+            mod.rollback(adapter, path)
+            self.assertEqual(adapter.state, {})
+            self.assertEqual(__import__('json').loads(path.read_text())['pending'], {})
+
+    def test_pending_drift_is_not_deleted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / 'receipt.json'
+            desired = mod.resources('approved-admin')
+            mod._save(path, {'owned': {}, 'pending': {'database': desired['database']}, 'desired': desired})
+            adapter = Fake()
+            adapter.state['database'] = {'name': 'foreign'}
+            with self.assertRaisesRegex(ValueError, 'pending creation drift'):
+                mod.rollback(adapter, path)
+            self.assertEqual(adapter.state['database'], {'name': 'foreign'})
 
 
 if __name__ == '__main__':

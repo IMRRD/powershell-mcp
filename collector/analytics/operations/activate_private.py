@@ -75,8 +75,14 @@ def rollback(adapter, path):
     if not path.exists():
         return
     receipt = json.loads(path.read_text(encoding='utf-8'))
-    if receipt.get('pending'):
-        raise ValueError('unknown creation outcome; manual reconciliation required')
+    for key, value in list(receipt.get('pending', {}).items()):
+        actual = adapter.get(key)
+        if actual is not None:
+            if actual != value:
+                raise ValueError(f'{key}: pending creation drift; manual recovery required')
+            receipt['owned'][key] = {'value': value, 'identity': adapter.identity(key)}
+        del receipt['pending'][key]
+        _save(path, receipt)
     for key in DELETE_ORDER:
         if key not in receipt['owned']:
             continue
