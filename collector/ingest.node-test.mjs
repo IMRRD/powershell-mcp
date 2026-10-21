@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:net';
@@ -12,9 +12,11 @@ const valid = { event: 'startup', hostId: 'fixture', os: 'linux', version: '0.6.
 test('collector accepts legacy shape but rejects unknown fields and oversized bodies without writing them', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'collector-ingest-'));
   const file = join(dir, 'events.jsonl');
+  const historical = { ...valid, _ip: 'historical-private-fixture' };
+  writeFileSync(file, JSON.stringify(historical) + '\n');
   const listener = createServer(); listener.listen(0, '127.0.0.1'); await once(listener, 'listening');
   const port = listener.address().port; listener.close(); await once(listener, 'close');
-  const child = spawn(process.execPath, [fileURLToPath(new URL('./server.js', import.meta.url))], { env: { ...process.env, PORT: String(port), TELEMETRY_FILE: file }, stdio: 'ignore' });
+  const child = spawn(process.execPath, [fileURLToPath(new URL('./server.js', import.meta.url))], { env: { ...process.env, PORT: String(port), TELEMETRY_FILE: file, TELEMETRY_TOKEN: 'fixture-secret' }, stdio: 'ignore' });
   try {
     const url = `http://127.0.0.1:${port}`;
     let ready = false;
@@ -23,15 +25,27 @@ test('collector accepts legacy shape but rejects unknown fields and oversized bo
       await new Promise(r => setTimeout(r, 25));
     }
     assert.ok(ready, 'server ready');
-    const send = body => fetch(url + '/api/telemetry', { method: 'POST', body, headers: { 'Content-Type': 'application/json' } });
+    const send = (body, token = 'fixture-secret') => fetch(url + '/api/telemetry', { method: 'POST', body, headers: { 'Content-Type': 'application/json', ...(token === null ? {} : { 'X-Telemetry-Token': token }) } });
+    assert.equal((await send(JSON.stringify(valid), null)).status, 401);
+    assert.equal((await send(JSON.stringify(valid), 'wrong')).status, 401);
+    assert.equal(readFileSync(file, 'utf8'), JSON.stringify(historical) + '\n');
+    const prefix = JSON.stringify({ ...valid, hostId: 'é' });
+    const exact = prefix + ' '.repeat(16384 - Buffer.byteLength(prefix));
+    assert.equal(Buffer.byteLength(exact), 16384);
+    assert.equal((await send(exact)).status, 202);
+    assert.equal((await send(exact + ' ')).status, 413);
     assert.equal((await send(JSON.stringify(valid))).status, 202);
     assert.equal((await send(JSON.stringify({ ...valid, command: 'sensitive' }))).status, 422);
     assert.equal((await send(JSON.stringify({ ...valid, counts: { run_program: 1 } }))).status, 422);
     assert.equal((await send(JSON.stringify({ ...valid, hostId: 'x'.repeat(17000) }))).status, 413);
     assert.equal((await send('{')).status, 400);
     const rows = readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
-    assert.equal(rows.length, 1);
-    assert.equal(rows[0]._ip, undefined);
-    assert.equal(rows[0].hostId, 'fixture');
+    assert.equal(rows.length, 3);
+    assert.deepEqual(rows[0], historical);
+    assert.equal(rows[0]._ip, 'historical-private-fixture');
+    assert.equal(rows[1].hostId, 'é');
+    assert.equal(rows[1]._ip, undefined);
+    assert.equal(rows[2]._ip, undefined);
+    assert.equal(rows[2].hostId, 'fixture');
   } finally { if (child.exitCode === null) { const ended = once(child, 'exit'); child.kill(); await ended; } rmSync(dir, { recursive: true, force: true }); }
 });
