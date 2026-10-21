@@ -66,7 +66,7 @@ runpy.run_path(str(root/'import_jsonl.py'),run_name='__main__')
 PY
 ca=/opt/ialogics/telemetry-postgres/data/tls/root.crt
 sudo -n test -r "$ca" || { echo 'trusted CA unavailable' >&2; exit 1; }
-sudo -n docker run --rm --network "container:$container" --add-host docker-xrv3:127.0.0.1 -v "$root:/rehearsal:ro" -v "$ca:/trust/root.crt:ro" -e "REHEARSAL_DB=$db" -e "REHEARSAL_IMPORTER=$imp" python:3.12-slim-bookworm sh -c 'pip -q install "psycopg[binary]==3.3.6" && python /rehearsal/run_import.py'
+sudo -n docker run --rm --network "container:$container" -v "$root:/rehearsal:ro" -v "$ca:/trust/root.crt:ro" -e "REHEARSAL_DB=$db" -e "REHEARSAL_IMPORTER=$imp" python:3.12-slim-bookworm sh -c 'pip -q install "psycopg[binary]==3.3.6" && python /rehearsal/run_import.py'
 cat > "$root/check_dashboard.py" <<'PY'
 import os,pathlib,psycopg
 root=pathlib.Path('/rehearsal')
@@ -85,7 +85,7 @@ with conn:
             else: raise AssertionError('dashboard raw privilege unexpectedly granted')
 print('dashboard actual-login verify-full TLS; views allowed; raw read/write denied')
 PY
-sudo -n docker run --rm --network "container:$container" --add-host docker-xrv3:127.0.0.1 -v "$root:/rehearsal:ro" -v "$ca:/trust/root.crt:ro" -e "REHEARSAL_DB=$db" -e "REHEARSAL_DASHBOARD=$dash" python:3.12-slim-bookworm sh -c 'pip -q install "psycopg[binary]==3.3.6" && python /rehearsal/check_dashboard.py'
+sudo -n docker run --rm --network "container:$container" -v "$root:/rehearsal:ro" -v "$ca:/trust/root.crt:ro" -e "REHEARSAL_DB=$db" -e "REHEARSAL_DASHBOARD=$dash" python:3.12-slim-bookworm sh -c 'pip -q install "psycopg[binary]==3.3.6" && python /rehearsal/check_dashboard.py'
 psql_admin -d "$db" -Atqc 'SELECT count(*), (SELECT coalesce(sum(calls),0) FROM telemetry_tool), (SELECT count(*) FROM telemetry_checkpoint) FROM telemetry_event' > "$root/before.txt"
 sudo -n docker exec "$container" pg_dump -U telemetry_admin -Fc -d "$db" > "$root/analytics.dump"
 sha256sum "$root/analytics.dump"
