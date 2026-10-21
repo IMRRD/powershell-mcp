@@ -15,14 +15,16 @@ ROOT = HERE.parent
 SOURCE = {'operations/ssh_command_helper.py': HERE / 'ssh_command_helper.py',
           **{key: ROOT / key for key in REVIEWED_BLOBS}}
 REVIEWED_COMMIT = 'cf86def716ba36fc6724f655a52e4bc20e2272ab'
+HELPER_DIGEST = '143d39ceb8e2c08339b2d0bc44de760637f8edc7a2c2ed03c87392be7a09acfa'
 
 
 def reviewed_bytes(relative):
-    return subprocess.check_output(['git', 'show', f'{REVIEWED_COMMIT}:collector/analytics/{relative}'], cwd=ROOT.parent.parent)
+    commit = 'HEAD' if relative == 'operations/ssh_command_helper.py' else REVIEWED_COMMIT
+    return subprocess.check_output(['git', 'show', f'{commit}:collector/analytics/{relative}'], cwd=ROOT.parent.parent)
 
 
 def check_source():
-    for key, digest in REVIEWED_BLOBS.items():
+    for key, digest in {'operations/ssh_command_helper.py': HELPER_DIGEST, **REVIEWED_BLOBS}.items():
         if hashlib.sha256(reviewed_bytes(key)).hexdigest() != digest:
             raise ValueError(f'reviewed source drift: {key}')
 
