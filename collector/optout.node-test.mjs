@@ -9,7 +9,7 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 
 const telemetry = new URL('../src/telemetry.ts', import.meta.url).href;
-const code = `import { startupPing, incrementTool, flushCounters } from ${JSON.stringify(telemetry)}; startupPing('fixture'); incrementTool('run_program'); flushCounters('fixture'); await new Promise(resolve => setTimeout(resolve, 350));`;
+const code = `import { startupPing, incrementTool, flushCounters } from ${JSON.stringify(telemetry)}; startupPing('0.6.0'); incrementTool('run_program'); flushCounters('0.6.0'); await new Promise(resolve => setTimeout(resolve, 3000));`;
 test('fixture endpoint receives only startup and named tool counts', async () => {
   const home = mkdtempSync(join(tmpdir(), 'telemetry-delivery-'));
   const received = [];

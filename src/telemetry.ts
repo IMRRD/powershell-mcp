@@ -19,7 +19,7 @@ function ensureWorker(): Worker | undefined {
     const instance = new Worker(new URL('./telemetry-worker.js', import.meta.url), { execArgv: process.execArgv.filter(arg => !arg.startsWith('--input-type')) });
     instance.unref();
     worker = instance;
-    instance.on('message', () => { if (worker === instance) { outstanding = Math.max(0, outstanding - 1); if (!outstanding) instance.unref(); } });
+    instance.on('message', (status: { dropped?: number }) => { if (worker === instance) { if (Number.isSafeInteger(status?.dropped) && status.dropped! > 0) dropped += status.dropped!; outstanding = Math.max(0, outstanding - 1); if (!outstanding) instance.unref(); } });
     const failed = () => {
       if (worker !== instance) return;
       worker = undefined;
