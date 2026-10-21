@@ -1,9 +1,10 @@
 import { Client } from "ssh2";
+import { hostTrust, type HostTrustOptions } from "./host-trust.js";
 import { OutputCollector, type StreamCapture } from "./output-collector.js";
 import { readFileSync } from "node:fs";
 import { logStore } from "./full-logs.js";
 
-export interface SshOptions {
+export interface SshOptions extends HostTrustOptions {
   host: string;
   username: string;
   command: string;
@@ -83,8 +84,13 @@ export function runSsh(opts: SshOptions): Promise<SshResult> {
       });
     });
 
+    let trust: ReturnType<typeof hostTrust> | undefined;
+    let rejectedHost = false;
     conn.on("error", (e: Error & { level?: string }) =>
-      finish({ error: `connection error${e.level ? ` (${e.level})` : ""}: ${e.message}` }));
+      finish({ error: rejectedHost && trust ? trust.failure() : `connection error${e.level ? ` (${e.level})` : ""}: ${e.message}` }));
+
+    try { trust = hostTrust(opts); }
+    catch (e) { finish({ error: (e as Error).message }); return; }
 
     const cfg: Record<string, unknown> = {
       host: opts.host,
@@ -92,6 +98,7 @@ export function runSsh(opts: SshOptions): Promise<SshResult> {
       username: opts.username,
       readyTimeout: Math.min(timeoutMs, 120_000),
       keepaliveInterval: 0,
+      hostVerifier: (key: Buffer) => { const accepted = trust.hostVerifier(key); if (!accepted) rejectedHost = true; return accepted; },
     };
 
     if (opts.privateKey) cfg.privateKey = opts.privateKey;
