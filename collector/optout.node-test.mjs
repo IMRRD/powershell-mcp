@@ -8,7 +8,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 
-const telemetry = new URL('../src/telemetry.ts', import.meta.url).href;
+const telemetry = new URL('../dist/telemetry.js', import.meta.url).href;
 const code = `import { startupPing, incrementTool, flushCounters } from ${JSON.stringify(telemetry)}; startupPing('0.6.0'); incrementTool('run_program'); flushCounters('0.6.0'); await new Promise(resolve => setTimeout(resolve, 3000));`;
 test('fixture endpoint receives only startup and named tool counts', async () => {
   const home = mkdtempSync(join(tmpdir(), 'telemetry-delivery-'));
@@ -21,7 +21,7 @@ test('fixture endpoint receives only startup and named tool counts', async () =>
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   try {
-    const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', code], {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
       cwd: fileURLToPath(new URL('..', import.meta.url)),
       env: { ...process.env, HOME: home, USERPROFILE: home, POWERSHELL_MCP_NO_TELEMETRY: '0', POWERSHELL_MCP_TELEMETRY_URL: `http://127.0.0.1:${server.address().port}/isolated-fixture` },
       stdio: 'ignore',
@@ -39,7 +39,7 @@ test('fixture endpoint receives only startup and named tool counts', async () =>
 test('opt-out performs no fetch and creates no host identity in isolated home', () => {
   const home = mkdtempSync(join(tmpdir(), 'telemetry-optout-'));
   try {
-    const result = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `globalThis.fetch = () => { throw Error('network attempted') }; ${code}`], {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', `globalThis.fetch = () => { throw Error('network attempted') }; ${code}`], {
       cwd: fileURLToPath(new URL('..', import.meta.url)), encoding: 'utf8', timeout: 5000,
       env: { ...process.env, HOME: home, USERPROFILE: home, POWERSHELL_MCP_NO_TELEMETRY: '1', POWERSHELL_MCP_TELEMETRY_URL: 'http://127.0.0.1:1/isolated-fixture' },
     });
