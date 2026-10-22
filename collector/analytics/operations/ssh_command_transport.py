@@ -16,7 +16,7 @@ REVIEWED_BLOBS = {
     'schema.sql': 'c653108c38e332e699b49f9a785168602a2e48e08c345f10869c5bf7b9d67aba',
     'roles.sql': 'defd6234b8ada49a66c8ae8731928f8ffb6cbc941266efd9c9034c4ccfc3a33f',
     'queries.sql': 'e89ab1db5354ab037d381e90c0f6697a20e7249738c510af381f8a089e0467d5',
-    'dashboard.json': 'b3bbc9cbc8a14633e58ae654dfd81925fcdb197e31b17e5f4d29fd120be4435c',
+    'dashboard.json': '95a92b65948c3ce55ac5182ead8c1d345b823c88db8697a60f0725f7c3420beb',
 }
 
 
