@@ -12,11 +12,11 @@ LIMIT = 65536
 # Frozen from reviewed source, never supplied by the target.
 REVIEWED_BLOBS = {
     'operations/activate_private.py': '889d12a121c20e75a378733c1a58f1eeb2f7d4aee882312931cc31a18cee4d15',
-    'operations/prepare-private-activation.py': '773612a39ec86dfe4d24b271b519e7ea8fdb6b9c41c93de9dfb5c3e7aa627385',
+    'operations/prepare-private-activation.py': '61da970b907e9f90d6576ad34b09f5978611d00c2b33ad27c7f70791bb9f6b15',
     'schema.sql': 'c653108c38e332e699b49f9a785168602a2e48e08c345f10869c5bf7b9d67aba',
     'roles.sql': 'defd6234b8ada49a66c8ae8731928f8ffb6cbc941266efd9c9034c4ccfc3a33f',
     'queries.sql': 'e89ab1db5354ab037d381e90c0f6697a20e7249738c510af381f8a089e0467d5',
-    'dashboard.json': 'b3bbc9cbc8a14633e58ae654dfd81925fcdb197e31b17e5f4d29fd120be4435c',
+    'dashboard.json': 'db4688f124d51f5a69342a28912b0a3e6cbde0365b17ae7569fa2b2b52b2895e',
 }
 
 

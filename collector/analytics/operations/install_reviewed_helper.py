@@ -14,7 +14,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 SOURCE = {'operations/ssh_command_helper.py': HERE / 'ssh_command_helper.py',
           **{key: ROOT / key for key in REVIEWED_BLOBS}}
-REVIEWED_COMMIT = 'f15badda9095cc00f20e056d43e6e5d6216e74cd'
+REVIEWED_COMMIT = '6c9d8160944ac3cd50b55cd119050ac34b199494'
 HELPER_DIGEST = '143d39ceb8e2c08339b2d0bc44de760637f8edc7a2c2ed03c87392be7a09acfa'
 
 
