@@ -166,7 +166,7 @@ export function runSsh(opts: SshOptions): Promise<SshResult> {
         if (!hopCfg.privateKey && !hopCfg.password) throw Error('no auth provided');
         await new Promise<void>((done, fail) => {
           client.once('ready', done);
-          client.once('error', (e: Error) => fail(Error(rejected ? policy.failure() : 'jump connection failed')));
+          client.on('error', (e: Error) => fail(Error(rejected ? policy.failure() : 'jump connection failed')));
           client.once('close', () => fail(Error('jump connection closed')));
           if (!mayDispatch()) return;
           hopCfg.readyTimeout = Math.max(1, remaining());
