@@ -1,7 +1,8 @@
 import { runPowerShell, type PsResult } from "./powershell.js";
 import { randomBytes } from "node:crypto";
-import { LIMIT_BOOTSTRAP, captureFromEnvelope, frameLimit, payloadLimit, protectedPayload } from "./envelope-output.js";
-import { captureDiagnostic } from "./output-collector.js";
+import { PRODUCER_BOOTSTRAP, PRODUCER_PIPELINE } from "./producer-output.js";
+import { displayCapture, captureFromEnvelope, frameLimit, payloadLimit, protectedPayload } from "./envelope-output.js";
+import { captureDiagnostic, combineCaptures, OutputCollector } from "./output-collector.js";
 import { logStore } from "./full-logs.js";
 import { PARAMETER_BOOTSTRAP, validateParameters, INPUT_LIMIT } from "./typed-input.js";
 
@@ -15,6 +16,7 @@ export interface WinRmOptions {
   /** Negotiate (default) | Kerberos | Basic | CredSSP | Default */
   authentication?: "Default" | "Negotiate" | "Kerberos" | "Basic" | "CredSSP";
   timeoutMs?: number;
+  signal?: AbortSignal;
   /** Internal batch deadline, checked after synchronous preparation at launch. */
   dispatchDeadlineAt?: number;
   maxOutputBytes?: number;
@@ -46,14 +48,24 @@ export const WINRM_BOOTSTRAP = [
   "$json = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded));",
   "$payload = $json | ConvertFrom-Json;",
   "$payloadLimit = [int]$payload.outputLimit; $payloadTail = [bool]$payload.outputTail;",
-  LIMIT_BOOTSTRAP,
   PARAMETER_BOOTSTRAP,
   "$encoded = $null;",
   "$json = $null;",
   "$invoke = @{",
   "  ComputerName = [string]$payload.computerName;",
-  "  ScriptBlock = { param($source, $bound) $items = [System.Collections.ArrayList]::new(); $errors = [System.Collections.ArrayList]::new(); $failed = $false; try { & ([ScriptBlock]::Create($source)) @bound 2>&1 3>&1 4>&1 5>&1 6>&1 | ForEach-Object { if ($_ -is [System.Management.Automation.ErrorRecord]) { $failed = $true; [void]$errors.Add($_); [void]$items.Add([string]$_.Exception.Message) } else { [void]$items.Add($_) } } } catch { $failed = $true; [void]$errors.Add($_); [void]$items.Add([string]$_.Exception.Message) }; $limited = $errors.Count -gt 8; $records = @($errors | Select-Object -First 8 | ForEach-Object { $e = $_; $fields = @([string]$e.CategoryInfo.Category, [string]$e.FullyQualifiedErrorId, [string]$e.Exception.GetType().FullName, [string]$e.Exception.Message); for ($i=0; $i -lt $fields.Count; $i++) { if ($fields[$i].Length -gt 256) { $fields[$i] = $fields[$i].Substring(0,256); $limited = $true } }; [pscustomobject]@{ category=$fields[0]; fullyQualifiedErrorId=$fields[1]; exceptionType=$fields[2]; message=$fields[3] } }); [pscustomobject]@{ Output = [string]($items.ToArray() | Out-String -Width 240); RemoteError = [bool]$failed; ErrorRecords = $records; ErrorRecordsTruncated = [bool]$limited } };",
-  "  ArgumentList = @([string]$payload.command, $(if ($null -eq $payload.parameters) { @{} } else { Convert-Parameter $payload.parameters }));",
+  `  ScriptBlock = { param($source, $bound, $payloadLimit, $payloadTail)
+${PRODUCER_BOOTSTRAP}
+$producerErr = [McpBoundedWriter]::new([int]$payloadLimit, [bool]$payloadTail)
+$consoleOut = [Console]::Out; $consoleErr = [Console]::Error
+[Console]::SetOut($producer); [Console]::SetError($producerErr)
+try {
+  try { & ([ScriptBlock]::Create($source)) @bound 2>&1 3>&1 4>&1 5>&1 6>&1 | ${PRODUCER_PIPELINE} }
+  catch { RecordError $_; $producer.WriteLine([string]$_.Exception.Message) }
+} finally { [Console]::SetOut($consoleOut); [Console]::SetError($consoleErr) }
+$bounded = $producer.Snapshot()
+[pscustomobject]@{ Output = $bounded.output; observedBytes = $bounded.observedBytes; capturedBytes = $bounded.capturedBytes; omittedBytes = $bounded.omittedBytes; truncated = $bounded.truncated; stderr = $producerErr.Snapshot(); RemoteError = [bool]$producerState.failed; ErrorRecords = @($errors.ToArray()); ErrorRecordsTruncated = [bool]$producerState.limited }
+};`,
+  "  ArgumentList = @([string]$payload.command, $(if ($null -eq $payload.parameters) { @{} } else { Convert-Parameter $payload.parameters }), $payloadLimit, $payloadTail);",
   "};",
   "if ($payload.useSsl) { $invoke.UseSSL = $true; }",
   "if ($null -ne $payload.authentication -and [string]$payload.authentication -ne '') {",
@@ -70,10 +82,10 @@ export const WINRM_BOOTSTRAP = [
   "  $results = @(Invoke-Command @invoke -ErrorAction Stop);",
   "  if ($results.Count -ne 1 -or $null -eq $results[0] -or $null -eq $results[0].PSObject.Properties['Output'] -or $null -eq $results[0].PSObject.Properties['RemoteError'] -or $null -eq $results[0].PSObject.Properties['ErrorRecords'] -or $null -eq $results[0].PSObject.Properties['ErrorRecordsTruncated'] -or $results[0].Output -isnot [string] -or $results[0].RemoteError -isnot [bool] -or $results[0].ErrorRecordsTruncated -isnot [bool]) { throw 'Invalid WinRM wrapper result' };",
   "  $result = $results[0];",
-  "  $bounded = LimitOutput ([string]$result.Output);",
-  "  $body = @{ status = $(if ($result.RemoteError) { 'remote_error' } else { 'completed' }); output = $bounded.output; observedBytes = $bounded.observedBytes; capturedBytes = $bounded.capturedBytes; omittedBytes = $bounded.omittedBytes; truncated = $bounded.truncated; records = @($result.ErrorRecords); recordsTruncated = $result.ErrorRecordsTruncated };",
+  "  $bounded = $result;",
+  "  $body = @{ status = $(if ($result.RemoteError) { 'remote_error' } else { 'completed' }); output = $bounded.Output; stderr = $result.stderr; observedBytes = $bounded.observedBytes; capturedBytes = $bounded.capturedBytes; omittedBytes = $bounded.omittedBytes; truncated = $bounded.truncated; records = @($result.ErrorRecords); recordsTruncated = $result.ErrorRecordsTruncated };",
   "} catch { $body = @{ status = 'transport_error'; output = ([string]$_).Substring(0, [Math]::Min(512, ([string]$_).Length)) } }",
-  "[Console]::Out.WriteLine('WINRM-RESULT:' + $payload.frame + ':' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Compress))));",
+  "[Console]::Out.WriteLine('WINRM-RESULT:' + $payload.frame + ':' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Depth 6 -Compress))));",
 ].join("\n");
 
 export function buildWinRmInput(opts: WinRmOptions): string {
@@ -109,7 +121,7 @@ export function runWinRm(opts: WinRmOptions): Promise<PsResult> {
   const input = JSON.parse(Buffer.from(buildWinRmInput(opts), "base64").toString("utf8"));
   input.frame = frame;
   const stdin = Buffer.from(JSON.stringify(input), "utf8").toString("base64");
-  const maxOutputBytes = frameLimit(payloadLimit(opts.maxOutputBytes ?? 1_048_576, opts.logOutput, opts.logQuotaBytes));
+  const maxOutputBytes = frameLimit(2 * payloadLimit(opts.maxOutputBytes ?? 1_048_576, opts.logOutput, opts.logQuotaBytes));
   const remaining = opts.dispatchDeadlineAt === undefined ? opts.timeoutMs ?? 120_000 : Math.ceil(opts.dispatchDeadlineAt - Date.now());
   if (remaining <= 0) {
     if (reservedLog) logStore.delete(reservedLog.finish(false).handle);
@@ -118,8 +130,9 @@ export function runWinRm(opts: WinRmOptions): Promise<PsResult> {
   return runPowerShell(WINRM_BOOTSTRAP, {
     stdin,
     timeoutMs: remaining,
+    signal: opts.signal,
     maxOutputBytes,
-    stderrLimitBytes: opts.maxOutputBytes ?? 1_048_576,
+    stderrLimitBytes: payloadLimit(opts.maxOutputBytes ?? 1_048_576, opts.logOutput, opts.logQuotaBytes),
     stderrTail: opts.tail,
   }).then((result) => {
     const decoded = decodeWinRmResult(result, frame, opts.maxOutputBytes ?? 1_048_576, opts.tail, opts.logOutput, opts.logQuotaBytes, reservedLog);
@@ -131,13 +144,15 @@ export function runWinRm(opts: WinRmOptions): Promise<PsResult> {
 /** Validate the local frame before interpreting remote output as data. */
 export function decodeWinRmResult(result: PsResult, frame: string, maxOutput = 1_048_576, tail = false, logOutput = false, quota?: number, reservedLog?: ReturnType<typeof logStore.create>): PsResult {
     const failure = (diagnostic?: string): PsResult => {
-      const stderrCapture = diagnostic === undefined ? result.stderrCapture : captureDiagnostic(result.stderrCapture, `\n${diagnostic}`, maxOutput, tail);
+      const stderrCapture = diagnostic === undefined
+        ? result.stderrCapture && displayCapture(result.stderrCapture, maxOutput, tail)
+        : captureDiagnostic(result.stderrCapture, `\n${diagnostic}`, maxOutput, tail);
       return { ...result, stdout: "", stdoutCapture: undefined, stderr: stderrCapture?.text ?? "",
         stderrCapture, truncated: !!stderrCapture?.truncated, outputLimitBytes: maxOutput, invocationStatus: "transport_error" };
     };
-    if (result.timedOut || result.spawnError) return failure();
+    if (result.timedOut || result.cancelled || result.spawnError) return failure();
     const match = result.stdout.match(/^WINRM-RESULT:([0-9a-f]{48}):([A-Za-z0-9+/=]+)\s*$/);
-    if ((result.truncated && !result.stderrCapture?.truncated) || result.exitCode !== 0 || !match || match[1] !== frame) {
+    if (result.stdoutCapture?.truncated || (result.truncated && !result.stderrCapture?.truncated) || result.exitCode !== 0 || !match || match[1] !== frame) {
       return failure("Missing or invalid WinRM result envelope");
     }
     try {
@@ -150,11 +165,22 @@ export function decodeWinRmResult(result: PsResult, frame: string, maxOutput = 1
         return { ...result, stdout: "", stdoutCapture: undefined, stderr: stderrCapture.text, stderrCapture,
           outputLimitBytes: maxOutput, truncated: stderrCapture.truncated, invocationStatus: "transport_error" };
       }
-      const protectedResult = logOutput ? protectedPayload(body, maxOutput, tail, quota, reservedLog) : undefined;
-      const stdoutCapture = protectedResult?.display ?? captureFromEnvelope(body, body.output);
-      if (!logOutput && stdoutCapture.capturedBytes > maxOutput) throw Error("Output exceeds limit");
-      return { ...result, stdout: stdoutCapture.text, ...(protectedResult ? { log: protectedResult.log } : {}), stderr: body.status === "transport_error" ? body.output : result.stderr, stdoutCapture,
-        outputLimitBytes: maxOutput, truncated: !!stdoutCapture?.truncated || !!result.stderrCapture?.truncated,
+      const remoteStderr = body.stderr === undefined ? undefined : captureFromEnvelope(body.stderr, body.stderr.output);
+      if (remoteStderr && remoteStderr.capturedBytes > payloadLimit(maxOutput, logOutput, quota)) throw Error("Stderr exceeds limit");
+      const full = captureFromEnvelope(body, body.output);
+      if (full.capturedBytes > payloadLimit(maxOutput, logOutput, quota)) throw Error("Output exceeds limit");
+      let localStderr = result.stderrCapture;
+      if (!localStderr) {
+        const collector = new OutputCollector(payloadLimit(maxOutput, logOutput, quota), tail);
+        collector.append(Buffer.from(result.stderr, 'utf8'));
+        localStderr = collector.snapshot();
+      }
+      const combinedStderr = combineCaptures([localStderr, ...(remoteStderr ? [remoteStderr] : [])], payloadLimit(maxOutput, logOutput, quota), tail);
+      const protectedResult = logOutput ? protectedPayload(body, maxOutput, tail, quota, reservedLog, combinedStderr) : undefined;
+      const stdoutCapture = protectedResult?.display ?? full;
+      const stderrCapture = displayCapture(combinedStderr, maxOutput, tail);
+      return { ...result, stdout: stdoutCapture.text, ...(protectedResult ? { log: protectedResult.log } : {}), stderr: stderrCapture?.text ?? result.stderr, stderrCapture, stdoutCapture,
+        outputLimitBytes: maxOutput, truncated: !!stdoutCapture?.truncated || !!stderrCapture?.truncated,
         invocationStatus: body.status as PsResult["invocationStatus"], ...(records ? { errorRecords: records, errorRecordsTruncated: body.recordsTruncated || body.records.some((r: any) => ["category", "fullyQualifiedErrorId", "exceptionType", "message"].some(k => Buffer.byteLength(r[k], "utf8") > 256)) } : {}) };
     } catch {
       return failure("Invalid WinRM result body");

@@ -49,9 +49,9 @@ server.registerTool(
     errorPolicy: z.enum(["legacy", "strict"]).optional().describe("Default legacy raw script; strict detects unhandled PowerShell ErrorRecords. Check native exits immediately in the script."),
     ...outputOptions,
   } },
-  async ({ script, engine, parameters, cwd, timeoutMs, errorPolicy, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
+  async ({ script, engine, parameters, cwd, timeoutMs, errorPolicy, maxOutputBytes, tail, logOutput, logQuotaBytes }, extra) => {
 
-    const r = await runPowerShell(script, { exe: engine ? engineExecutable(engine) : undefined, parameters, cwd, timeoutMs, errorPolicy, maxOutputBytes, tail, logOutput, logQuotaBytes });
+    const r = await runPowerShell(script, { exe: engine ? engineExecutable(engine) : undefined, parameters, cwd, timeoutMs, errorPolicy, maxOutputBytes, tail, logOutput, logQuotaBytes, signal: extra.signal });
     const result = fromProcess(r, "powershell", "local");
     if (r.exitCode !== null) result.detail.version = detectEngine(r.shell)?.version;
     return toolResult(result, formatResult(r));
@@ -169,10 +169,10 @@ server.registerTool(
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 120000)."),
     ...outputOptions,
   } },
-  async ({ computerName, command, parameters, username, password, credentialRef, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
+  async ({ computerName, command, parameters, username, password, credentialRef, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }, extra) => {
 
     const auth = await resolveCredential({ credentialRef, transport: "winrm", host: computerName, port: useSsl ? 5986 : 5985, principal: username ?? "", username, password }, configuredProvider());
-    const r = await runWinRm({ computerName, command, parameters, username, password, ...auth, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput: credentialRef ? false : logOutput, logQuotaBytes });
+    const r = await runWinRm({ computerName, command, parameters, username, password, ...auth, useSsl, authentication, timeoutMs, maxOutputBytes, tail, logOutput: credentialRef ? false : logOutput, logQuotaBytes, signal: extra.signal });
     const safe = credentialRef ? sanitizeCredentialResult(r, auth) : r;
     return toolResult(fromProcess(safe, "winrm", computerName), formatResult(safe));
   },

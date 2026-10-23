@@ -39,7 +39,7 @@ function base(transport: Transport, target: string, durationMs: number) {
   return { schemaVersion: 1 as const, executionId: randomUUID(), transport, target, durationMs };
 }
 export function fromProcess(r: PsResult, transport: "powershell" | "program" | "winrm", target: string): ExecutionResult {
-  const status = r.timedOut ? "timeout" : r.spawnError || r.protocolError ? "transport_error"
+  const status = r.timedOut ? "timeout" : r.cancelled ? "cancelled" : r.spawnError || r.protocolError ? "transport_error"
     : transport === "winrm" ? (r.invocationStatus ?? "unknown")
     : r.scriptError ? "script_error" : r.exitCode === null ? "unknown" : r.exitCode === 0 ? "completed" : "nonzero_exit";
   return { ...base(transport, target, r.durationMs), stdout: r.stdout, stderr: r.stderr, ...(r.log ? { log: r.log } : {}),
@@ -49,7 +49,7 @@ export function fromProcess(r: PsResult, transport: "powershell" | "program" | "
     truncation: { truncated: r.truncated, limitBytesPerStream: r.outputLimitBytes ?? 1_048_576,
       ...(r.stdoutCapture ? { stdout: metrics(r.stdoutCapture) } : {}),
       ...(r.stderrCapture ? { stderr: metrics(r.stderrCapture) } : {}) },
-    terminationStatus: status, terminationCertainty: r.timedOut ? "unknown" : r.exitCode !== null ? "root_exited" : "unknown",
+    terminationStatus: status, terminationCertainty: r.timedOut || r.cancelled ? "unknown" : r.exitCode !== null ? "root_exited" : "unknown",
     detail: transport === "winrm" ? { shell: r.shell, localExitCode: r.exitCode, ...(r.spawnError ? { error: r.spawnError } : {}) } : { shell: r.shell, ...(r.spawnError ? { error: r.spawnError } : {}) },
   };
 }
