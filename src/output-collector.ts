@@ -11,6 +11,22 @@ export interface StreamCapture {
 const retainedBytes = Symbol("retained original bytes");
 type RawCapture = StreamCapture & { [retainedBytes]?: Buffer };
 
+/** Envelope captures are validated UTF-8; local captures retain original OS bytes. */
+export function captureBytes(capture: StreamCapture): Buffer {
+  return (capture as RawCapture)[retainedBytes] ?? Buffer.from(capture.text, 'utf8');
+}
+
+/** Stable local-then-remote order; cross-host arrival order is unavailable. */
+export function combineCaptures(captures: StreamCapture[], limit: number, tail: boolean): StreamCapture {
+  const collector = new OutputCollector(limit, tail);
+  for (const capture of captures) collector.append(captureBytes(capture));
+  const combined = collector.snapshot();
+  combined.observedBytes = captures.reduce((sum, capture) => sum + capture.observedBytes, 0);
+  combined.omittedBytes = combined.observedBytes - combined.capturedBytes;
+  combined.truncated = combined.omittedBytes > 0;
+  return combined;
+}
+
 export function captureDiagnostic(previous: StreamCapture | undefined, diagnostic: string, limit: number, tail = false): StreamCapture {
   const collector = new OutputCollector(limit, tail);
   if (previous) {

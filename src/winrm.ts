@@ -2,7 +2,7 @@ import { runPowerShell, type PsResult } from "./powershell.js";
 import { randomBytes } from "node:crypto";
 import { PRODUCER_BOOTSTRAP, PRODUCER_PIPELINE } from "./producer-output.js";
 import { displayCapture, captureFromEnvelope, frameLimit, payloadLimit, protectedPayload } from "./envelope-output.js";
-import { captureDiagnostic } from "./output-collector.js";
+import { captureDiagnostic, combineCaptures, OutputCollector } from "./output-collector.js";
 import { logStore } from "./full-logs.js";
 import { PARAMETER_BOOTSTRAP, validateParameters, INPUT_LIMIT } from "./typed-input.js";
 
@@ -132,7 +132,7 @@ export function runWinRm(opts: WinRmOptions): Promise<PsResult> {
     timeoutMs: remaining,
     signal: opts.signal,
     maxOutputBytes,
-    stderrLimitBytes: opts.maxOutputBytes ?? 1_048_576,
+    stderrLimitBytes: payloadLimit(opts.maxOutputBytes ?? 1_048_576, opts.logOutput, opts.logQuotaBytes),
     stderrTail: opts.tail,
   }).then((result) => {
     const decoded = decodeWinRmResult(result, frame, opts.maxOutputBytes ?? 1_048_576, opts.tail, opts.logOutput, opts.logQuotaBytes, reservedLog);
@@ -144,7 +144,9 @@ export function runWinRm(opts: WinRmOptions): Promise<PsResult> {
 /** Validate the local frame before interpreting remote output as data. */
 export function decodeWinRmResult(result: PsResult, frame: string, maxOutput = 1_048_576, tail = false, logOutput = false, quota?: number, reservedLog?: ReturnType<typeof logStore.create>): PsResult {
     const failure = (diagnostic?: string): PsResult => {
-      const stderrCapture = diagnostic === undefined ? result.stderrCapture : captureDiagnostic(result.stderrCapture, `\n${diagnostic}`, maxOutput, tail);
+      const stderrCapture = diagnostic === undefined
+        ? result.stderrCapture && displayCapture(result.stderrCapture, maxOutput, tail)
+        : captureDiagnostic(result.stderrCapture, `\n${diagnostic}`, maxOutput, tail);
       return { ...result, stdout: "", stdoutCapture: undefined, stderr: stderrCapture?.text ?? "",
         stderrCapture, truncated: !!stderrCapture?.truncated, outputLimitBytes: maxOutput, invocationStatus: "transport_error" };
     };
@@ -167,9 +169,16 @@ export function decodeWinRmResult(result: PsResult, frame: string, maxOutput = 1
       if (remoteStderr && remoteStderr.capturedBytes > payloadLimit(maxOutput, logOutput, quota)) throw Error("Stderr exceeds limit");
       const full = captureFromEnvelope(body, body.output);
       if (full.capturedBytes > payloadLimit(maxOutput, logOutput, quota)) throw Error("Output exceeds limit");
-      const protectedResult = logOutput ? protectedPayload(body, maxOutput, tail, quota, reservedLog) : undefined;
+      let localStderr = result.stderrCapture;
+      if (!localStderr) {
+        const collector = new OutputCollector(payloadLimit(maxOutput, logOutput, quota), tail);
+        collector.append(Buffer.from(result.stderr, 'utf8'));
+        localStderr = collector.snapshot();
+      }
+      const combinedStderr = combineCaptures([localStderr, ...(remoteStderr ? [remoteStderr] : [])], payloadLimit(maxOutput, logOutput, quota), tail);
+      const protectedResult = logOutput ? protectedPayload(body, maxOutput, tail, quota, reservedLog, combinedStderr) : undefined;
       const stdoutCapture = protectedResult?.display ?? full;
-      const stderrCapture = remoteStderr ? displayCapture(remoteStderr, maxOutput, tail) : result.stderrCapture;
+      const stderrCapture = displayCapture(combinedStderr, maxOutput, tail);
       return { ...result, stdout: stdoutCapture.text, ...(protectedResult ? { log: protectedResult.log } : {}), stderr: stderrCapture?.text ?? result.stderr, stderrCapture, stdoutCapture,
         outputLimitBytes: maxOutput, truncated: !!stdoutCapture?.truncated || !!stderrCapture?.truncated,
         invocationStatus: body.status as PsResult["invocationStatus"], ...(records ? { errorRecords: records, errorRecordsTruncated: body.recordsTruncated || body.records.some((r: any) => ["category", "fullyQualifiedErrorId", "exceptionType", "message"].some(k => Buffer.byteLength(r[k], "utf8") > 256)) } : {}) };

@@ -1,105 +1,91 @@
-# Issue #17 producer candidate — 2026-10-23
+# Issue #17 stderr correction — 2026-10-23
 
-Base: `bd3d5c9`. Scope follows [issue #17](https://github.com/IMRRD/powershell-mcp/issues/17)
-and its producer-buffering reconciliation comment. This is a local candidate,
-not issue closure, publication, deployment, or live remoting acceptance.
+Correction base: `50cbf07fe5764d8c9d1359449b5412808c111e5d`.
+This records verification performed in this correction clone. It supersedes the
+prior candidate report; earlier artifact hashes, memory replays and test totals
+are not evidence for this correction.
 
-## Implementation and production path
+## Regression and implementation
 
-`src/index.ts` passes public output options and MCP request cancellation to
-`runPowerShell` / `runWinRm`, then maps results through `fromProcess`.
-Strict PowerShell now formats pipeline output incrementally into the shared
-`McpBoundedWriter` from `src/producer-output.ts`. The writer uses a cap-sized
-byte ring, fixed encoding scratch buffers, an incremental UTF-8 encoder, and
-64-bit observed-byte counters. Direct console stdout uses the same writer.
-Error summaries are shortened and capped as errors arrive, without retaining
-the complete item/error collections or formatting the entire transcript.
+The first source change added a decoder regression with local host stderr
+`LOCAL` (5 bytes) and envelope stderr `REMOTE` (6 bytes). After installing locked
+dependencies, the test was run before changing production code:
 
-WinRM embeds that producer inside its remote script block and passes retention
-options as arguments before remoting serialization. Remote console stderr has
-an independent bounded writer. The local adapter validates terminal framing,
-per-stream accounting and retention bounds before display/logging. Its envelope
-budget accounts for both streams. Display retention uses the larger of display
-cap and log quota, preserving display when the log quota is smaller; persisted
-logs still enforce their combined quota. Timeout/cancellation discard unfinished
-framed logs and release reservations. Cancellation never establishes remote or
-descendant termination certainty.
+`npm test -- test/winrm-stderr.test.ts --reporter=json --outputFile=.scratch/stderr-before.json`
 
-`test/producer-adapter.test.ts` exercises production WinRM input construction,
-random framing, launch options, decoding, log reservations, timeout and
-cancellation. Only `Invoke-Command` is replaced by a local function.
-`scripts/installed-smoke.mjs` packs this clone, installs the tarball into a fresh
-directory, and uses the installed MCP stdio server. Added assertions cover
-sustained strict output on both streams, head/tail counters, independent display
-and log quotas, log byte readback, MCP cancellation and subsequent server use.
+It failed: 1 discovered, 0 passed, 1 failed. The decoder returned `REMOTE`,
+observed/captured 6 bytes, instead of `LOCALREMOTE`, observed/captured 11 bytes.
+The initial attempt could not start Vitest because dependencies were absent;
+`npm ci --ignore-scripts --no-audit --no-fund` installed 154 packages before the
+actual failing run.
 
-## Regression evidence
+The decoder now combines local then remote stderr deterministically. Cross-host
+chronological order cannot be recovered from an envelope. Observed counts sum
+both sources, including upstream omissions; captured counts represent original
+retained bytes, omitted equals observed minus captured, and truncation means
+omitted is nonzero. Head/tail retention uses the byte collector, including UTF-8
+boundary handling. Malformed local OS bytes survive protected log readback as
+original bytes; rendered text uses replacement characters.
 
-Before implementation, the initial sustained console/pipeline regression failed
-all four cases: strict and WinRM on Windows PowerShell and PowerShell 7. Strict
-reported invalid framing; WinRM reported transport errors. The local report is
-`.scratch/producer-before.json` (4 discovered, 0 passed, 4 failed).
+The production adapter captures local stderr up to the larger of display cap
+and log quota. Combined stderr is bounded to that payload budget, then recapped
+for display. Protected logs persist combined stderr and stdout under the existing
+shared quota and private-directory protection. Upstream or quota loss marks the
+log incomplete. Timeout/cancellation still discard framed logs and recap local
+stderr to the display limit.
 
-The completed suite additionally runs concurrent C# console stdout/stderr workers
-while the PowerShell pipeline emits output; tests zero/tiny/exact caps, head/tail,
-Unicode scalar boundaries, split surrogate writes, malformed raw OS stderr bytes,
-error floods, quota loss, timeout and cancellation. A separate sustained 64 MiB
-pipeline samples live managed memory before final framing: additional live memory
-must remain below 16 MiB. It passes for both strict and synthetic WinRM on both
-installed engines. Replaying the strict memory probe against base source retained
-134,724,416 bytes on Windows PowerShell and 134,693,176 bytes on PowerShell 7
-(about 128.5 MiB), failing that threshold. The scratch replay command was
-`node --import tsx .scratch/baseline-memory.mjs`.
+## Focused verification
 
-One initial PowerShell 7 full run had a `STACK_TRACE_ERROR` in the two-host
-ErrorAction override test after 9.7 seconds. Its focused rerun passed unchanged
-in 2.7 seconds. That test now allows 15 seconds for two real host launches and
-writer compilations; its assertions are unchanged. Both final full runs passed.
+`test/winrm-stderr.test.ts` covers empty remote plus local, both nonempty,
+head/tail caps 0/1/3/5/11 with and without logging, malformed local bytes, Unicode
+boundaries, omissions from both sources, timeout recapping, shared stdout/stderr
+quota, complete/incomplete metadata and original-byte readback.
+`test/producer-adapter.test.ts` emits host stderr outside the remote script block,
+exercising production `runWinRm` construction, capture budget, decoding and the
+protected log store. Only `Invoke-Command` is replaced by a local function.
 
-## Commands and final results
+Focused command, for each required engine:
 
-Windows x64, Node `v26.7.0`; actual child-engine probes:
-`powershell.exe` **5.1.26100.33648**, `pwsh.exe` **7.6.8**.
+`npm test -- test/winrm-stderr.test.ts test/producer-adapter.test.ts test/output-collector.test.ts test/full-logs.test.ts test/output-error-bound.test.ts --maxWorkers=2 --reporter=json --outputFile=.scratch/stderr-focused-<engine>.json`
 
-For execution, `TEMP`, `TMP`, `TMPDIR`, `npm_config_cache`,
-`POWERSHELL_MCP_EXEC_PARENT`, and `POWERSHELL_MCP_LOG_PARENT` were directed
-into this clone's `.scratch` tree; telemetry was disabled with
-`POWERSHELL_MCP_NO_TELEMETRY=1`. Scratch output is locally excluded from Git.
+Both final focused runs: **77 discovered, 77 passed, 0 failed, 0 skipped**, 5 files.
+Actual engine probes: Windows PowerShell **5.1.26100.33648**, pwsh **7.6.8**.
+Runtime: Windows x64, Node **v26.7.0**.
+
+Engine-specific runs assigned `$env:MCP_REQUIRED_ENGINE='powershell'` or `'pwsh'`.
+`TEMP`, `TMP`, `TMPDIR`, `POWERSHELL_MCP_EXEC_PARENT` and
+`POWERSHELL_MCP_LOG_PARENT` pointed into this clone's `.scratch` for the Vitest
+runs; telemetry was disabled with `POWERSHELL_MCP_NO_TELEMETRY=1`. Installation
+used a clone-local `npm_config_cache`. Scratch evidence is locally excluded from Git.
+
+## Final checks
 
 | Command | Result |
 | --- | --- |
-| `npm ci --ignore-scripts --no-audit --no-fund` | 154 packages installed from lockfile |
 | `npm run typecheck` | Passed |
-| `npm run build` | Passed; packaged supervisor copied |
-| `MCP_REQUIRED_ENGINE=powershell npm test -- --maxWorkers=2 --reporter=json --outputFile=.scratch/final-powershell.json` | 225 discovered, 224 passed, 0 failed, 1 skipped; 36 files |
-| `MCP_REQUIRED_ENGINE=pwsh npm test -- --maxWorkers=2 --reporter=json --outputFile=.scratch/final-pwsh.json` | 225 discovered, 224 passed, 0 failed, 1 skipped; 36 files |
-| `node scripts/check-test-report.mjs <each final report>` | Both passed, including required child-version proof |
-| `node scripts/check-collector-tests.mjs` | 29 discovered/passed; 0 failed, skipped or cancelled |
-| `MCP_REQUIRED_ENGINE=powershell node scripts/installed-smoke.mjs` | Passed, 43 assertions |
-| `MCP_REQUIRED_ENGINE=pwsh node scripts/installed-smoke.mjs` | Passed, 43 assertions |
+| `npm run build` | Passed |
+| `MCP_REQUIRED_ENGINE=powershell npm test -- --maxWorkers=2 --reporter=json --outputFile=.scratch/stderr-full-powershell.json` | 275 discovered, 274 passed, 0 failed, 1 skipped; 37 files |
+| `MCP_REQUIRED_ENGINE=powershell node scripts/check-test-report.mjs .scratch/stderr-full-powershell.json` | Passed, including required child-version proof |
+| `MCP_REQUIRED_ENGINE=pwsh npm test -- --maxWorkers=2 --reporter=json --outputFile=.scratch/stderr-full-pwsh.json` | 275 discovered, 274 passed, 0 failed, 1 skipped; 37 files |
+| `MCP_REQUIRED_ENGINE=pwsh node scripts/check-test-report.mjs .scratch/stderr-full-pwsh.json` | Passed, including required child-version proof |
+| `node scripts/check-collector-tests.mjs` | Passed; 29 tests, no failures/skips/cancellations |
 | `git diff --check` | Passed |
 
-The environment prefixes in the table are shorthand; actual execution used
-PowerShell `$env:MCP_REQUIRED_ENGINE='powershell'` / `'pwsh'` assignments.
-Final installed smoke logs are `.scratch/installed-final-powershell.txt` and
-`.scratch/installed-final-pwsh.txt`; both tested tarball SHA-256
-`39f64cdf76edca473d0b6109d8db4a2e2afcf8c36fa82e9ba674b865c0081b21`.
+The environment prefixes in the table are shorthand for PowerShell environment
+assignments. Both full suites ran against the final production and test code.
 
-## Limits and unverified work
+## Verification limits
 
-- The one skipped test in each run is the opt-in live SSH test. Network execution
-  fixtures used loopback only; no real WinRM/SSH host was invoked.
-- WinRM's producer and production adapter were verified with local invocation
-  doubles. Actual WinRM serialization, endpoint policies and remote execution
-  through the packaged `winrm_exec` MCP handler remain unverified.
-- Ubuntu/PowerShell 7 and the CI Node 20 toolchain were not run here. These still
-  require their existing CI lanes. Unrelated Python analytics/operations tests
-  were not run.
-- The writer requires `Add-Type`. Constrained endpoints that prohibit compilation
-  are unsupported. The bound covers retained producer output and framing, not
-  user allocations, individual objects/lines, PowerShell formatting or remoting
-  internals. The managed-memory probe is not a total process/descendant RSS proof.
-- Framed output requires a terminal frame: timeout/cancellation do not preserve
-  a partial framed stdout/log. Direct OS stdout writes that bypass the console
-  writer invalidate framing. Native original-byte capture remains `run_program`.
-- No push, PR, publication, deployment, or remote command execution was performed.
+- All WinRM coverage uses local invocation doubles. Real WinRM serialization,
+  authentication, endpoint policies and packaged `winrm_exec` execution against a
+  remote host remain unverified.
+- The single skipped test in each full run is the opt-in live SSH
+  test. Network fixtures used loopback; no real remote host was invoked.
+- Ubuntu and Node 20 were not run. Windows Node 26 results do not verify those CI
+  environments. Unrelated Python analytics/operations tests were not run.
+- Installed-artifact smoke tests and the baseline memory replay were not rerun
+  for this correction; the prior report's artifact hash does not apply.
+- The inherited producer requires `Add-Type`; endpoints prohibiting compilation
+  remain unsupported. Output bounds exclude user allocations and PowerShell
+  formatting/remoting internals. Cancellation does not prove remote termination.
+- No production remote commands, push, merge or release were performed.

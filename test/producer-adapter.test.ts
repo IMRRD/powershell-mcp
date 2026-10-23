@@ -9,7 +9,7 @@ import { frameLimit } from '../src/envelope-output.js';
 vi.mock('../src/powershell.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/powershell.js')>();
   return { ...actual, runPowerShell: vi.fn((script, opts) => actual.runPowerShell(
-    'function Invoke-Command { param($ComputerName,$ScriptBlock,$ArgumentList,$ErrorAction) & $ScriptBlock @ArgumentList };\n' + script,
+    'function Invoke-Command { param($ComputerName,$ScriptBlock,$ArgumentList,$ErrorAction) if ($env:MCP_TEST_LOCAL_STDERR) { [Console]::Error.Write($env:MCP_TEST_LOCAL_STDERR) }; & $ScriptBlock @ArgumentList };\n' + script,
     { ...opts, exe: engine?.exe },
   )) };
 });
@@ -18,6 +18,19 @@ import { runWinRm, WINRM_BOOTSTRAP } from '../src/winrm.js';
 
 const engine = selectIntegrationEngines()[0];
 describe.skipIf(!engine)('production WinRM adapter with local invocation', () => {
+  it.each(['', 'REMOTE'])('preserves host stderr alongside remote stderr=%s through protected logging', async remote => {
+    vi.stubEnv('MCP_TEST_LOCAL_STDERR', 'LOCAL');
+    let result;
+    try {
+      result = await runWinRm({ computerName: 'local-double', command: `[Console]::Error.Write('${remote}')`, maxOutputBytes: 1, logOutput: true, logQuotaBytes: 32 });
+      expect(result).toMatchObject({ invocationStatus: 'completed', stderr: 'L',
+        stderrCapture: { observedBytes: 5 + remote.length, capturedBytes: 1, omittedBytes: 4 + remote.length, truncated: true },
+        log: { complete: true, stderrBytes: 5 + remote.length } });
+      expect(vi.mocked(runPowerShell).mock.calls.at(-1)![1].stderrLimitBytes).toBe(32);
+      expect(Buffer.from(logStore.read(result.log!.handle, 'stderr', 0, 32).data, 'base64').toString()).toBe('LOCAL' + remote);
+    } finally { vi.unstubAllEnvs(); if (result?.log) logStore.delete(result.log.handle); }
+  }, 15000);
+
   it('passes remote retention limits before serialization and preserves both streams through logging', async () => {
     const result = await runWinRm({ computerName: 'local-double', command: "[Console]::Out.Write('abcdef'); [Console]::Error.Write('uvwxyz')", maxOutputBytes: 2, tail: true, logOutput: true, logQuotaBytes: 32 });
     try {
