@@ -15,11 +15,15 @@ export interface WinRmOptions {
   /** Negotiate (default) | Kerberos | Basic | CredSSP | Default */
   authentication?: "Default" | "Negotiate" | "Kerberos" | "Basic" | "CredSSP";
   timeoutMs?: number;
+  /** Internal batch deadline, checked after synchronous preparation at launch. */
+  dispatchDeadlineAt?: number;
   maxOutputBytes?: number;
   tail?: boolean;
   logOutput?: boolean;
   logQuotaBytes?: number;
 }
+
+export class WinRmDispatchDeadlineError extends Error {}
 
 interface WinRmInput {
   computerName: string;
@@ -104,10 +108,17 @@ export function runWinRm(opts: WinRmOptions): Promise<PsResult> {
   const frame = randomBytes(24).toString("hex");
   const input = JSON.parse(Buffer.from(buildWinRmInput(opts), "base64").toString("utf8"));
   input.frame = frame;
+  const stdin = Buffer.from(JSON.stringify(input), "utf8").toString("base64");
+  const maxOutputBytes = frameLimit(payloadLimit(opts.maxOutputBytes ?? 1_048_576, opts.logOutput, opts.logQuotaBytes));
+  const remaining = opts.dispatchDeadlineAt === undefined ? opts.timeoutMs ?? 120_000 : Math.ceil(opts.dispatchDeadlineAt - Date.now());
+  if (remaining <= 0) {
+    if (reservedLog) logStore.delete(reservedLog.finish(false).handle);
+    throw new WinRmDispatchDeadlineError("Invocation deadline elapsed before dispatch; remote execution unverified");
+  }
   return runPowerShell(WINRM_BOOTSTRAP, {
-    stdin: Buffer.from(JSON.stringify(input), "utf8").toString("base64"),
-    timeoutMs: opts.timeoutMs ?? 120_000,
-    maxOutputBytes: frameLimit(payloadLimit(opts.maxOutputBytes ?? 1_048_576, opts.logOutput, opts.logQuotaBytes)),
+    stdin,
+    timeoutMs: remaining,
+    maxOutputBytes,
     stderrLimitBytes: opts.maxOutputBytes ?? 1_048_576,
     stderrTail: opts.tail,
   }).then((result) => {

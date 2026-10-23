@@ -3,7 +3,9 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
+import { createRequire } from 'node:module';
+import { connect as tcpConnect } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -60,6 +62,45 @@ try {
   assert(denied.isError && denied.structuredContent?.detail?.error === 'invalid host key pin' && !JSON.stringify(denied).includes(secret), 'installed trust/credential boundary');
   const mixed = await call('ssh_exec', { host: 'synthetic.invalid', username: 'fixture', command: 'true', credentialRef: 'fixture', password: secret });
   assert(mixed.isError && !JSON.stringify(mixed).includes(secret), 'mixed credential boundary');
+  const { Server, utils } = createRequire(join(installed, 'package.json'))('ssh2');
+  const fixtures = [];
+  const makeFixture = async (forward) => {
+    const key = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { format: 'pem', type: 'pkcs1' }, publicKeyEncoding: { format: 'pem', type: 'spki' } }).privateKey;
+    const parsed = utils.parseKey(key);
+    assert(!(parsed instanceof Error), 'invalid fixture key');
+    const pin = 'SHA256:' + createHash('sha256').update(parsed.getPublicSSH()).digest('base64').replace(/=+$/, '');
+    const sockets = new Set(); let commands = 0;
+    const server = new Server({ hostKeys: [key] }, peer => {
+      sockets.add(peer); peer.on('error', () => {}); peer.on('close', () => sockets.delete(peer));
+      peer.on('authentication', ctx => ctx.accept());
+      peer.on('ready', () => {
+        peer.on('tcpip', (accept, reject, info) => {
+          if (!forward || info.destIP !== '127.0.0.1') return reject();
+          const outbound = tcpConnect(info.destPort, '127.0.0.1');
+          outbound.once('connect', () => outbound.pipe(accept()).pipe(outbound));
+          outbound.once('error', () => reject());
+        });
+        peer.on('session', accept => accept().on('exec', acceptExec => { commands++; const stream = acceptExec(); stream.write('packaged-routed'); stream.exit(0); stream.end(); }));
+      });
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const item = { host: '127.0.0.1', port: server.address().port, username: 'fixture', password: 'synthetic', hostKeyPins: [pin], get commands() { return commands; }, async close() { for (const c of sockets) c.end(); await new Promise(resolve => server.close(resolve)); } };
+    fixtures.push(item); return item;
+  };
+  try {
+    const dest = await makeFixture(false), middle = await makeFixture(true), first = await makeFixture(true), wrong = await makeFixture(false);
+    const route = { host: dest.host, port: dest.port, username: dest.username, password: dest.password, hostKeyPins: dest.hostKeyPins, command: 'echo routed', jumps: [first, middle].map(({ host, port, username, password, hostKeyPins }) => ({ host, port, username, password, hostKeyPins })), timeoutMs: 5000 };
+    const good = await call('ssh_exec', route);
+    assert(!good.isError && good.structuredContent?.stdout === 'packaged-routed' && dest.commands === 1, `packaged two-hop execution failed: ${JSON.stringify(good.structuredContent)}`);
+    for (const index of [0, 1, 2]) {
+      const bad = { ...route, hostKeyPins: index === 2 ? wrong.hostKeyPins : dest.hostKeyPins,
+        jumps: route.jumps.map((hop, i) => ({ ...hop, hostKeyPins: i === index ? wrong.hostKeyPins : hop.hostKeyPins })) };
+      const before = dest.commands;
+      const refusal = await call('ssh_exec', bad);
+      assert(refusal.isError && dest.commands === before, `packaged route trust failure at hop ${index} dispatched destination`);
+    }
+    console.log('packaged two-hop fixture PASS: control plus three independent host-key refusals');
+  } finally { for (const f of fixtures.reverse()) await f.close(); }
   if (process.env.MCP_REQUIRED_ENGINE) {
     const engine = process.env.MCP_REQUIRED_ENGINE;
     const ps = await call('run_powershell', { engine, script: "Write-Output 'engine-smoke-24'", errorPolicy: 'strict' });

@@ -81,7 +81,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm test -- --reporter=json --outputFile=vitest-report.json || {
+          npm test -- --reporter=default --reporter=json --outputFile=vitest-report.json || {
             node -e "const r=require('./vitest-report.json'); for(const s of r.testResults||[]) for(const t of s.assertionResults||[]) if(t.status==='failed') console.error(t.fullName, ...(t.failureMessages||[]));"
             exit 1
           }

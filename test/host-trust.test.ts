@@ -174,6 +174,19 @@ it('runs built MCP SSH and SFTP with explicit pins and known-host policy', async
     await client.connect(transport);
     const common = { ...base(server.port) };
     const ssh = await client.callTool({ name: 'ssh_exec', arguments: { ...common, command: 'true', hostKeyPins: [fingerprint(pem)] } });
+    const batch = await client.callTool({ name: 'start_remote_batch', arguments: { targets: [
+      { transport: 'ssh', host: '127.0.0.1', port: server.port, username: 'test', command: 'true', password: 'test', hostKeyPins: [fingerprint(pem)] },
+      { transport: 'ssh', host: '127.0.0.1', port: server.port, username: 'test', command: 'true', password: 'test', hostKeyPins: ['SHA256:invalid'] },
+    ], concurrency: 2, timeoutMs: 3000 } });
+    const batchId = JSON.parse((batch.content[0] as { text: string }).text).id;
+    let batchState: any;
+    for (let i = 0; i < 40; i++) {
+      batchState = JSON.parse(((await client.callTool({ name: 'remote_batch_status', arguments: { id: batchId } })).content[0] as { text: string }).text);
+      if (batchState.results.every((r: any) => r.status !== 'running' && r.status !== 'queued')) break;
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    expect(batchState.results.map((r: any) => r.status), JSON.stringify(batchState.results)).toEqual(['completed', 'unknown']);
+    expect(batchState.results[0].result.stdout).toBe('fixture-ok');
     expect(ssh.isError ?? false).toBe(false);
     expect((ssh.structuredContent as Record<string, unknown>).stdout).toBe('fixture-ok');
     const upload = await client.callTool({ name: 'sftp_upload', arguments: { ...common, localPath: input, remotePath: '/fixture.bin' } });
