@@ -45,7 +45,7 @@ for (const exe of engines) describe(`error policy (${exe})`, () => {
     const silent = await run("Write-Error deliberate -ErrorAction SilentlyContinue; Write-Output AFTER_SILENT");
     expect(silent.stdout).toContain("AFTER_SILENT");
     expect(silent.scriptError).toBe(false);
-  });
+  }, 15000); // Two real hosts compile the producer writer before executing.
   it("does not fail on successful native stderr", async () => {
     const result = await run(`& ${nativeExe} -e 'process.stderr.write(String(123))'; Write-Output AFTER_NATIVE`);
     expect(result.stdout + result.stderr).toContain("123");

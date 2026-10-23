@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import os from "node:os";
 import { OutputCollector, captureDiagnostic, type StreamCapture } from "./output-collector.js";
-import { LIMIT_BOOTSTRAP, captureFromEnvelope, frameLimit, payloadLimit, protectedPayload } from "./envelope-output.js";
+import { PRODUCER_BOOTSTRAP, PRODUCER_PIPELINE } from "./producer-output.js";
+import { captureFromEnvelope, frameLimit, payloadLimit, protectedPayload } from "./envelope-output.js";
 import { randomBytes } from "node:crypto";
 import { logStore } from "./full-logs.js";
 import { PARAMETER_BOOTSTRAP, validateParameters, INPUT_LIMIT } from "./typed-input.js";
@@ -21,6 +22,7 @@ export interface PsResult {
   exitCode: number | null;
   /** True if the run was killed because it exceeded timeoutMs. */
   timedOut: boolean;
+  cancelled?: boolean;
   durationMs: number;
   /** The executable that was used (e.g. "pwsh" or "powershell.exe"). */
   shell: string;
@@ -45,6 +47,7 @@ export interface RunOptions {
   cwd?: string;
   /** Hard timeout in milliseconds (default 60000). */
   timeoutMs?: number;
+  signal?: AbortSignal;
   /** Override the PowerShell executable (default: env PWSH_MCP_EXE -> pwsh -> powershell.exe). */
   exe?: string;
   /** Extra environment variables. */
@@ -65,44 +68,30 @@ export interface RunOptions {
 const STRICT_BOOTSTRAP = `
 $payloadLimit = [int]$env:PS_MCP_OUTPUT_LIMIT
 $payloadTail = $env:PS_MCP_OUTPUT_TAIL -eq '1'
-${LIMIT_BOOTSTRAP}
+${PRODUCER_BOOTSTRAP}
 $source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))
-$items = New-Object System.Collections.ArrayList
-$errors = New-Object System.Collections.ArrayList
-$failed = $false
 $parseErrors = $null
 $tokens = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$parseErrors)
-if ($parseErrors.Count -gt 0) {
-  $failed = $true
-  foreach ($entry in $parseErrors) { [void]$errors.Add([pscustomobject]@{ category='ParserError'; fullyQualifiedErrorId=[string]$entry.ErrorId; exceptionType='ParseError'; message=[string]$entry.Message }) }
-} else {
-  try {
-    # Command-level Stop avoids PS 5.1 promoting successful native stderr to a terminating error.
-    $PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
-    & ([ScriptBlock]::Create($source)) 2>&1 3>&1 4>&1 5>&1 6>&1 | ForEach-Object {
-      if ($_ -is [System.Management.Automation.ErrorRecord]) {
-        if ($_.FullyQualifiedErrorId -ne 'NativeCommandError') { $failed = $true; [void]$errors.Add($_) }
-        [void]$items.Add([string]$_.Exception.Message)
-      } else { [void]$items.Add($_) }
-    }
-  } catch { $failed = $true; [void]$errors.Add($_); [void]$items.Add([string]$_.Exception.Message) }
-}
+$consoleOut = [Console]::Out
+[Console]::SetOut($producer)
+try {
+  if ($parseErrors.Count -gt 0) {
+    foreach ($entry in $parseErrors) { RecordError $entry }
+  } else {
+    try {
+      # Command-level Stop avoids PS 5.1 promoting successful native stderr.
+      $PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
+      $nativeErrorsAreDiagnostics = $true
+      & ([ScriptBlock]::Create($source)) 2>&1 3>&1 4>&1 5>&1 6>&1 | ${PRODUCER_PIPELINE}
+    } catch { RecordError $_; $producer.WriteLine([string]$_.Exception.Message) }
+  }
+} finally { [Console]::SetOut($consoleOut) }
 $source = $null
-function LimitText($value) {
-  $text = [string]$value
-  if ($text.Length -gt 256) { $text = $text.Substring(0,256); $script:limited = $true }
-  return $text
-}
-$limited = $errors.Count -gt 8
-$summaries = @()
-foreach ($entry in @($errors | Select-Object -First 8)) {
-  if ($entry -is [System.Management.Automation.ErrorRecord]) {
-    $summaries += @{ category=(LimitText $entry.CategoryInfo.Category); fullyQualifiedErrorId=(LimitText $entry.FullyQualifiedErrorId); exceptionType=(LimitText $entry.Exception.GetType().FullName); message=(LimitText $entry.Exception.Message) }
-  } else { $summaries += @{ category=(LimitText $entry.category); fullyQualifiedErrorId=(LimitText $entry.fullyQualifiedErrorId); exceptionType=(LimitText $entry.exceptionType); message=(LimitText $entry.message) } }
-}
-$bounded = LimitOutput ([string]($items.ToArray() | Out-String -Width 240))
-$body = @{ output=$bounded.output; observedBytes=$bounded.observedBytes; capturedBytes=$bounded.capturedBytes; omittedBytes=$bounded.omittedBytes; truncated=$bounded.truncated; failed=[bool]$failed; records=@($summaries); recordsTruncated=[bool]$limited }
+$body = $producer.Snapshot()
+$body.failed = [bool]$producerState.failed
+$body.records = @($errors.ToArray())
+$body.recordsTruncated = [bool]$producerState.limited
 [Console]::Out.WriteLine('PS-RESULT:' + $env:PS_MCP_FRAME + ':' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Depth 5 -Compress))))
 `;
 
@@ -114,15 +103,16 @@ function strictFailure(result: PsResult, maxOutput: number, tail: boolean, diagn
 }
 
 function decodeStrict(result: PsResult, frame: string, maxOutput: number, tail: boolean, logOutput = false, quota?: number, reservedLog?: ReturnType<typeof logStore.create>): PsResult {
-  if (result.timedOut || result.spawnError) return strictFailure(result, maxOutput, tail);
+  if (result.timedOut || result.cancelled || result.spawnError) return strictFailure(result, maxOutput, tail);
   const match = result.stdout.match(/^PS-RESULT:([0-9a-f]{48}):([A-Za-z0-9+/=]+)\r?\n$/);
   if (result.stdoutCapture?.truncated || result.exitCode !== 0 || !match || match[1] !== frame) return strictFailure(result, maxOutput, tail, "Missing or invalid strict result envelope");
   try {
     const body = JSON.parse(Buffer.from(match[2], "base64").toString("utf8"));
     if (typeof body.output !== "string" || typeof body.failed !== "boolean" || typeof body.recordsTruncated !== "boolean" || !Array.isArray(body.records) || body.records.length > 8 || body.records.some((r: any) => !r || ["category", "fullyQualifiedErrorId", "exceptionType", "message"].some(k => typeof r[k] !== "string" || Buffer.byteLength(r[k], "utf8") > 1024)) || (body.failed && body.records.length === 0)) throw Error("Invalid strict result");
+    const full = captureFromEnvelope(body, body.output);
+    if (full.capturedBytes > payloadLimit(maxOutput, logOutput, quota)) throw Error("Output exceeds limit");
     const protectedResult = logOutput ? protectedPayload(body, maxOutput, tail, quota, reservedLog) : undefined;
-    const stdoutCapture = protectedResult?.display ?? captureFromEnvelope(body, body.output);
-    if (!logOutput && stdoutCapture.capturedBytes > maxOutput) throw Error("Output exceeds limit");
+    const stdoutCapture = protectedResult?.display ?? full;
     return { ...result, stdout: stdoutCapture.text, stdoutCapture, ...(protectedResult ? { log: protectedResult.log } : {}), outputLimitBytes: maxOutput,
       truncated: stdoutCapture.truncated || !!result.stderrCapture?.truncated,
       scriptError: body.failed, errorRecords: body.records, errorRecordsTruncated: body.recordsTruncated };
@@ -176,6 +166,9 @@ export function buildArgs(script: string): string[] {
  * timeout, and never throws on a non-zero exit (it's reported in `exitCode`).
  */
 export function runPowerShell(script: string, opts: RunOptions = {}): Promise<PsResult> {
+  if (opts.signal?.aborted) return Promise.resolve({ stdout: "", stderr: "", exitCode: null, timedOut: false,
+    cancelled: true, durationMs: 0, shell: resolvePowerShellExe(opts.exe), truncated: false,
+    outputLimitBytes: opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT });
   if (opts.parameters !== undefined) {
     validateParameters(opts.parameters);
     const json = JSON.stringify({ source: script, parameters: opts.parameters });
@@ -247,6 +240,7 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
       const out = new OutputCollector(maxOutput, opts.tail);
       const errOut = new OutputCollector(opts.stderrLimitBytes ?? maxOutput, opts.stderrTail ?? opts.tail);
       let timedOut = false;
+      let cancelled = false;
       let attemptFinished = false;
 
       if (opts.stdin !== undefined) {
@@ -262,22 +256,26 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
           outputLimitBytes: maxOutput, truncated: stdoutCapture.truncated || stderrCapture.truncated };
       };
 
-      const timer = setTimeout(() => {
-        timedOut = true;
+      const terminate = () => {
         try {
           // Kill the whole tree on Windows; plain kill elsewhere.
           if (os.platform() === "win32" && child.pid) {
-            spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
+            spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true }).on("error", () => {});
           } else {
             child.kill("SIGKILL");
           }
         } catch { /* ignore */ }
-      }, timeoutMs);
+      };
+      const timer = setTimeout(() => { timedOut = true; terminate(); }, timeoutMs);
+      const abort = () => { cancelled = true; terminate(); };
+      opts.signal?.addEventListener("abort", abort, { once: true });
+      child.once("spawn", () => { if (opts.signal?.aborted) abort(); });
 
       child.on("error", (err) => {
         if (attemptFinished || resolved) return;
         attemptFinished = true;
         clearTimeout(timer);
+        opts.signal?.removeEventListener("abort", abort);
         if ((err as NodeJS.ErrnoException).code === "ENOENT" && candidateIndex + 1 < candidates.length) {
           if (log) logStore.delete(log.finish().handle);
           try { attempt(candidateIndex + 1); } catch (failure) { reject(failure); }
@@ -291,6 +289,7 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
           ...(log ? { log: log.finish(false) } : {}),
           exitCode: null,
           timedOut,
+          cancelled,
           durationMs: Date.now() - started,
           shell: exe,
         });
@@ -300,12 +299,14 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
         if (attemptFinished || resolved) return;
         attemptFinished = true;
         clearTimeout(timer);
+        opts.signal?.removeEventListener("abort", abort);
         resolved = true;
         resolve({
           ...captures(),
           exitCode: code,
-          ...(log ? { log: log.finish(!timedOut) } : {}),
+          ...(log ? { log: log.finish(!timedOut && !cancelled) } : {}),
           timedOut,
+          cancelled,
           durationMs: Date.now() - started,
           shell: exe,
         });

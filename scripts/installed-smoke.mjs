@@ -19,7 +19,8 @@ function command(args, cwd) {
   if (result.status !== 0 || result.error) throw new Error(`npm ${args.join(' ')} failed: ${result.error ?? result.stderr}`);
   return result.stdout;
 }
-function assert(condition, message) { if (!condition) throw new Error(message); }
+let assertions = 0;
+function assert(condition, message) { assertions++; if (!condition) throw new Error(message); }
 let client;
 try {
   const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
@@ -105,8 +106,34 @@ try {
     const engine = process.env.MCP_REQUIRED_ENGINE;
     const ps = await call('run_powershell', { engine, script: "Write-Output 'engine-smoke-24'", errorPolicy: 'strict' });
     assert(!ps.isError && ps.structuredContent?.stdout?.includes('engine-smoke-24') && ps.structuredContent?.detail?.shell === (engine === 'powershell' ? 'powershell.exe' : engine), `required ${engine} failed: ${JSON.stringify(ps)}`);
+    for (const tail of [false, true]) {
+      const bounded = await call('run_powershell', { engine, script: "$s='x'*1024; 1..1024 | ForEach-Object { [Console]::Out.Write($s); [Console]::Error.Write($s); $s }; 'END'", errorPolicy: 'strict', maxOutputBytes: 7, tail });
+      const data = bounded.structuredContent;
+      assert(!bounded.isError && data?.terminationStatus === 'completed', 'packaged sustained producer framing failed');
+      assert(data?.truncation?.stdout?.observedBytes > 2_000_000 && data?.truncation?.stderr?.observedBytes === 1048576, 'packaged producer counters failed');
+      for (const stream of ['stdout', 'stderr']) {
+        const counts = data.truncation[stream];
+        assert(counts.capturedBytes <= 7 && counts.capturedBytes + counts.omittedBytes === counts.observedBytes, 'packaged byte invariant failed');
+      }
+      assert(tail ? data.stdout.includes('END') : data.stdout === 'xxxxxxx', 'packaged head/tail failed');
+    }
+    const logged = await call('run_powershell', { engine, script: "[Console]::Out.Write('abcdefghij')", errorPolicy: 'strict', maxOutputBytes: 10, logOutput: true, logQuotaBytes: 2 });
+    const data = logged.structuredContent;
+    assert(!logged.isError && data.stdout === 'abcdefghij' && data.log.complete === false && data.log.stdoutBytes === 2, 'packaged display/log quota independence failed');
+    const page = await call('read_output_log', { handle: data.log.handle, stream: 'stdout', offset: 0, length: 16 });
+    assert(JSON.parse(page.content[0].text).data === 'YWI=', 'packaged log raw bytes failed');
+    await call('delete_output_log', { handle: data.log.handle });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 1500);
+    try {
+      await client.callTool({ name: 'run_powershell', arguments: { engine, script: "'prefix'; Start-Sleep -Seconds 20", errorPolicy: 'strict', logOutput: true } }, undefined, { signal: controller.signal, timeout: 10000 });
+      assert(false, 'packaged cancellation unexpectedly completed');
+    } catch (error) { assert(controller.signal.aborted, 'packaged cancellation failed before abort'); }
+    finally { clearTimeout(timer); }
+    const after = await call('run_powershell', { engine, script: "'AFTER_CANCEL'", errorPolicy: 'strict' });
+    assert(!after.isError && after.structuredContent.stdout.includes('AFTER_CANCEL'), 'packaged server failed after cancellation');
   }
-  console.log(`installed artifact PASS ${actual.name}@${actual.version} schema=1 engine=${process.env.MCP_REQUIRED_ENGINE ?? 'none'} tarball=${filename} sha256=${createHash('sha256').update(readFileSync(tarball)).digest('hex')} commit=${process.env.GITHUB_SHA ?? 'local'}`);
+  console.log(`installed artifact PASS assertions=${assertions} ${actual.name}@${actual.version} schema=1 engine=${process.env.MCP_REQUIRED_ENGINE ?? 'none'} tarball=${filename} sha256=${createHash('sha256').update(readFileSync(tarball)).digest('hex')} commit=${process.env.GITHUB_SHA ?? 'local'}`);
 } finally {
   if (client) await client.close();
   rmSync(temp, { recursive: true, force: true });

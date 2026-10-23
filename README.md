@@ -39,12 +39,11 @@ results never include authentication options or credential values.
 optional `logQuotaBytes` (default/max 8 MiB combined stdout and stderr). Disabled
 by default: no log directory is created without opting in. Raw child output is
 written separately per stream, independently of the display byte cap. Strict
-PowerShell and WinRM persist only validated command payload output (stdout);
-framing, credentials, stdin, and wrapper diagnostics are never persisted. Their
-PowerShell pipeline/remote item collection still buffers output before framing;
-this feature does not bound producer-side memory. A result's
+PowerShell persists validated command payload stdout; WinRM also persists its
+validated remote console stderr. Framing, credentials, stdin, and wrapper
+diagnostics are never persisted. A result's
 `log` contains an unpredictable process-local handle, `complete`, byte counts,
-and expiry timestamp. `complete: false` means the quota or a write failed; never
+and expiry timestamp. `complete: false` means producer truncation, quota loss, or a write failure; never
 interpret it as the entire output. Read through `read_output_log` with handle,
 stream, byte offset and length (maximum 65,536 bytes); `data` is base64, and
 `nextOffset`/`totalBytes` support pagination. `delete_output_log` removes a log.
@@ -55,9 +54,11 @@ hour after finish on the next log operation (active handles remain reserved), an
 crash may leave private files requiring operator cleanup under the configured `POWERSHELL_MCP_LOG_PARENT` or `TMPDIR`, otherwise the OS temp path.
 Commands can emit secrets: opt-in logs preserve emitted stdout/stderr verbatim,
 so do not enable logging for sensitive commands. Passwords, stdin and MCP
-envelopes are never intentionally logged. Framed payloads are bounded to the
-log quota before JSON/base64 transport, and `complete: false` reports any
-producer-side truncation. A bounded local envelope buffer is still required.
+envelopes are never intentionally logged. Framed payload retention is bounded
+to the larger of the display cap and log quota per stream before JSON/base64
+transport. The log quota remains combined across both streams; `complete: false`
+reports any producer truncation or log quota loss. Tail mode can therefore
+produce an incomplete suffix log.
 
 Execution tools accept `maxOutputBytes` (1–8,388,608, default 1 MiB **per
 stream**) and `tail` (default false: retain the head; true: retain the tail).
@@ -72,11 +73,27 @@ newlines; human-readable formatting may trim whitespace. Wrapper-generated
 diagnostics are not producer bytes and have no invented stream counts. Some
 failed/early remote calls cannot report producer-side byte counts. No full logs
 are persisted by default; opt-in runs return a protected output-log handle.
-Strict PowerShell and WinRM cap their framed payload *inside* the envelope so
-large successful outputs remain successful, but their existing PowerShell
-pipeline/WinRM remote-side item collection still buffers full command output
-before that cap. The local process drains its two OS pipes with bounded capture;
-this is **not** an end-to-end bounded-memory guarantee for remoting.
+Strict PowerShell and WinRM stream formatted pipeline lines into a fixed-capacity
+UTF-8 writer, counting all bytes after retention fills. WinRM runs this writer
+inside the remote script block, before remoting serialization. Direct console
+stdout joins payload stdout without corrupting framing; remote console stderr
+has a separate bounded writer and counters. Error summaries retain at most eight
+shortened records as errors arrive. Producer retention is O(cap), with fixed
+encoding scratch space; terminal JSON/base64 envelopes and local pipe capture
+also have finite bounds. This does not bound memory allocated by user scripts,
+individual objects/lines, PowerShell formatting, or remoting internals. The
+writer requires `Add-Type` in each execution runspace; constrained endpoints
+that forbid compilation are unsupported and fail closed. Counts describe
+rendered UTF-8 pipeline output, with platform newlines from `Out-String -Stream`,
+and UTF-8 console text, rather than original native program bytes. Use
+`run_program` for native byte provenance.
+
+Strict/WinRM return payload output only after a validated terminal frame. Timeout,
+cancellation, malformed frames, or direct OS stdout writes that bypass the console
+writer fail closed without inventing producer counts or returning frame data as
+command output; unfinished framed logs are discarded. MCP cancellation requests
+termination of the local PowerShell process tree and releases its log reservation;
+it does not prove that remote work or descendants stopped.
 
 | Tool | Description |
 |------|-------------|
