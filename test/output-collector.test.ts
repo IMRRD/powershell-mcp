@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { OutputCollector, captureDiagnostic } from "../src/output-collector.js";
+import { OutputCollector, captureBytes, captureDiagnostic, combineCaptures } from "../src/output-collector.js";
+import { captureFromEnvelope, displayCapture } from "../src/envelope-output.js";
 
 describe("byte-bounded collector", () => {
   it("clips one oversized chunk and counts all observed bytes", () => {
@@ -54,6 +55,50 @@ describe("byte-bounded collector", () => {
         expect(split.snapshot()).toMatchObject({ text: "", capturedBytes: 0, omittedBytes: 3 });
       }
     }
+  });
+});
+
+describe("combination preserves observed byte positions", () => {
+  const sources: [Buffer, string][] = [
+    [Buffer.from('A'), '€'], [Buffer.from('€'), 'A'],
+    [Buffer.from('A¢€😀Z'), '¢€😀B'], [Buffer.from('¢€😀'), ''],
+    [Buffer.alloc(0), '¢€😀'], [Buffer.from('€'), '😀'],
+    [Buffer.from([0xff, 0x41, 0xe2, 0x82, 0xac]), '€Z'],
+    [Buffer.from([0xe2, 0x28, 0xa1, 0xc0, 0xaf]), '😀'],
+    [Buffer.from([0xf0, 0x9f]), 'Z'],
+    [Buffer.from([0xe2]), '€'], [Buffer.from([0xf0, 0x9f]), '€'],
+  ];
+  for (const [index, [local, remote]] of sources.entries()) for (const tail of [false, true]) {
+    it.each([0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 32])(`matches one stream for case=${index} tail=${tail} cap=%s`, cap => {
+      const first = new OutputCollector(cap, tail); first.append(local);
+      const second = new OutputCollector(cap, tail); second.append(Buffer.from(remote));
+      const remoteCapture = second.snapshot();
+      // Exercise the wire contract too: remote captures have no private raw metadata.
+      const envelope = captureFromEnvelope(remoteCapture as unknown as Record<string, unknown>, remoteCapture.text);
+      const reference = new OutputCollector(cap, tail);
+      reference.append(local); reference.append(Buffer.from(remote));
+      const combined = combineCaptures([first.snapshot(), envelope], cap, tail);
+      expect(combined).toEqual(reference.snapshot());
+      expect(captureBytes(combined)).toEqual(captureBytes(reference.snapshot()));
+      const smaller = Math.max(0, cap - 1);
+      const recap = new OutputCollector(smaller, tail); recap.append(local); recap.append(Buffer.from(remote));
+      expect(displayCapture(combined, smaller, tail)).toEqual(recap.snapshot());
+    });
+  }
+
+  it.each([false, true])('keeps interior gaps during later display recapping (tail=%s)', tail => {
+    const first = new OutputCollector(1, tail); first.append(Buffer.from('ABC'));
+    const second = new OutputCollector(1, tail); second.append(Buffer.from('DEF'));
+    const combined = combineCaptures([first.snapshot(), second.snapshot()], 6, tail);
+    expect(combined).toMatchObject({ text: tail ? 'CF' : 'AD', observedBytes: 6, capturedBytes: 2, omittedBytes: 4 });
+    expect(displayCapture(combined, 2, tail)).toMatchObject({ text: tail ? 'F' : 'A', observedBytes: 6, capturedBytes: 1, omittedBytes: 5 });
+  });
+
+  it.each([false, true])('does not allocate omitted regions (tail=%s)', tail => {
+    const huge = { text: '', observedBytes: 1_000_000_000, capturedBytes: 0, omittedBytes: 1_000_000_000, truncated: true };
+    const c = new OutputCollector(1, tail); c.append(Buffer.from('A'));
+    const combined = combineCaptures(tail ? [c.snapshot(), huge] : [huge, c.snapshot()], 1, tail);
+    expect(combined).toEqual({ text: '', observedBytes: 1_000_000_001, capturedBytes: 0, omittedBytes: 1_000_000_001, truncated: true });
   });
 });
 

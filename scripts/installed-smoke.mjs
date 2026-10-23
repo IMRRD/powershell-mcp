@@ -38,6 +38,17 @@ try {
   assert(actual.name === pkg.name && actual.version === pkg.version, 'installed identity/version mismatch');
   assert(readFileSync(join(installed, 'dist', 'index.js'), 'utf8').length > 0, 'missing built entrypoint');
   assert(readFileSync(join(installed, 'dist', 'job-supervisor.ps1'), 'utf8').length > 0, 'missing packaged supervisor');
+  const { OutputCollector, combineCaptures, captureBytes } = await import(pathToFileURL(join(installed, 'dist', 'output-collector.js')).href);
+  for (const tail of [false, true]) for (const cap of [0, 1, 2, 3, 4, 5, 7]) {
+    for (const [local, remote] of [[Buffer.from('A'), '€'], [Buffer.from('€'), 'A'], [Buffer.from([0xff, 0x41]), '€😀Z'], [Buffer.from([0xe2]), '€']]) {
+      const first = new OutputCollector(cap, tail); first.append(local);
+      const second = new OutputCollector(cap, tail); second.append(Buffer.from(remote));
+      const reference = new OutputCollector(cap, tail); reference.append(local); reference.append(Buffer.from(remote));
+      const combined = combineCaptures([first.snapshot(), { ...second.snapshot() }], cap, tail);
+      assert(JSON.stringify(combined) === JSON.stringify(reference.snapshot()) &&
+        captureBytes(combined).equals(captureBytes(reference.snapshot())), `installed Unicode combination cap=${cap} tail=${tail}`);
+    }
+  }
   const transport = new StdioClientTransport({ command: process.execPath,
     args: [join(installed, actual.bin['powershell-mcp'])],
     env: { ...process.env, POWERSHELL_MCP_NO_TELEMETRY: '1', POWERSHELL_MCP_EXEC_PARENT: temp }, stderr: 'pipe' });

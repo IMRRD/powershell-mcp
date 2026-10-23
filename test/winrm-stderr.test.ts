@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { decodeWinRmResult } from '../src/winrm.js';
-import { OutputCollector } from '../src/output-collector.js';
+import { OutputCollector, captureBytes } from '../src/output-collector.js';
 import type { PsResult } from '../src/powershell.js';
 import { logStore } from '../src/full-logs.js';
 
@@ -9,20 +9,61 @@ function envelope(text: string) {
   const bytes = Buffer.byteLength(text);
   return { output: text, observedBytes: bytes, capturedBytes: bytes, omittedBytes: 0, truncated: false };
 }
-function host(local: Buffer, remote: string, limit = 32, tail = false): PsResult {
+function host(local: Buffer, remote: string, limit = 32, tail = false, stdout = ''): PsResult {
   const collector = new OutputCollector(limit, tail);
   collector.append(local);
   const stderrCapture = collector.snapshot();
   const remoteCollector = new OutputCollector(limit, tail);
   remoteCollector.append(Buffer.from(remote));
   const { text: output, ...accounting } = remoteCollector.snapshot();
-  const body = { ...envelope(''), status: 'completed', records: [], recordsTruncated: false, stderr: { output, ...accounting } };
+  const out = new OutputCollector(limit, tail); out.append(Buffer.from(stdout));
+  const { text: outText, ...outAccounting } = out.snapshot();
+  const body = { output: outText, ...outAccounting, status: 'completed', records: [], recordsTruncated: false, stderr: { output, ...accounting } };
   return { stdout: `WINRM-RESULT:${frame}:${Buffer.from(JSON.stringify(body)).toString('base64')}`,
     stderr: stderrCapture.text, stderrCapture, exitCode: 0, timedOut: false,
     truncated: stderrCapture.truncated, durationMs: 1, shell: 'powershell' };
 }
 
 describe('WinRM local and remote stderr', () => {
+  it.each([false, true])('does not fill an omitted Unicode boundary from the other source (tail=%s)', tail => {
+    const result = decodeWinRmResult(host(Buffer.from(tail ? 'A' : '€'), tail ? '€' : 'A', 1, tail), frame, 1, tail);
+    expect(result.invocationStatus).toBe('completed');
+    expect(result.stderrCapture).toEqual({ text: '', observedBytes: 4, capturedBytes: 0, omittedBytes: 4, truncated: true });
+  });
+
+  const unicodeSources: [Buffer, string][] = [
+    [Buffer.from('A'), '€'], [Buffer.from('€'), 'A'],
+    [Buffer.from('A¢€😀Z'), '€B'], [Buffer.from('€Z'), ''],
+    [Buffer.from([0xff, 0x41, 0xe2, 0x82, 0xac]), '😀B'],
+    [Buffer.from([0xe2]), '€'],
+  ];
+  for (const [index, [local, remote]] of unicodeSources.entries()) for (const tail of [false, true]) for (const logging of [false, true]) {
+    it.each([0, 1, 2, 3, 4, 5, 7])(`matches reference for both streams case=${index} tail=${tail} logging=${logging} cap=%s`, cap => {
+      const quota = Math.max(1, cap), budget = logging ? quota : cap;
+      const result = decodeWinRmResult(host(local, remote, budget, tail, '€Z'), frame, cap, tail, logging, quota);
+      const stderr = new OutputCollector(cap, tail); stderr.append(local); stderr.append(Buffer.from(remote));
+      const stdout = new OutputCollector(cap, tail); stdout.append(Buffer.from('€Z'));
+      try {
+        expect(result.invocationStatus).toBe('completed');
+        expect(result.stderrCapture).toEqual(stderr.snapshot());
+        expect(result.stdoutCapture).toEqual(stdout.snapshot());
+        expect(result.stderr).toBe(stderr.snapshot().text);
+        expect(result.stdout).toBe(stdout.snapshot().text);
+        if (logging) {
+          const fullErr = new OutputCollector(budget, tail); fullErr.append(local); fullErr.append(Buffer.from(remote));
+          const fullOut = new OutputCollector(budget, tail); fullOut.append(Buffer.from('€Z'));
+          const outBytes = captureBytes(fullOut.snapshot()).subarray(0, quota);
+          const errBytes = captureBytes(fullErr.snapshot()).subarray(0, quota - outBytes.length);
+          expect(result.log).toMatchObject({ stdoutBytes: outBytes.length, stderrBytes: errBytes.length,
+            complete: !fullOut.snapshot().truncated && !fullErr.snapshot().truncated &&
+              fullOut.snapshot().capturedBytes + fullErr.snapshot().capturedBytes <= quota });
+          for (const [stream, expected] of [['stdout', outBytes], ['stderr', errBytes]] as const)
+            expect(Buffer.from(logStore.read(result.log!.handle, stream, 0, 32).data, 'base64')).toEqual(expected);
+        }
+      } finally { if (result.log) logStore.delete(result.log.handle); }
+    });
+  }
+
   it('preserves LOCAL host stderr (5 bytes) plus REMOTE envelope stderr (6 bytes)', () => {
     const result = decodeWinRmResult(host(Buffer.from('LOCAL'), 'REMOTE'), frame, 32);
     expect(result.stderrCapture).toEqual({ text: 'LOCALREMOTE', observedBytes: 11, capturedBytes: 11, omittedBytes: 0, truncated: false });

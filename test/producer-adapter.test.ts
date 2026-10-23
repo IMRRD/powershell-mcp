@@ -9,7 +9,7 @@ import { frameLimit } from '../src/envelope-output.js';
 vi.mock('../src/powershell.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/powershell.js')>();
   return { ...actual, runPowerShell: vi.fn((script, opts) => actual.runPowerShell(
-    'function Invoke-Command { param($ComputerName,$ScriptBlock,$ArgumentList,$ErrorAction) if ($env:MCP_TEST_LOCAL_STDERR) { [Console]::Error.Write($env:MCP_TEST_LOCAL_STDERR) }; & $ScriptBlock @ArgumentList };\n' + script,
+    'function Invoke-Command { param($ComputerName,$ScriptBlock,$ArgumentList,$ErrorAction) if ($env:MCP_TEST_LOCAL_STDERR) { $bytes = [Text.Encoding]::UTF8.GetBytes($env:MCP_TEST_LOCAL_STDERR); $raw = [Console]::OpenStandardError(); $raw.Write($bytes,0,$bytes.Length) }; & $ScriptBlock @ArgumentList };\n' + script,
     { ...opts, exe: engine?.exe },
   )) };
 });
@@ -18,6 +18,27 @@ import { runWinRm, WINRM_BOOTSTRAP } from '../src/winrm.js';
 
 const engine = selectIntegrationEngines()[0];
 describe.skipIf(!engine)('production WinRM adapter with local invocation', () => {
+  for (const tail of [false, true]) for (const logging of [false, true]) {
+    it(`preserves omitted Unicode boundaries in both streams tail=${tail} logging=${logging}`, async () => {
+      vi.stubEnv('MCP_TEST_LOCAL_STDERR', tail ? 'A' : '€');
+      let result;
+      try {
+        const remote = tail ? '€' : 'A';
+        result = await runWinRm({ computerName: 'local-double',
+          command: `[Console]::Out.Write([char]0x20ac); [Console]::Error.Write('${remote}')`,
+          maxOutputBytes: 1, tail, logOutput: logging, logQuotaBytes: 1 });
+        expect(result).toMatchObject({ invocationStatus: 'completed', stdout: '', stderr: '',
+          stdoutCapture: { observedBytes: 3, capturedBytes: 0, omittedBytes: 3, truncated: true },
+          stderrCapture: { observedBytes: 4, capturedBytes: 0, omittedBytes: 4, truncated: true } });
+        if (logging) {
+          expect(result.log).toMatchObject({ complete: false, stdoutBytes: 0, stderrBytes: 0 });
+          for (const stream of ['stdout', 'stderr'] as const)
+            expect(logStore.read(result.log!.handle, stream, 0, 32).data).toBe('');
+        }
+      } finally { vi.unstubAllEnvs(); if (result?.log) logStore.delete(result.log.handle); }
+    }, 15000);
+  }
+
   it.each(['', 'REMOTE'])('preserves host stderr alongside remote stderr=%s through protected logging', async remote => {
     vi.stubEnv('MCP_TEST_LOCAL_STDERR', 'LOCAL');
     let result;

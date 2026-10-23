@@ -1,4 +1,4 @@
-import { OutputCollector, captureBytes, type StreamCapture } from "./output-collector.js";
+import { combineCaptures, captureBytes, type StreamCapture } from "./output-collector.js";
 import { logStore } from "./full-logs.js";
 
 export function protectedPayload(body: Record<string, unknown>, displayLimit: number, tail: boolean, quota?: number, reservedLog?: ReturnType<typeof logStore.create>, combinedStderr?: StreamCapture) {
@@ -12,13 +12,7 @@ export function protectedPayload(body: Record<string, unknown>, displayLimit: nu
 }
 
 export function displayCapture(full: StreamCapture, displayLimit: number, tail: boolean): StreamCapture {
-  const collector = new OutputCollector(displayLimit, tail);
-  collector.append(captureBytes(full));
-  const display = collector.snapshot();
-  display.observedBytes = full.observedBytes;
-  display.omittedBytes = full.observedBytes - display.capturedBytes;
-  display.truncated = display.omittedBytes > 0;
-  return display;
+  return combineCaptures([full], displayLimit, tail);
 }
 
 export function payloadLimit(displayLimit: number, logOutput?: boolean, quota?: number) {
