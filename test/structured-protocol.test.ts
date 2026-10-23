@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 
+// The lifecycle store retains idempotency history; never share capacity with prior test runs.
 const executionParent = mkdtempSync(join(tmpdir(), "mcp-protocol-executions-"));
 const client = new Client({ name: "contract-test", version: "1" });
 const transport = new StdioClientTransport({
@@ -125,13 +126,27 @@ describe("built-artifact stdio structured tool contract", () => {
   });
   it("advertises a shared output schema on every tool", async () => {
     const { tools } = await client.listTools();
-    expect(tools).toHaveLength(17);
+    expect(tools).toHaveLength(20);
     expect(tools.map(t => t.name)).toContain("read_output_log");
     expect(tools.map(t => t.name)).toContain("delete_output_log");
-    for (const tool of tools.filter(t => !["read_output_log", "delete_output_log", "runtime_capabilities", "start_execution", "execution_status", "read_execution_output", "cancel_execution"].includes(t.name))) {
+    for (const name of ['start_remote_batch', 'remote_batch_status', 'cancel_remote_batch']) expect(tools.map(t => t.name)).toContain(name);
+    for (const tool of tools.filter(t => !["read_output_log", "delete_output_log", "runtime_capabilities", "start_execution", "execution_status", "read_execution_output", "cancel_execution", "start_remote_batch", "remote_batch_status", "cancel_remote_batch"].includes(t.name))) {
       expect(tool.outputSchema?.properties).toHaveProperty("terminationStatus");
       expect(tool.outputSchema?.properties).toHaveProperty("executionId");
     }
+  });
+  it('starts, inspects and cancels batch over built stdio', async () => {
+    const started = await client.callTool({ name: 'start_remote_batch', arguments: { targets: [
+      { transport: 'ssh', host: '127.0.0.1', username: 'robot', command: 'true', hostKeyPins: ['SHA256:' + 'A'.repeat(43)] },
+      { transport: 'ssh', host: '127.0.0.1', username: 'robot', command: 'true', hostKeyPins: ['SHA256:' + 'A'.repeat(43)] },
+    ], concurrency: 1, timeoutMs: 1000 } });
+    const decode = (r: any) => JSON.parse(r.content[0].text);
+    const id = decode(started).id;
+    expect(id).toMatch(/^[0-9a-f]{48}$/);
+    const status = await client.callTool({ name: 'remote_batch_status', arguments: { id } });
+    expect(decode(status).results).toHaveLength(2);
+    const cancelled = await client.callTool({ name: 'cancel_remote_batch', arguments: { id } });
+    expect(decode(cancelled).results).toHaveLength(2);
   });
   it("captures and pages actual program output over built stdio", async () => {
     const data = await check("run_program", { program: process.execPath,
