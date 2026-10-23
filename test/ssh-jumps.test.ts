@@ -132,6 +132,31 @@ it('runs a routed command through the built MCP endpoint', async () => {
   } finally { await client.close(); await jump.close(); await dest.close(); }
 });
 
+it('denies each mis-scoped credential on a populated two-hop route, and accepts matching scopes', async () => {
+  const dest = await fixture(false), middle = await fixture(true), first = await fixture(true);
+  try {
+    const hops = [endpoint(first), endpoint(middle)];
+    for (const failedIndex of [0, 1]) {
+      const target = { ...endpoint(dest), command: 'echo routed', jumps: hops.map((hop, i) => ({ ...hop, password: undefined, credentialRef: `hop-${i}` })), password: 'synthetic', timeoutMs: 5000,
+        credentialProvider: { async resolve(ref: string) {
+          const i = ref === 'destination' ? 2 : Number(ref.slice(-1));
+          const selected = [first, middle, dest][i];
+          return { transport: 'ssh' as const, host: i === failedIndex ? 'wrong.invalid' : '127.0.0.1', port: selected.port, principal: 'fixture', password: 'synthetic' };
+        } } };
+      const before = dest.counts().commands;
+      const failure = await runSsh(target);
+      expect(failure.error).toMatch(/Credential scope mismatch/);
+      expect(dest.counts().commands).toBe(before);
+    }
+    const good = await runSsh({ ...endpoint(dest), command: 'echo routed', jumps: hops.map((hop, i) => ({ ...hop, password: undefined, credentialRef: `hop-${i}` })), password: 'synthetic', timeoutMs: 5000,
+      credentialProvider: { async resolve(ref: string) {
+        const i = ref === 'destination' ? 2 : Number(ref.slice(-1));
+        return { transport: 'ssh' as const, host: '127.0.0.1', port: [first, middle, dest][i].port, principal: 'fixture', password: 'synthetic' };
+      } } });
+    expect(good).toMatchObject({ stdout: 'routed-ok', exitCode: 0 });
+  } finally { await first.close(); await middle.close(); await dest.close(); }
+});
+
 it('denies a mis-scoped hop credential before that hop authenticates', async () => {
   const dest = await fixture(false), hop = await fixture(true);
   try {
