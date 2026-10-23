@@ -1,0 +1,771 @@
+{
+  "uid": "powershell-mcp-overview-preview",
+  "title": "PowerShell MCP — Overview (PREVIEW)",
+  "schemaVersion": 39,
+  "version": 0,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "refresh": "5m",
+  "timezone": "utc",
+  "panels": [
+    {
+      "id": 101,
+      "title": "Recorded calls",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "powershell-mcp-pg"
+      },
+      "description": "Metric-instrumented calls in selected event-time window. Legacy count batches are excluded; not a total of every historical call.",
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT sum(calls) AS calls FROM dashboard_metric_axes WHERE $__timeFilter(event_at) AND axis = 'outcomes'",
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 102,
+      "title": "Non-success",
+      "type": "stat",
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "powershell-mcp-pg"
+      },
+      "description": "Includes nonzero exits, errors, timeouts, cancellations and unknown outcomes. A nonzero exit is not necessarily a product defect.",
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT sum(calls) FILTER (WHERE bucket IN ('nonzero','error','timeout','cancelled','unknown')) AS outcomes FROM dashboard_metric_axes WHERE $__timeFilter(event_at) AND axis = 'outcomes'",
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 103,
+      "title": "Calls ≥10 seconds",
+      "type": "stat",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "powershell-mcp-pg"
+      },
+      "description": "Recorded duration bucket, not an inferred p95 or execution-time percentile.",
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT sum(calls) FILTER (WHERE bucket = 'gte10000') AS slow_calls FROM dashboard_metric_axes WHERE $__timeFilter(event_at) AND axis = 'durations'",
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none"
+      }
+    },
+    {
+      "id": 104,
+      "title": "Data receipt",
+      "type": "stat",
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "powershell-mcp-pg"
+      },
+      "description": "Latest received telemetry at or before the window end. Receipt is not end-to-end delivery or instrumentation proof.",
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT (extract(epoch FROM max(received_at))*1000)::bigint AS last_receipt FROM dashboard_events WHERE received_at <= $__timeTo()::timestamptz",
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "textMode": "value_and_name",
+        "colorMode": "none",
+        "graphMode": "none"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeAsIso"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 105,
+      "title": "How to read this overview",
+      "type": "text",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 6
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### What needs attention?\nStart with **Tools to review**, ordered by recorded non-success count, then slow calls. Percentages apply **only to metric-recorded calls**. Nonzero exits may be expected; inspect the workload before diagnosing a defect. **Data receipt** means arrival, not complete coverage. Legacy counts are **not added**; missing metric rows mean *unknown*, not zero. Open **Data and delivery details** for coverage and audit context."
+      }
+    },
+    {
+      "id": 106,
+      "title": "Tools to review",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 24,
+        "h": 7
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "powershell-mcp-pg"
+      },
+      "description": "Metric stream only. Non-success includes nonzero, errors, timeout, cancelled and unknown; slow is ≥10 seconds. Independent outcome/duration marginals aggregated before joining by tool. A missing axis is unknown.",
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "WITH outcomes AS (\n SELECT tool,sum(calls) AS recorded_calls,\n sum(calls) FILTER (WHERE bucket IN ('nonzero','error','timeout','cancelled','unknown')) AS non_success,\n sum(calls) FILTER (WHERE bucket = 'timeout') AS timeouts,\n sum(calls) FILTER (WHERE bucket = 'error') AS errors,\n sum(calls) FILTER (WHERE bucket = 'nonzero') AS nonzero_exits,\n sum(calls) FILTER (WHERE bucket = 'cancelled') AS cancelled,\n sum(calls) FILTER (WHERE bucket = 'unknown') AS unknown_outcomes\n FROM dashboard_metric_axes WHERE $__timeFilter(event_at) AND axis = 'outcomes' GROUP BY tool\n), durations AS (\n SELECT tool,sum(calls) AS duration_recorded_calls,\n sum(calls) FILTER (WHERE bucket = 'gte10000') AS slow_calls\n FROM dashboard_metric_axes WHERE $__timeFilter(event_at) AND axis = 'durations' GROUP BY tool\n)\nSELECT coalesce(o.tool,d.tool) AS tool, o.recorded_calls,\n coalesce(o.non_success,0) AS non_success,\n round(100.0*coalesce(o.non_success,0)/NULLIF(o.recorded_calls,0),1) AS non_success_pct,\n coalesce(o.timeouts,0) AS timeouts,\n d.slow_calls AS slow_calls,\n round(100.0*d.slow_calls/NULLIF(d.duration_recorded_calls,0),1) AS slow_pct\nFROM outcomes o FULL OUTER JOIN durations d ON o.tool=d.tool\nORDER BY non_success DESC NULLS LAST, slow_calls DESC NULLS LAST, tool",
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "tool"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 185
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "recorded_calls"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "non_success"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "non_success_pct"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 150
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "timeouts"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 100
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "slow_calls"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 115
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "slow_pct"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 115
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 107,
+      "title": "Recorded outcomes by tool",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "powershell-mcp-pg"
+      },
+      "description": "Distinct outcomes; a nonzero exit alone does not establish a defect.",
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT tool, sum(calls) FILTER (WHERE bucket = 'success') AS success, sum(calls) FILTER (WHERE bucket = 'nonzero') AS nonzero, sum(calls) FILTER (WHERE bucket = 'error') AS errors, sum(calls) FILTER (WHERE bucket = 'timeout') AS timeouts, sum(calls) FILTER (WHERE bucket = 'cancelled') AS cancelled, sum(calls) FILTER (WHERE bucket = 'unknown') AS unknown FROM dashboard_metric_axes WHERE $__timeFilter(event_at) AND axis = 'outcomes' GROUP BY tool ORDER BY tool",
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          }
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "xField": "tool",
+        "stacking": "normal",
+        "showValue": "never",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      }
+    },
+    {
+      "id": 108,
+      "title": "Recorded calls by tool",
+      "type": "barchart",
+      "gridPos": {
+        "x": 12,
+        "y": 17,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "powershell-mcp-pg"
+      },
+      "description": "One metric stream only. Legacy counts are separately available below.",
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT tool, sum(calls) AS calls FROM dashboard_metric_axes WHERE $__timeFilter(event_at) AND axis = 'outcomes' GROUP BY tool ORDER BY calls DESC",
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          }
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "xField": "tool",
+        "showValue": "auto",
+        "legend": {
+          "showLegend": false
+        }
+      }
+    },
+    {
+      "id": 109,
+      "title": "Data and delivery details",
+      "type": "row",
+      "gridPos": {
+        "x": 0,
+        "y": 25,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": true,
+      "panels": [
+        {
+          "id": 201,
+          "title": "Observed installation proxies (not people)",
+          "type": "table",
+          "gridPos": {
+            "x": 0,
+            "y": 0,
+            "w": 12,
+            "h": 9
+          },
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT * FROM adoption_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
+              "datasource": {
+                "type": "postgres",
+                "uid": "powershell-mcp-pg"
+              }
+            }
+          ]
+        },
+        {
+          "id": 202,
+          "title": "Delivered event types by origin",
+          "type": "table",
+          "gridPos": {
+            "x": 12,
+            "y": 0,
+            "w": 12,
+            "h": 9
+          },
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT origin, event, count(*) AS delivered_events FROM dashboard_events WHERE $__timeFilter(event_at) GROUP BY origin, event",
+              "datasource": {
+                "type": "postgres",
+                "uid": "powershell-mcp-pg"
+              }
+            }
+          ]
+        },
+        {
+          "id": 203,
+          "title": "Delivered tool counts (streams separate)",
+          "type": "table",
+          "gridPos": {
+            "x": 0,
+            "y": 9,
+            "w": 12,
+            "h": 9
+          },
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT origin, stream, tool, sum(calls) AS delivered_calls FROM dashboard_tools WHERE $__timeFilter(event_at) GROUP BY origin, stream, tool",
+              "datasource": {
+                "type": "postgres",
+                "uid": "powershell-mcp-pg"
+              }
+            }
+          ]
+        },
+        {
+          "id": 204,
+          "title": "Version and OS event mix",
+          "type": "table",
+          "gridPos": {
+            "x": 12,
+            "y": 9,
+            "w": 12,
+            "h": 9
+          },
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT origin, version_bucket, os_bucket, count(*) AS delivered_events FROM dashboard_events WHERE $__timeFilter(event_at) GROUP BY origin, version_bucket, os_bucket",
+              "datasource": {
+                "type": "postgres",
+                "uid": "powershell-mcp-pg"
+              }
+            }
+          ]
+        },
+        {
+          "id": 205,
+          "title": "Arrival lag p95 seconds (receipt-bearing events only)",
+          "type": "table",
+          "gridPos": {
+            "x": 0,
+            "y": 18,
+            "w": 24,
+            "h": 9
+          },
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT origin, date_trunc('day', received_at) AS received_day, count(*) AS received_events, percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM (received_at-event_at))) AS p95_lag_seconds FROM dashboard_events WHERE $__timeFilter(received_at) AND event_at IS NOT NULL GROUP BY origin, received_day",
+              "datasource": {
+                "type": "postgres",
+                "uid": "powershell-mcp-pg"
+              }
+            }
+          ]
+        },
+        {
+          "id": 206,
+          "title": "Delivery health (receipt and importer checkpoint)",
+          "type": "table",
+          "gridPos": {
+            "x": 0,
+            "y": 27,
+            "w": 24,
+            "h": 6
+          },
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT * FROM delivery_health_utc($__timeTo()::timestamptz, $__timeFrom()::timestamptz, interval '2 hours')",
+              "datasource": {
+                "type": "postgres",
+                "uid": "powershell-mcp-pg"
+              }
+            }
+          ],
+          "fieldConfig": {
+            "overrides": [
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "status"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 400
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "last_receipt"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 190
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "last_import"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 190
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "invalid_event_times"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 165
+                  }
+                ]
+              },
+              {
+                "matcher": {
+                  "id": "byName",
+                  "options": "invalid_receipt_times"
+                },
+                "properties": [
+                  {
+                    "id": "custom.width",
+                    "value": 165
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "id": 207,
+          "title": "Tool metrics distributions (independent axes)",
+          "type": "table",
+          "gridPos": {
+            "x": 0,
+            "y": 33,
+            "w": 24,
+            "h": 9
+          },
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT origin, tool, axis, bucket, sum(calls) AS calls FROM dashboard_metric_axes WHERE $__timeFilter(event_at) GROUP BY origin, tool, axis, bucket",
+              "datasource": {
+                "type": "postgres",
+                "uid": "powershell-mcp-pg"
+              }
+            }
+          ]
+        },
+        {
+          "id": 208,
+          "title": "Timestamp quality (all history, including excluded events)",
+          "type": "table",
+          "gridPos": {
+            "x": 0,
+            "y": 42,
+            "w": 24,
+            "h": 6
+          },
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT event_time_quality, receipt_time_quality, count(*) AS records FROM dashboard_events GROUP BY event_time_quality, receipt_time_quality",
+              "datasource": {
+                "type": "postgres",
+                "uid": "powershell-mcp-pg"
+              }
+            }
+          ]
+        },
+        {
+          "id": 209,
+          "title": "Recorded outcomes by tool — metrics stream only (selected UTC event window)",
+          "type": "table",
+          "gridPos": {
+            "x": 0,
+            "y": 48,
+            "w": 24,
+            "h": 9
+          },
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT a.origin, a.tool, sum(a.calls) AS recorded_calls, coalesce(sum(a.calls) FILTER (WHERE a.bucket IN ('nonzero','error','timeout','cancelled','unknown')),0) AS recorded_not_success, round(100.0 * coalesce(sum(a.calls) FILTER (WHERE a.bucket IN ('nonzero','error','timeout','cancelled','unknown')),0) / NULLIF(sum(a.calls), 0), 1) AS not_success_pct, coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'nonzero'),0) AS nonzero, coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'error'),0) AS errors, coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'timeout'),0) AS timeouts, coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'cancelled'),0) AS cancelled, coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'unknown'),0) AS unknown_outcomes FROM dashboard_metric_axes a WHERE $__timeFilter(a.event_at) AND a.axis = 'outcomes' GROUP BY a.origin,a.tool ORDER BY recorded_not_success DESC NULLS LAST,a.tool",
+              "datasource": {
+                "type": "postgres",
+                "uid": "powershell-mcp-pg"
+              }
+            }
+          ]
+        },
+        {
+          "id": 210,
+          "title": "Recorded duration buckets by tool — no latency percentile inferred",
+          "type": "table",
+          "gridPos": {
+            "x": 0,
+            "y": 57,
+            "w": 24,
+            "h": 9
+          },
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT a.origin,a.tool,sum(a.calls) AS recorded_calls,coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'gte10000'),0) AS at_least_10_seconds,round(100.0 * coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'gte10000'),0) / NULLIF(sum(a.calls),0),1) AS at_least_10_seconds_pct,coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'lt100'),0) AS under_100_ms,coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'lt1000'),0) AS under_1_second,coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'lt10000'),0) AS under_10_seconds FROM dashboard_metric_axes a WHERE $__timeFilter(a.event_at) AND a.axis = 'durations' GROUP BY a.origin,a.tool ORDER BY at_least_10_seconds DESC,a.tool",
+              "datasource": {
+                "type": "postgres",
+                "uid": "powershell-mcp-pg"
+              }
+            }
+          ]
+        },
+        {
+          "id": 211,
+          "title": "Instrumentation coverage by version and origin — batches, not unique calls",
+          "type": "table",
+          "gridPos": {
+            "x": 0,
+            "y": 66,
+            "w": 24,
+            "h": 9
+          },
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          },
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT e.origin,e.version_bucket,count(*) FILTER (WHERE e.event = 'tool_counts') AS legacy_count_batches,count(*) FILTER (WHERE e.event = 'tool_metrics') AS metric_batches,CASE WHEN count(*) FILTER (WHERE e.event = 'tool_metrics') > 0 THEN 'Metrics observed; coverage of all tools unknown' WHEN count(*) FILTER (WHERE e.event = 'tool_counts') > 0 THEN 'Legacy counts only; outcomes/durations uninstrumented' ELSE 'Unknown: no tool batches' END AS evidence FROM dashboard_events e WHERE $__timeFilter(e.event_at) AND e.event IN ('tool_counts','tool_metrics') GROUP BY e.origin,e.version_bucket ORDER BY e.origin,e.version_bucket",
+              "datasource": {
+                "type": "postgres",
+                "uid": "powershell-mcp-pg"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "tags": [
+    "PowerShell MCP",
+    "preview",
+    "usage",
+    "reliability"
+  ]
+}
