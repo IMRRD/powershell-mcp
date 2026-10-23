@@ -1,0 +1,18 @@
+[Unit]
+Description=Private analytics PostgreSQL off-host backup (review candidate)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=analytics-backup
+Group=analytics-backup
+EnvironmentFile=/etc/analytics-private-backup/backup.conf
+ExecStart=/opt/analytics-reviewed/venv/bin/python /opt/analytics-reviewed/operations/private_backup.py --directory /var/lib/analytics-private-backup --database hermes_mcp_analytics_private --host backup-only@golem --key /etc/analytics-private-backup/id_ed25519 --known-hosts /etc/analytics-private-backup/known_hosts --remote-dir private-analytics --total-timeout 900 --schema /opt/analytics-reviewed/schema.sql --schema-sha256 ${PRIVATE_SCHEMA_SHA256} --roles /opt/analytics-reviewed/roles.sql --roles-sha256 ${PRIVATE_ROLES_SHA256}
+TimeoutStartSec=20min
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/analytics-private-backup
+PrivateTmp=yes

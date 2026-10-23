@@ -1,0 +1,15 @@
+import { readFileSync } from 'node:fs';
+const report = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+const { numTotalTests: discovered, numPassedTests: passed, numFailedTests: failed, numPendingTests: skipped } = report;
+console.log(`Vitest discovered=${discovered} passed=${passed} failed=${failed} skipped=${skipped} suites=${report.testResults?.length ?? 0} engine=${process.env.MCP_REQUIRED_ENGINE ?? 'unspecified'}`);
+if (!Number.isInteger(discovered) || !passed || failed || passed + failed + skipped !== discovered) throw new Error('Invalid/failed/empty Vitest report');
+const names = (report.testResults ?? []).map(t => t.name.replaceAll('\\', '/'));
+for (const required of ['structured-protocol.test.ts', 'host-trust.test.ts', 'credential-ref.test.ts', 'staged-sftp.test.ts', 'ssh.test.ts', 'sftp.test.ts', 'powershell.test.ts']) {
+  const suite = report.testResults.find(t => t.name.replaceAll('\\', '/').endsWith('/' + required));
+  if (!suite || !suite.assertionResults?.some(t => t.status === 'passed')) throw new Error(`Required suite absent or entirely skipped: ${required}`);
+}
+if (process.env.MCP_REQUIRED_ENGINE === 'powershell' && process.platform !== 'win32') throw new Error('Windows PowerShell requires Windows');
+if (process.env.MCP_REQUIRED_ENGINE) {
+  const proof = report.testResults.flatMap(s => s.assertionResults ?? []).find(t => t.fullName === 'runPowerShell (integration) executes required engine and verifies child version');
+  if (proof?.status !== 'passed') throw new Error('Missing actual child executable/version integration proof');
+}

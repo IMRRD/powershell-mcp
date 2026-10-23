@@ -1,3 +1,4 @@
+import { selectIntegrationEngines } from "./integration-engine.js";
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
 import { runPowerShell } from "../src/powershell.js";
@@ -5,8 +6,7 @@ import { WINRM_BOOTSTRAP, buildWinRmInput, decodeWinRmResult } from "../src/winr
 import { fromProcess } from "../src/result.js";
 
 const frame = "a".repeat(48);
-const engines = (process.platform === "win32" ? ["powershell.exe", "pwsh.exe"] : ["pwsh"])
-  .filter(exe => spawnSync(exe, ["-NoProfile", "-NonInteractive", "-Command", "exit 0"], { timeout: 10000 }).status === 0);
+const engines = selectIntegrationEngines().map(engine => engine.exe);
 const prefix = (body = "& $ScriptBlock @ArgumentList") => `function Invoke-Command { param($ComputerName, $ScriptBlock, $ArgumentList, $ErrorAction) ${body} };\n`;
 
 async function exercise(exe: string, command: string, body?: string) {

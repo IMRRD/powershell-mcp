@@ -14,7 +14,12 @@ permissions:
   id-token: write   # required for OIDC trusted publishing + provenance
 
 jobs:
+  cross-engine-gate:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
   publish:
+    needs: cross-engine-gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,8 +42,20 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Test
-        run: npm test
+      - name: Test with explicit discovery counts
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test -- --reporter=json --outputFile=vitest-report.json
+          node scripts/check-test-report.mjs vitest-report.json
+
+      - name: Isolated collector fixtures (explicit nonzero discovery)
+        run: node scripts/check-collector-tests.mjs
+      - name: Verify installed canonical tarball over MCP stdio
+        env:
+          MCP_REQUIRED_ENGINE: pwsh
+          POWERSHELL_MCP_NO_TELEMETRY: '1'
+        run: node scripts/installed-smoke.mjs
 
       - name: Publish
         run: npm publish --access public --provenance

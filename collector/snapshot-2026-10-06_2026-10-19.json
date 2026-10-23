@@ -1,0 +1,21 @@
+{
+  "windowUtc": {
+    "fromInclusive": "2026-10-06",
+    "toInclusive": "2026-10-19"
+  },
+  "npmDownloadEvents": {
+    "@imrrd/powershell-mcp": 101,
+    "powershell-mcp": 17
+  },
+  "githubTraffic": {
+    "clones": {
+      "events": 70,
+      "uniqueGitHubEstimate": 47
+    },
+    "views": {
+      "events": 20,
+      "uniqueGitHubEstimate": 15
+    }
+  },
+  "interpretation": "Download and clone events are not installations or people; GitHub unique estimates are not user counts. Internal/test traffic may be present."
+}

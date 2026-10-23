@@ -1,132 +1,93 @@
-/**
- * Minimal telemetry for @imrrd/powershell-mcp.
- *
- * Rules:
- *  - NEVER blocks or throws to caller — all errors swallowed.
- *  - Fire-and-forget with a 1 s timeout.
- *  - Opt-out: POWERSHELL_MCP_NO_TELEMETRY=1
- *  - Counts only — no command contents, no args.
- */
+/** Allowlisted pseudonymous telemetry. Opt-out must precede every ID, disk and network operation. */
+import { Worker } from 'node:worker_threads';
+import { TOOL_NAMES, OUTCOMES, DURATIONS, FEATURES, type ToolName, type Outcome, type Duration, type Feature } from './tool-instrumentation.js';
 
-import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-
-const COLLECTOR_URL =
-  process.env.POWERSHELL_MCP_TELEMETRY_URL ??
-  "https://paperclip.mplace.co.za/api/telemetry";
-
-const OPT_OUT = process.env.POWERSHELL_MCP_NO_TELEMETRY === "1";
-
-const FLUSH_INTERVAL_MS = 30 * 60 * 1000; // 30 min
-
-let _hostId: string | undefined;
-const _counters: Record<string, number> = {};
-
-// ---------- host ID (stable anonymous ID, stored in ~/.powershell-mcp-id) ----------
-
-function getHostId(): string {
-  if (_hostId) return _hostId;
-  const idFile = join(homedir(), ".powershell-mcp-id");
-  try {
-    if (existsSync(idFile)) {
-      _hostId = readFileSync(idFile, "utf8").trim();
-      return _hostId!;
-    }
-  } catch {
-    // ignore read errors
-  }
-  const id = randomUUID();
-  try {
-    writeFileSync(idFile, id, { encoding: "utf8" });
-  } catch {
-    // ignore write errors (read-only fs, etc.)
-  }
-  _hostId = id;
-  return id;
+const OPT_OUT = process.env.POWERSHELL_MCP_NO_TELEMETRY === '1';
+const MAX_PENDING = 128;
+const TOOLS = new Set<string>(TOOL_NAMES);
+const counters: Record<string, number> = {};
+type Metric = { outcomes: Record<string, number>; durations: Record<string, number>; features: Record<string, number> };
+const metrics: Record<string, Metric> = {};
+const bump = (axis: Record<string, number>, key: string) => { axis[key] = (axis[key] ?? 0) + 1; };
+let worker: Worker | undefined;
+let outstanding = 0;
+let dropped = 0;
+let failures = 0;
+export function telemetryStatus(): Readonly<{ outstanding: number; dropped: number; failures: number }> {
+  return { outstanding, dropped, failures };
 }
-
-// ---------- low-level POST (fire-and-forget, 1 s timeout) ----------
-
-function postTelemetry(payload: object): void {
-  // Intentionally not awaited — callers don't await either.
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 1000);
-  fetch(COLLECTOR_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-    signal: ctrl.signal,
-  })
-    .catch(() => {
-      /* swallow */
-    })
-    .finally(() => clearTimeout(timer));
-}
-
-// ---------- public API ----------
-
-/** Fire startup heartbeat. Call once from main(), do not await. */
-export function startupPing(version: string): void {
+function ensureWorker(): Worker | undefined {
   if (OPT_OUT) return;
-  postTelemetry({
-    event: "startup",
-    version,
-    hostId: getHostId(),
-    os: process.platform,
-    ts: new Date().toISOString(),
-  });
+  if (worker) return worker;
+  try {
+    const instance = new Worker(new URL('./telemetry-worker.js', import.meta.url), { execArgv: process.execArgv.filter(arg => !arg.startsWith('--input-type')) });
+    instance.unref();
+    worker = instance;
+    instance.on('message', (status: { dropped?: number }) => { if (worker === instance) { if (Number.isSafeInteger(status?.dropped) && status.dropped! > 0) dropped += status.dropped!; outstanding = Math.max(0, outstanding - 1); if (!outstanding) instance.unref(); } });
+    const failed = () => {
+      if (worker !== instance) return;
+      worker = undefined;
+      dropped += outstanding;
+      outstanding = 0;
+      failures++;
+    };
+    instance.on('error', failed);
+    instance.on('exit', failed);
+    return instance;
+  } catch { failures++; return; }
 }
-
-/** Increment the call counter for a named tool. */
-export function incrementTool(name: string): void {
+function submit(message: object): void {
   if (OPT_OUT) return;
-  _counters[name] = (_counters[name] ?? 0) + 1;
+  if (outstanding >= MAX_PENDING) { dropped++; return; }
+  const target = ensureWorker();
+  if (!target) { dropped++; return; }
+  try { target.ref(); target.postMessage(message); outstanding++; }
+  catch { dropped++; failures++; }
 }
-
-/** Flush accumulated counters to the collector (resets them). */
+function enqueue(event: 'startup' | 'tool_counts' | 'tool_metrics', version: string, counts?: Record<string, number>, batch?: Record<string, Metric>): void {
+  submit({ event, version, ...(counts ? { counts } : {}), ...(batch ? { metrics: batch } : {}) });
+}
+export function startupPing(version: string): void { enqueue('startup', version); }
+export function incrementTool(name: string): void { if (!OPT_OUT && TOOLS.has(name)) counters[name] = (counters[name] ?? 0) + 1; }
+export function recordTool(name: ToolName, outcome: Outcome, duration: Duration, feature: Feature): void {
+  if (OPT_OUT || !TOOLS.has(name) || !OUTCOMES.includes(outcome) || !DURATIONS.includes(duration) || !FEATURES.includes(feature)) return;
+  incrementTool(name);
+  const row = metrics[name] ??= { outcomes: {}, durations: {}, features: {} };
+  bump(row.outcomes, outcome); bump(row.durations, duration); bump(row.features, feature);
+}
 export function flushCounters(version: string): void {
   if (OPT_OUT) return;
-  const keys = Object.keys(_counters);
-  if (keys.length === 0) return;
-  const counts: Record<string, number> = {};
-  for (const k of keys) {
-    counts[k] = _counters[k]!;
-    delete _counters[k];
+  if (Object.keys(counters).length) {
+    const counts = { ...counters };
+    for (const key of Object.keys(counters)) delete counters[key];
+    enqueue('tool_counts', version, counts);
   }
-  postTelemetry({
-    event: "tool_counts",
-    version,
-    hostId: getHostId(),
-    os: process.platform,
-    ts: new Date().toISOString(),
-    counts,
-  });
+  if (Object.keys(metrics).length) {
+    const batch = { ...metrics };
+    for (const key of Object.keys(metrics)) delete metrics[key];
+    enqueue('tool_metrics', version, undefined, batch);
+  }
 }
-
-/**
- * Start a background flush timer and register process-exit hooks.
- * Call once from main() after startupPing.
- */
 export function startFlushTimer(version: string): void {
   if (OPT_OUT) return;
-
-  const flush = () => flushCounters(version);
-
-  const interval = setInterval(flush, FLUSH_INTERVAL_MS);
-  // Don't prevent process exit if everything else has finished.
-  interval.unref();
-
-  // Best-effort flush on clean exit / signals.
-  process.once("exit", flush);
-
-  process.once("SIGINT", () => {
-    flush();
-    process.exit(0);
-  });
-  process.once("SIGTERM", () => {
-    flush();
-    process.exit(0);
-  });
+  const interval = setInterval(() => flushCounters(version), 30 * 60 * 1000); interval.unref();
+  // beforeExit permits the worker's local persistence ACK to finish; exit cannot.
+  process.once('beforeExit', () => flushCounters(version));
+  for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]] as const) {
+    process.once(signal, () => {
+      flushCounters(version);
+      const deadline = setTimeout(() => {
+        dropped += outstanding;
+        process.stderr.write(`telemetry: local persistence deadline exceeded; ${outstanding} unconfirmed message(s), ${dropped} dropped\n`);
+        process.exit(code);
+      }, 2000);
+      const wait = () => {
+        if (outstanding) { setTimeout(wait, 10); return; }
+        clearTimeout(deadline);
+        process.exit(code);
+      };
+      wait();
+    });
+  }
+  submit({ resume: true });
 }

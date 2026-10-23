@@ -1,0 +1,19 @@
+apiVersion: 1
+datasources:
+  - name: Private Telemetry PostgreSQL
+    uid: private-telemetry-pg
+    type: postgres
+    access: proxy
+    url: ${TELEMETRY_PG_HOST}
+    user: ${TELEMETRY_DASHBOARD_USER}
+    secureJsonData:
+      password: ${TELEMETRY_DASHBOARD_PASSWORD}
+    jsonData:
+      database: ${TELEMETRY_PG_DB}
+      sslmode: verify-full
+      postgresVersion: 1600
+      timescaledb: false
+      maxOpenConns: 5
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+    editable: false

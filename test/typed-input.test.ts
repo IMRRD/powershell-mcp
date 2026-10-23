@@ -1,3 +1,4 @@
+import { selectIntegrationEngines } from "./integration-engine.js";
 import { describe, it, expect } from "vitest";
 import { runProgram } from "../src/program.js";
 import { runPowerShell } from "../src/powershell.js";
@@ -21,8 +22,7 @@ describe("bounded typed inputs", () => {
     for (const parameters of [{ "bad-name": "x" }, { value: "x".repeat(1_048_577) }, { value: [[[[[[[[[1]]]]]]]]] }])
       expect(() => runPowerShell("'LAUNCHED'", { parameters })).toThrow(/limit|invalid/);
   });
-  const engines = (process.platform === "win32" ? ["powershell.exe", "pwsh.exe"] : ["pwsh"])
-    .filter(exe => spawnSync(exe, ["-NoProfile", "-NonInteractive", "-Command", "exit 0"], { timeout: 10000 }).status === 0);
+  const engines = selectIntegrationEngines().map(engine => engine.exe);
   for (const exe of engines) it(`binds typed parameters without executing values (${exe})`, async () => {
     const parameters = { text: "'; throw 'INJECTED'; # 💫\\", items: ["a", "b"], nothing: null, enabled: true, count: 3, nested: { key: "value" } };
     const r = await runPowerShell("param($text,$items,$nothing,$enabled,$count,$nested) [pscustomobject]@{text=$text; items=@($items); nothing=($null -eq $nothing); enabled=$enabled; count=$count; nested=$nested.key} | ConvertTo-Json -Compress -Depth 8", { exe, parameters });

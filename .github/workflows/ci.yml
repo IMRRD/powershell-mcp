@@ -4,26 +4,89 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_call:
 
 jobs:
+  analytics-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: fixture-only
+          POSTGRES_DB: analytics_fixture
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      ANALYTICS_TEST_DSN: postgresql://postgres:fixture-only@localhost:5432/analytics_fixture
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'psycopg[binary]==3.3.6'
+      - name: Require frozen reviewed blobs for operations tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          reviewed=6c9d8160944ac3cd50b55cd119050ac34b199494
+          git fetch --no-tags --depth=1 origin "$reviewed"
+          git cat-file -e "$reviewed^{commit}"
+          for path in operations/activate_private.py operations/prepare-private-activation.py schema.sql roles.sql queries.sql dashboard.json; do
+            git cat-file -e "$reviewed:collector/analytics/$path"
+          done
+      - run: python -m unittest discover -s collector/analytics -v
+      - run: python -m unittest discover -s collector/analytics/operations -p 'test_*.py' -v
   build-test:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            engine: powershell
+          - os: windows-latest
+            engine: pwsh
+          - os: ubuntu-latest
+            engine: pwsh
     runs-on: ${{ matrix.os }}
+    env:
+      MCP_REQUIRED_ENGINE: ${{ matrix.engine }}
+      POWERSHELL_MCP_NO_TELEMETRY: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Install
-        run: npm install
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Require selected engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$MCP_REQUIRED_ENGINE" == powershell ]]; then
+            command -v powershell.exe
+            powershell.exe -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()'
+          else
+            command -v pwsh
+            pwsh -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()'
+          fi
       - name: Typecheck
         run: npm run typecheck
       - name: Build
         run: npm run build
-      - name: Test
-        run: npm test
-        # ubuntu-latest ships pwsh, windows-latest ships powershell.exe + pwsh,
-        # so the integration tests run on both; pure tests run everywhere.
+      - name: Test with explicit discovery counts
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test -- --reporter=json --outputFile=vitest-report.json || {
+            node -e "const r=require('./vitest-report.json'); for(const s of r.testResults||[]) for(const t of s.assertionResults||[]) if(t.status==='failed') console.error(t.fullName, ...(t.failureMessages||[]));"
+            exit 1
+          }
+          node scripts/check-test-report.mjs vitest-report.json
+      - name: Isolated collector fixtures (explicit nonzero discovery)
+        run: node scripts/check-collector-tests.mjs
+      - name: Pack, install and exercise the actual artifact over MCP stdio
+        run: node scripts/installed-smoke.mjs
