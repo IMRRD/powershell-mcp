@@ -1,8 +1,19 @@
 import { describe, it, expect } from 'vitest';
 import { RemoteBatchStore } from '../src/remote-batch.js';
+import { TOOL_NAMES, instrumentTool } from '../src/tool-instrumentation.js';
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 10));
 describe('bounded remote batch', () => {
+  it('includes batch lifecycle in the fixed telemetry allowlist', async () => {
+    for (const name of ['start_remote_batch', 'remote_batch_status', 'cancel_remote_batch']) {
+      expect(TOOL_NAMES).toContain(name);
+      const calls: unknown[] = [];
+      const wrapped = instrumentTool(name as any, async () => ({ content: [{ type: 'text', text: '{"status":"running"}' }] }),
+        (...args) => calls.push(args));
+      await wrapped();
+      expect(calls[0]).toMatchObject([name, 'unknown', expect.any(String), 'remote']);
+    }
+  });
   it('retains exact ordered cardinality through mixed outcomes and bounded concurrency', async () => {
     let active = 0, peak = 0;
     const store = new RemoteBatchStore(async target => {
@@ -42,6 +53,25 @@ describe('bounded remote batch', () => {
     release({ status: 'completed', output: 'late' }); await tick();
     expect(launched).toBe(8);
     expect(store.status(id)?.results.map(r => r.status)).toEqual(['unknown','cancelled']);
+  });
+  it('keeps exact cardinality across a hung target, a failure and a later success', async () => {
+    let release!: () => void;
+    const hung = new Promise<void>(resolve => { release = resolve; });
+    const store = new RemoteBatchStore(async target => {
+      if (target.host === 'hung') { await hung; return { status: 'completed', output: 'late' }; }
+      if (target.host === 'bad') throw Error('unreachable');
+      return { status: 'completed', output: 'ok' };
+    });
+    const targets = ['hung', 'bad', 'good'].map(host => ({ transport: 'ssh' as const, host, username: 'u', command: 'x' }));
+    const id = store.start({ targets, concurrency: 2, timeoutMs: 20 });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const snapshot = store.status(id)!;
+    expect(snapshot.results.map(r => [r.index, r.host, r.status])).toEqual([
+      [0, 'hung', 'unknown'], [1, 'bad', 'unknown'], [2, 'good', 'completed'],
+    ]);
+    expect(snapshot.status).toBe('partial');
+    release(); await tick();
+    expect(store.status(id)?.results).toEqual(snapshot.results);
   });
   it('expires settled jobs and bounds retained admission', async () => {
     let now = 0;

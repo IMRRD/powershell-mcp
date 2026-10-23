@@ -1,5 +1,5 @@
 /** Fixed, private telemetry dimensions. Never pass arguments or response text to the recorder. */
-export const TOOL_NAMES = ['run_powershell','list_services','get_service','control_service','system_info','ssh_exec','winrm_exec','sftp_upload','sftp_download','run_program','runtime_capabilities','start_execution','execution_status','read_execution_output','cancel_execution','read_output_log','delete_output_log'] as const;
+export const TOOL_NAMES = ['run_powershell','list_services','get_service','control_service','system_info','ssh_exec','winrm_exec','sftp_upload','sftp_download','run_program','runtime_capabilities','start_execution','execution_status','read_execution_output','cancel_execution','read_output_log','delete_output_log','start_remote_batch','remote_batch_status','cancel_remote_batch'] as const;
 export const OUTCOMES = ['success','nonzero','error','timeout','cancelled','unknown'] as const;
 export const DURATIONS = ['lt100','lt1000','lt10000','gte10000'] as const;
 export const FEATURES = ['execution','inspection','remote','transfer','lifecycle','logs'] as const;
@@ -9,7 +9,7 @@ export type Duration = typeof DURATIONS[number];
 export type Feature = typeof FEATURES[number];
 const features: Record<ToolName, Feature> = {
   run_powershell:'execution', run_program:'execution', list_services:'inspection', get_service:'inspection', control_service:'inspection', system_info:'inspection', runtime_capabilities:'inspection',
-  ssh_exec:'remote', winrm_exec:'remote', sftp_upload:'transfer', sftp_download:'transfer',
+  ssh_exec:'remote', winrm_exec:'remote', start_remote_batch:'remote', remote_batch_status:'remote', cancel_remote_batch:'remote', sftp_upload:'transfer', sftp_download:'transfer',
   start_execution:'lifecycle', execution_status:'lifecycle', read_execution_output:'lifecycle', cancel_execution:'lifecycle', read_output_log:'logs', delete_output_log:'logs',
 };
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }

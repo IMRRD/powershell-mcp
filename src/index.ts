@@ -147,7 +147,6 @@ server.registerTool(
     logQuotaBytes: outputOptions.logQuotaBytes,
   } },
   async ({ host, username, command, port, privateKeyPath, passphrase, password, credentialRef, hostKeyPins, jumps, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
-    incrementTool("ssh_exec");
     const started = Date.now();
     const auth = await resolveCredential({ credentialRef, transport: "ssh", host, port: port ?? 22, principal: username, privateKeyPath, passphrase, password }, configuredProvider());
     const r = await runSsh({ host, username, command, port, privateKeyPath, passphrase, password, ...auth, hostKeyPins, jumps, knownHostsPath: process.env.POWERSHELL_MCP_KNOWN_HOSTS, deadlineAt: started + (timeoutMs ?? 60000), maxOutputBytes, tail, logOutput: credentialRef || jumps?.some(h => h.credentialRef) ? false : logOutput, logQuotaBytes });
