@@ -1,7 +1,9 @@
+param([switch]$CompileOnly, [string]$AssemblyPath = (Join-Path $PSScriptRoot 'linux-supervisor.dll'))
 $ErrorActionPreference = 'Stop'
 # A private, single-invocation subreaper. Cancellation never signals a bare PID.
 # Descendants orphaned by killing their parent are adopted here, including setsid children.
-Add-Type -TypeDefinition @'
+if ($CompileOnly) {
+Add-Type -OutputAssembly $AssemblyPath -TypeDefinition @'
 using System;
 using System.IO;
 using System.Diagnostics;
@@ -78,6 +80,11 @@ public static class LinuxJob {
  }
 }
 '@
+exit
+}
+# Compile once at build time: starting Roslyn for every invocation made even a
+# trivial native command exceed the lifecycle polling bound on Linux CI.
+Add-Type -Path $AssemblyPath
 $request = [Console]::ReadLine() | ConvertFrom-Json
 if ([string]$request.nonce -cnotmatch '^[a-f0-9]{48}$') { throw 'Invalid request' }
 [LinuxJob]::Run([string]$request.program, [string[]]@($request.args), [string]$request.cwd, [string]$request.input, [string]$request.nonce)

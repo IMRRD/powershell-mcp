@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { runProgram } from '../src/program.js';
 import { runPowerShell } from '../src/powershell.js';
 import { ExecutionStore } from '../src/execution-lifecycle.js';
+import { spawnOwned } from '../src/owned-process.js';
 
 const exe = process.env.MCP_REQUIRED_ENGINE === 'powershell' ? 'powershell.exe' : 'pwsh';
 const callers = ['program', 'powershell', 'durable'] as const;
@@ -31,6 +32,18 @@ async function invoke(caller: Caller, base: string, cwd?: string, policy = false
 
 describe('owned process actual adapters', () => {
   for (const caller of callers) {
+    it(`${caller} recognizes directory aliases while rejecting another directory`, async () => {
+      const base = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), 'owned-alias-'));
+      const work = join(base, 'real directory'), alias = join(base, 'alias');
+      mkdirSync(work);
+      symlinkSync(work, alias, process.platform === 'win32' ? 'junction' : 'dir');
+      try {
+        const result = await invoke(caller, base, alias);
+        expect(result.exitCode).toBe(0);
+        expect(realpathSync.native(result.stdout)).toBe(realpathSync.native(work));
+        expect(realpathSync.native(result.stdout)).not.toBe(realpathSync.native(base));
+      } finally { rmSync(base, { recursive: true, force: true }); }
+    });
     for (const kind of ['absolute', 'relative', 'omitted'] as const) it(`${caller} preserves ${kind} cwd`, async () => {
       const base = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), 'owned-cwd-'));
       const work = join(base, 'work with spaces'); mkdirSync(work);
@@ -39,7 +52,11 @@ describe('owned process actual adapters', () => {
         const result = await invoke(caller, base, cwd);
         expect(result.exitCode).toBe(0);
         expect(result.timedOut).toBe(false);
-        expect(result.stdout).toBe(kind === 'omitted' ? process.cwd() : work);
+        const actual = realpathSync.native(result.stdout);
+        const expected = realpathSync.native(kind === 'omitted' ? process.cwd() : work);
+        expect(actual).toBe(expected);
+        // Canonicalization must still reject a real change of working directory.
+        expect(actual).not.toBe(realpathSync.native(kind === 'omitted' ? work : base));
       } finally { rmSync(base, { recursive: true, force: true }); }
     });
 
@@ -60,4 +77,23 @@ describe('owned process actual adapters', () => {
       }
     });
   }
+
+  it('drains both streams before proving concurrent short-lived children finished', async () => {
+    await Promise.all([0, 7, 0, 7].map(code => new Promise<void>((resolve, reject) => {
+      const child = spawnOwned(process.execPath, ['-e', `process.stdout.write('ready💫');process.stderr.write('diagnostic');process.exitCode=${code}`]);
+      let stdout = '', stderr = '';
+      child.stdout!.setEncoding('utf8').on('data', b => { stdout += b; });
+      child.stderr!.setEncoding('utf8').on('data', b => { stderr += b; });
+      child.once('error', reject);
+      child.once('close', actual => {
+        try {
+          expect(actual).toBe(code);
+          expect(child.treeTerminated).toBe(true);
+          expect(stdout).toBe('ready💫');
+          expect(stderr).toBe('diagnostic');
+          resolve();
+        } catch (error) { reject(error); }
+      });
+    })));
+  });
 });

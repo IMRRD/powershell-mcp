@@ -32,8 +32,12 @@ for (const exe of engines) describe(`error policy (${exe})`, () => {
     expect(native.stdout).toContain("later cmdlet");
     expect(native.errorRecords).toEqual([]);
   }, 20000);
-  it("keeps prior output but never formats source-only literals", async () => {
-    const result = await run("Write-Output 'BEFORE_ERROR'; Write-Error boom; $unused='SECRET_NOT_EMITTED_62091'; Write-Output AFTER_ERROR");
+  it.each(["Write-Error boom", "throw 'boom'"])("keeps prior output but never formats source-only literals (%s)", async failure => {
+    const result = await run(`Write-Output 'BEFORE_ERROR'; ${failure}; $unused='SECRET_NOT_EMITTED_62091'; Write-Output AFTER_ERROR`);
+    expect(result.protocolError).not.toBe(true);
+    expect(result.exitCode).toBe(0);
+    expect(result.treeTerminated).toBe(true);
+    expect(result.scriptError).toBe(true);
     expect(result.stdout).toContain("BEFORE_ERROR");
     expect(result.stdout).not.toContain("AFTER_ERROR");
     expect(JSON.stringify(result)).not.toContain("SECRET_NOT_EMITTED_62091");

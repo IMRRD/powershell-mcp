@@ -51,7 +51,8 @@ export function spawnOwned(program: string, args: string[], options: SpawnOption
       if (!windows && process.platform !== 'linux') throw Error('Owned supervision requires Windows or Linux');
       const helper = join(dirname(fileURLToPath(import.meta.url)), import.meta.url.includes('/dist/') ? '.' : '../assets', windows ? 'job-supervisor.ps1' : 'linux-supervisor.ps1');
       const engine = windows ? join(process.env.SystemRoot ?? 'C:\\Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe') : executable('pwsh', env);
-      supervisor = spawn(engine, ['-NoProfile', '-NonInteractive', ...(windows ? ['-ExecutionPolicy', 'Bypass'] : []), '-File', helper], { cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      const assembly = join(dirname(fileURLToPath(import.meta.url)), import.meta.url.includes('/dist/') ? '.' : '../dist', 'linux-supervisor.dll');
+      supervisor = spawn(engine, ['-NoProfile', '-NonInteractive', ...(windows ? ['-ExecutionPolicy', 'Bypass'] : []), '-File', helper, ...(!windows ? ['-AssemblyPath', assembly] : [])], { cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
       Object.assign(output, { pid: supervisor.pid });
       let control = '', invalid = false, started = false, result: { exitCode: number; cancelled: boolean } | undefined;
       supervisor.stdin?.on('error', () => finish(null));

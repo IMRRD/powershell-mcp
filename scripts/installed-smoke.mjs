@@ -38,6 +38,7 @@ try {
   assert(actual.name === pkg.name && actual.version === pkg.version, 'installed identity/version mismatch');
   assert(readFileSync(join(installed, 'dist', 'index.js'), 'utf8').length > 0, 'missing built entrypoint');
   assert(readFileSync(join(installed, 'dist', 'job-supervisor.ps1'), 'utf8').length > 0, 'missing packaged supervisor');
+  assert(readFileSync(join(installed, 'dist', 'linux-supervisor.dll')).length > 0, 'missing compiled Linux supervisor');
   const { OutputCollector, combineCaptures, captureBytes } = await import(pathToFileURL(join(installed, 'dist', 'output-collector.js')).href);
   for (const tail of [false, true]) for (const cap of [0, 1, 2, 3, 4, 5, 7]) {
     for (const [local, remote] of [[Buffer.from('A'), '€'], [Buffer.from('€'), 'A'], [Buffer.from([0xff, 0x41]), '€😀Z'], [Buffer.from([0xe2]), '€']]) {

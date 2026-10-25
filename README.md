@@ -279,7 +279,15 @@ Scope must match the requested transport, exact host string, port (SSH/SFTP defa
 
 ## Develop
 
+Building requires PowerShell 7 (`pwsh`) as well as Node. Run `npm run build`
+before source execution or integration tests on Linux: it compiles the private
+Linux supervisor into `dist/linux-supervisor.dll`, which is included in the
+package. Invocations load that assembly instead of starting a compiler for each
+command. Build with the oldest PowerShell 7 runtime you intend to support; a
+newer .NET assembly may require a newer runtime on the consuming Linux host.
+
 ```bash
+npm run build
 npm run dev        # run from source (tsx)
 npm test           # unit + (where a shell is present) integration tests
 npm run typecheck

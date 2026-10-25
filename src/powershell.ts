@@ -84,7 +84,9 @@ try {
       # Command-level Stop avoids PS 5.1 promoting successful native stderr.
       $PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
       $nativeErrorsAreDiagnostics = $true
-      & ([ScriptBlock]::Create($source)) 2>&1 3>&1 4>&1 5>&1 6>&1 | ${PRODUCER_PIPELINE}
+      # Catch upstream so a terminating script error cannot stop the formatter
+      # before it has drained output already emitted by the script.
+      & { try { & ([ScriptBlock]::Create($source)) } catch { RecordError $_; [string]$_.Exception.Message } } 2>&1 3>&1 4>&1 5>&1 6>&1 | ${PRODUCER_PIPELINE}
     } catch { RecordError $_; $producer.WriteLine([string]$_.Exception.Message) }
   }
 } finally { [Console]::SetOut($consoleOut) }
@@ -185,7 +187,7 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
     const bootstrap = typed ? STRICT_BOOTSTRAP.replace(
       "$source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))",
       `${PARAMETER_BOOTSTRAP}\n$payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())) | ConvertFrom-Json\n$source = [string]$payload.source\n$params = Convert-Parameter $payload.parameters`,
-    ).replace("& ([ScriptBlock]::Create($source)) 2>&1", "& ([ScriptBlock]::Create($source)) @params 2>&1") : STRICT_BOOTSTRAP;
+    ).replace("& ([ScriptBlock]::Create($source)) }", "& ([ScriptBlock]::Create($source)) @params }") : STRICT_BOOTSTRAP;
     return runPowerShell(bootstrap, { ...opts, parameters: undefined, logOutput: false, maxOutputBytes: frameLimit(captureLimit), tail: false, stderrLimitBytes: limit, stderrTail: opts.tail, errorPolicy: "legacy", stdin: Buffer.from(typed ? JSON.stringify({ source: script, parameters: opts.parameters }) : script, "utf8").toString("base64"), env: { ...opts.env, PS_MCP_FRAME: frame, PS_MCP_OUTPUT_LIMIT: String(captureLimit), PS_MCP_OUTPUT_TAIL: opts.tail ? "1" : "0" } }).then(r => {
       const decoded = decodeStrict(r, frame, limit, opts.tail ?? false, opts.logOutput, opts.logQuotaBytes, reservedLog);
       if (reservedLog && !decoded.log) logStore.delete(reservedLog.finish(false).handle);
