@@ -77,11 +77,11 @@ else { const run = request(); writeFileSync(join(root, 'recovered'), JSON.string
     const run = store.start('owner', 'cancel', process.execPath, ['-e', 'process.stdout.write("before-cancel");setTimeout(()=>{},5000)']);
     for (let i = 0; i < 100 && store.status('owner', run.id).stdoutBytes === 0; i++) await pause(20);
     expect(Buffer.from(store.read('owner', run.id, 'stdout', 0, 64).data, 'base64').toString()).toBe('before-cancel');
-    expect(store.cancel('owner', run.id).state).toBe(process.platform === 'win32' ? 'running' : 'unknown');
-    if (process.platform === 'win32') {
+    expect(store.cancel('owner', run.id).state).toBe('running');
+    {
       for (let i = 0; i < 150 && store.status('owner', run.id).state === 'running'; i++) await pause(20);
       expect(store.status('owner', run.id).state).toBe('cancelled');
-    } else expect(store.status('owner', run.id).outputComplete).toBe(false);
+    }
     await pause(200);
   }));
   lifecycleIt('does not relaunch a persisted ambiguous intent after restart', async () => fixture(async root => {

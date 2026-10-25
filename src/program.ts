@@ -1,5 +1,4 @@
-import { spawn } from "node:child_process";
-import os from "node:os";
+import { spawnOwned } from "./owned-process.js";
 import { OutputCollector, captureDiagnostic } from "./output-collector.js";
 import type { PsResult, RunOptions } from "./powershell.js";
 import { logStore } from "./full-logs.js";
@@ -22,6 +21,7 @@ export function runProgram(program: string, args: string[] = [], opts: RunOption
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxOutput = opts.maxOutputBytes ?? DEFAULT_MAX_OUTPUT;
   const started = Date.now();
+  if (opts.signal?.aborted) return Promise.resolve({ stdout: '', stderr: '', exitCode: null, timedOut: false, cancelled: true, durationMs: 0, shell: program, truncated: false });
 
   if (opts.stdin !== undefined && Buffer.byteLength(opts.stdin, "utf8") > INPUT_LIMIT) {
     return Promise.resolve({ stdout: "", stderr: "input limit exceeded", spawnError: "input limit exceeded", exitCode: null, timedOut: false, durationMs: 0, shell: program, truncated: false, outputLimitBytes: maxOutput });
@@ -31,7 +31,7 @@ export function runProgram(program: string, args: string[] = [], opts: RunOption
     const log = opts.logOutput ? logStore.create(opts.logQuotaBytes) : undefined;
     let child;
     try {
-      child = spawn(program, args, {
+      child = spawnOwned(program, args, {
         cwd: opts.cwd,
         env: { ...process.env, ...(opts.env ?? {}) },
         windowsHide: true,
@@ -58,6 +58,7 @@ export function runProgram(program: string, args: string[] = [], opts: RunOption
     const out = new OutputCollector(maxOutput, opts.tail);
     const errOut = new OutputCollector(maxOutput, opts.tail);
     let timedOut = false;
+    let cancelled = false;
     if (opts.stdin !== undefined) {
       child.stdin?.on("error", () => { /* early child exit owns result */ });
       child.once("spawn", () => child.stdin?.end(opts.stdin));
@@ -73,17 +74,15 @@ export function runProgram(program: string, args: string[] = [], opts: RunOption
 
     const timer = setTimeout(() => {
       timedOut = true;
-      try {
-        if (os.platform() === "win32" && child.pid) {
-          spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true });
-        } else {
-          child.kill("SIGKILL");
-        }
-      } catch { /* ignore */ }
+      child.cancel();
     }, timeoutMs);
+    const abort = () => { cancelled = true; child.cancel(); };
+    opts.signal?.addEventListener('abort', abort, { once: true });
+    child.once('spawn', () => { if (opts.signal?.aborted) abort(); });
 
     child.on("error", (err) => {
       clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', abort);
       const stderrCapture = captureDiagnostic(errOut.snapshot(), `\n[spawn error] ${(err as Error).message}`, maxOutput, opts.tail);
       const stdoutCapture = out.snapshot();
       resolve({
@@ -93,6 +92,7 @@ export function runProgram(program: string, args: string[] = [], opts: RunOption
         spawnError: (err as Error).message,
         exitCode: null,
         timedOut,
+        cancelled,
         durationMs: Date.now() - started,
         shell: program,
       });
@@ -100,11 +100,14 @@ export function runProgram(program: string, args: string[] = [], opts: RunOption
 
     child.on("close", (code) => {
       clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', abort);
       resolve({
         ...captures(),
         exitCode: code,
-        ...(log ? { log: log.finish(!timedOut) } : {}),
+        treeTerminated: child.treeTerminated,
+        ...(log ? { log: log.finish(!timedOut && !cancelled && child.treeTerminated) } : {}),
         timedOut,
+        cancelled,
         durationMs: Date.now() - started,
         shell: program,
       });

@@ -1,0 +1,7 @@
+{
+  "sdk": "8.0.423",
+  "referenceVersion": "3.1.0",
+  "packageSha512": "cTXlQgzxZx5XsAIVw8tcdYhvPpcScA3vG3AQ/ScleqMn32SMBCIQqetoE0X0EqPSjW3S+hw/pRIUli0msjiJ9A==",
+  "referencesSha256": "2073c447abc01b9582e09e52da9993b6cd6ac3d1aa210ff28df026b7451cf008",
+  "minimumImage": "mcr.microsoft.com/powershell:7.0.0-ubuntu-18.04@sha256:7437dcab35ce73e1a4e5a4793fa67bb527a3da7b09ce9248eb01e70c747c2ff3"
+}

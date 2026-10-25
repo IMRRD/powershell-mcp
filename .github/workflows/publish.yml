@@ -36,11 +36,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Install pinned supervisor compiler
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: scripts/supervisor-build/global.json
+      - name: Restore and verify locked supervisor reference pack
+        run: npm run supervisor:restore
       - name: Typecheck
         run: npm run typecheck
 
       - name: Build
         run: npm run build
+      - name: Require packed supervisor on PowerShell 7.0.0 / .NET Core 3.1
+        run: npm run test:supervisor-compat
 
       - name: Test with explicit discovery counts
         shell: bash

@@ -186,7 +186,13 @@ structured error output also avoids rendering source context.
 
 Metadata and output live under `POWERSHELL_MCP_EXEC_PARENT/powershell-mcp-executions` or the private temporary parent. The dedicated directory is restricted to the current Windows SID and SYSTEM (or POSIX mode 0700); records contain request hashes, not raw arguments or scripts. Output can contain secrets; quota is 8 MiB combined per execution and at most 64 retained executions. No encryption or automatic retention cleanup is provided: archive/delete the dedicated store **only when no execution is active**, and never clear idempotency history if duplicate side effects would be unsafe. Do not point the parent at a shared/untrusted location.
 
-Disconnecting an MCP client does not cancel its running process while the server lives. A new server can read completed persisted output but classifies a previously running/reserved execution as `unknown`; it will neither adopt nor automatically relaunch or cancel it. The same limitation applies after server crash and OS reboot; `unknown` does not prove the process remains alive or stopped. On Windows, cancellation requests the packaged Job Object supervisor to terminate its owned tree and subsequently reports `cancelled` only after job accounting reaches zero; until then status remains `running`, and failed/absent proof remains `unknown`. Normal supervisor closure uses kill-on-job-close. POSIX cancellation remains `unknown` because descendant termination is not proven. It never uses bare-PID `taskkill`. The stored output quota is 8 MiB; Windows raw spool files can temporarily exceed it during high-volume output and should be monitored until bounded streaming replaces spooling. Commands with side effects require independent reconciliation before a new idempotency key is used. SSH/WinRM remote supervision and remote termination proof are unsupported in this local slice.
+Disconnecting an MCP client does not cancel a durable execution while the server lives. After MCP restart, crash or OS reboot, a new server preserves valid completed records/output and returns `unknown` for any previously running/reserved run. It never adopts a stored PID, infers ownership from PID liveness, signals an old process or automatically relaunches an ambiguous request. Reusing the same owner/key/request returns the same ID even when unknown; conflicting requests fail. Invalid metadata and missing or length-mismatched output recover conservatively; a surviving key reservation prevents replay even without readable metadata. Output content has no independent integrity checksum. Keep the store on persistent local storage if handles must survive a reboot: an OS-cleaned temporary directory cannot provide that contract.
+
+This specifies reboot reconciliation without asserting a real reboot or power-loss test. File fsync and atomic metadata rename provide process-restart recovery; they do not establish crash consistency of directory entries or hardware power-loss durability (especially on Windows). If the entire store/idempotency history is lost, duplicate prevention across that loss cannot be guaranteed; reconcile side effects externally before submitting anything again.
+
+All local production callers (`run_program`, legacy/strict `run_powershell`, the local WinRM host and the durable lifecycle) use the same private supervisor channel. Windows 10 1703+/Server 1709+ launches suspended into a non-breakaway Job Object with Desktop Bridge child breakaway disabled (including Store-installed PowerShell) and retains native handles; cancellation requires zero active job processes before proof. Job close also requests tree cleanup. Linux requires `pwsh` and a kernel supporting subreapers and pidfds (Linux 5.3+); the supervisor adopts orphan descendants, including processes which detach into another session, and signals through pidfds only after checking direct-child ownership. Unsupported supervision fails closed. Neither platform uses bare-PID `taskkill` or a negative-PID group kill. Parent/child/grandchild exits must all be established before durable `cancelled`. Cancellation is requested once, cleanup has a four-second native deadline and a six-second caller bound; failed/absent proof returns `unknown` and does not trigger relaunch or repeated cancellation. The deadline bounds the local wait, not the termination of an inaccessible process.
+
+Persisted output uses bounded streaming (8 MiB combined), without raw spool files. SSH/WinRM remote supervision remains unsupported: timeout, local-host exit, connection refusal and authorization denial never establish that a remote process stopped. `terminationCertainty` stays `unknown` for every WinRM/SSH result. These paths do not automatically retry commands. Commands with side effects require independent reconciliation before a new idempotency key is used.
 
 ## See it work
 
@@ -273,7 +279,24 @@ Scope must match the requested transport, exact host string, port (SSH/SFTP defa
 
 ## Develop
 
+Building requires Node and .NET SDK **8.0.423** (roll-forward is disabled in
+`scripts/supervisor-build/global.json`). Run `npm run supervisor:restore` once
+to fetch the exact Microsoft.NETCore.App.Ref **3.1.0** package from NuGet.org.
+The archive SHA512 and extracted DLL-set SHA256 are locked in
+`scripts/supervisor-build/baseline.json` and verified before compilation.
+`NUGET_PACKAGES` can select an isolated package cache.
+
+Run `npm run build` before source execution or integration tests on Linux.
+It uses the pinned Roslyn compiler with `/nostdlib+` and only the verified
+.NET Core 3.1 reference DLLs, preserving PowerShell 7.0 compatibility.
+Missing/wrong SDK or reference assets fail the build and remove any stale DLL.
+The private `dist/linux-supervisor.dll` is included in the package; consumers
+load it without starting a compiler. Linux CI and npm publication require
+`npm run test:supervisor-compat`, which packs the artifact and executes it in
+a digest-pinned PowerShell 7.0.0 container (including streams and cancellation).
+
 ```bash
+npm run build
 npm run dev        # run from source (tsx)
 npm test           # unit + (where a shell is present) integration tests
 npm run typecheck

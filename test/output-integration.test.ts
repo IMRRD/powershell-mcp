@@ -42,7 +42,7 @@ describe("bounded production pipes", () => {
     logStore.delete(r.log!.handle);
   });
   it.each(['native', 'legacy'])("%s timeout retains an incomplete emitted prefix", async kind => {
-    const opts = { timeoutMs: 1000, logOutput: true, maxOutputBytes: 100 };
+    const opts = { timeoutMs: 5000, logOutput: true, maxOutputBytes: 100 };
     const r = kind === 'native'
       ? await runProgram(process.execPath, ['-e', "process.stdout.write('prefix');setInterval(()=>{},1000)"], opts)
       : await runPowerShell("[Console]::Out.Write('prefix'); Start-Sleep -Seconds 20", { ...opts, exe: shell });

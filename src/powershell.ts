@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawnOwned } from "./owned-process.js";
 import os from "node:os";
 import { OutputCollector, captureDiagnostic, type StreamCapture } from "./output-collector.js";
 import { PRODUCER_BOOTSTRAP, PRODUCER_PIPELINE } from "./producer-output.js";
@@ -20,9 +20,10 @@ export interface PsResult {
   stdout: string;
   stderr: string;
   exitCode: number | null;
-  /** True if the run was killed because it exceeded timeoutMs. */
+  /** The caller deadline elapsed; does not itself prove termination. */
   timedOut: boolean;
   cancelled?: boolean;
+  treeTerminated?: boolean;
   durationMs: number;
   /** The executable that was used (e.g. "pwsh" or "powershell.exe"). */
   shell: string;
@@ -83,7 +84,9 @@ try {
       # Command-level Stop avoids PS 5.1 promoting successful native stderr.
       $PSDefaultParameterValues['*:ErrorAction'] = 'Stop'
       $nativeErrorsAreDiagnostics = $true
-      & ([ScriptBlock]::Create($source)) 2>&1 3>&1 4>&1 5>&1 6>&1 | ${PRODUCER_PIPELINE}
+      # Catch upstream so a terminating script error cannot stop the formatter
+      # before it has drained output already emitted by the script.
+      & { try { & ([ScriptBlock]::Create($source)) } catch { RecordError $_; [string]$_.Exception.Message } } 2>&1 3>&1 4>&1 5>&1 6>&1 | ${PRODUCER_PIPELINE}
     } catch { RecordError $_; $producer.WriteLine([string]$_.Exception.Message) }
   }
 } finally { [Console]::SetOut($consoleOut) }
@@ -184,7 +187,7 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
     const bootstrap = typed ? STRICT_BOOTSTRAP.replace(
       "$source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd()))",
       `${PARAMETER_BOOTSTRAP}\n$payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([Console]::In.ReadToEnd())) | ConvertFrom-Json\n$source = [string]$payload.source\n$params = Convert-Parameter $payload.parameters`,
-    ).replace("& ([ScriptBlock]::Create($source)) 2>&1", "& ([ScriptBlock]::Create($source)) @params 2>&1") : STRICT_BOOTSTRAP;
+    ).replace("& ([ScriptBlock]::Create($source)) }", "& ([ScriptBlock]::Create($source)) @params }") : STRICT_BOOTSTRAP;
     return runPowerShell(bootstrap, { ...opts, parameters: undefined, logOutput: false, maxOutputBytes: frameLimit(captureLimit), tail: false, stderrLimitBytes: limit, stderrTail: opts.tail, errorPolicy: "legacy", stdin: Buffer.from(typed ? JSON.stringify({ source: script, parameters: opts.parameters }) : script, "utf8").toString("base64"), env: { ...opts.env, PS_MCP_FRAME: frame, PS_MCP_OUTPUT_LIMIT: String(captureLimit), PS_MCP_OUTPUT_TAIL: opts.tail ? "1" : "0" } }).then(r => {
       const decoded = decodeStrict(r, frame, limit, opts.tail ?? false, opts.logOutput, opts.logQuotaBytes, reservedLog);
       if (reservedLog && !decoded.log) logStore.delete(reservedLog.finish(false).handle);
@@ -220,7 +223,7 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
       const log = opts.logOutput ? logStore.create(opts.logQuotaBytes) : undefined;
       let child;
       try {
-        child = spawn(exe, buildArgs(script), {
+        child = spawnOwned(exe, buildArgs(script), {
           cwd: opts.cwd,
           env: { ...process.env, ...(opts.env ?? {}) },
           windowsHide: true, // <-- no popup window, ever
@@ -256,16 +259,7 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
           outputLimitBytes: maxOutput, truncated: stdoutCapture.truncated || stderrCapture.truncated };
       };
 
-      const terminate = () => {
-        try {
-          // Kill the whole tree on Windows; plain kill elsewhere.
-          if (os.platform() === "win32" && child.pid) {
-            spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true }).on("error", () => {});
-          } else {
-            child.kill("SIGKILL");
-          }
-        } catch { /* ignore */ }
-      };
+      const terminate = () => child.cancel();
       const timer = setTimeout(() => { timedOut = true; terminate(); }, timeoutMs);
       const abort = () => { cancelled = true; terminate(); };
       opts.signal?.addEventListener("abort", abort, { once: true });
@@ -304,7 +298,8 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
         resolve({
           ...captures(),
           exitCode: code,
-          ...(log ? { log: log.finish(!timedOut && !cancelled) } : {}),
+          treeTerminated: child.treeTerminated,
+          ...(log ? { log: log.finish(!timedOut && !cancelled && child.treeTerminated !== false) } : {}),
           timedOut,
           cancelled,
           durationMs: Date.now() - started,

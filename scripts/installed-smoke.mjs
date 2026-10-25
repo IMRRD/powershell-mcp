@@ -2,16 +2,16 @@
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
 import { createHash, generateKeyPairSync } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { connect as tcpConnect } from 'node:net';
+import { connect as tcpConnect, createServer } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 const root = resolve(import.meta.dirname, '..');
-const temp = mkdtempSync(join(tmpdir(), 'mcp-installed-smoke-'));
+const temp = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), 'mcp-installed-smoke-'));
 const npmCli = [process.env.npm_execpath, join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js'), join(dirname(process.execPath), '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js')].find(path => path && existsSync(path));
 if (!npmCli) throw new Error('npm CLI unavailable next to the selected Node runtime');
 function command(args, cwd) {
@@ -38,6 +38,7 @@ try {
   assert(actual.name === pkg.name && actual.version === pkg.version, 'installed identity/version mismatch');
   assert(readFileSync(join(installed, 'dist', 'index.js'), 'utf8').length > 0, 'missing built entrypoint');
   assert(readFileSync(join(installed, 'dist', 'job-supervisor.ps1'), 'utf8').length > 0, 'missing packaged supervisor');
+  assert(readFileSync(join(installed, 'dist', 'linux-supervisor.dll')).length > 0, 'missing compiled Linux supervisor');
   const { OutputCollector, combineCaptures, captureBytes } = await import(pathToFileURL(join(installed, 'dist', 'output-collector.js')).href);
   for (const tail of [false, true]) for (const cap of [0, 1, 2, 3, 4, 5, 7]) {
     for (const [local, remote] of [[Buffer.from('A'), '€'], [Buffer.from('€'), 'A'], [Buffer.from([0xff, 0x41]), '€😀Z'], [Buffer.from([0xe2]), '€']]) {
@@ -49,11 +50,11 @@ try {
         captureBytes(combined).equals(captureBytes(reference.snapshot())), `installed Unicode combination cap=${cap} tail=${tail}`);
     }
   }
-  const transport = new StdioClientTransport({ command: process.execPath,
+  const makeTransport = () => new StdioClientTransport({ command: process.execPath,
     args: [join(installed, actual.bin['powershell-mcp'])],
     env: { ...process.env, POWERSHELL_MCP_NO_TELEMETRY: '1', POWERSHELL_MCP_EXEC_PARENT: temp }, stderr: 'pipe' });
   client = new Client({ name: 'installed-artifact-gate', version: '1' });
-  await client.connect(transport);
+  await client.connect(makeTransport());
   const tools = (await client.listTools()).tools;
   const { TOOL_NAMES } = await import(pathToFileURL(join(installed, 'dist', 'tool-instrumentation.js')).href);
   assert(tools.length === TOOL_NAMES.length && tools.every(t => TOOL_NAMES.includes(t.name)), 'instrumentation tool allowlist drift');
@@ -69,6 +70,61 @@ try {
   assert(failure.isError && failure.structuredContent?.exitCode === 7 && failure.structuredContent?.terminationStatus === 'nonzero_exit', 'installed nonzero failure contract');
   const timeout = await call('run_program', { program: process.execPath, args: ['-e', 'setTimeout(()=>{},10000)'], timeoutMs: 250 });
   assert(timeout.isError && timeout.structuredContent?.timedOut === true, 'installed timeout contract');
+  const lifecycle = async (name, args) => {
+    const response = await call(name, args);
+    assert(!response.isError, `installed lifecycle ${name} failed: ${JSON.stringify(response)}`);
+    return JSON.parse(response.content[0].text);
+  };
+  const owner = 'installed-synthetic-owner';
+  const marker = join(temp, 'owned-pids'), tree = join(temp, 'owned-tree.cjs');
+  writeFileSync(tree, `const {spawn}=require('node:child_process');const fs=require('node:fs');const [role,path]=process.argv.slice(2);fs.appendFileSync(path,role+':'+process.pid+'\\n');if(role!=='grandchild')spawn(process.execPath,[__filename,role==='parent'?'child':'grandchild',path],{stdio:'ignore',detached:process.platform==='linux'}).unref();console.log('before-cancel');setInterval(()=>{},1000);setTimeout(()=>process.exit(0),20000);`);
+  const control = spawn(process.execPath, ['-e', 'setTimeout(()=>{},25000)'], { stdio: 'ignore', windowsHide: true });
+  const request = { owner, idempotencyKey: 'installed-tree', program: process.execPath, args: [tree, 'parent', marker] };
+  let treeRun;
+  const pause = ms => new Promise(r => setTimeout(r, ms));
+  try {
+    for (const tool of ['run_program', 'run_powershell']) {
+      const path = join(temp, tool + '-pids');
+      const quote = text => "'" + text.replaceAll("'", "''") + "'";
+      const args = tool === 'run_program' ? { program: process.execPath, args: [tree, 'parent', path] }
+        : { script: `& ${quote(process.execPath)} ${quote(tree)} parent ${quote(path)}`, engine: process.env.MCP_REQUIRED_ENGINE ?? 'pwsh' };
+      const result = await call(tool, { ...args, timeoutMs: 5000 });
+      assert(result.structuredContent?.timedOut && result.structuredContent?.stdout.includes('before-cancel'), `installed ${tool} timeout/prefix`);
+      const lines = readFileSync(path, 'utf8').trim().split('\n'); assert(lines.length === 3, `installed ${tool} tree launch`);
+      for (const line of lines) { let exists = true; try { process.kill(Number(line.split(':')[1]), 0); } catch { exists = false; } assert(!exists, `installed ${tool} descendant survived`); }
+    }
+    treeRun = await lifecycle('start_execution', request);
+    assert((await lifecycle('start_execution', request)).id === treeRun.id, 'installed idempotency');
+    let lines = [];
+    for (let i = 0; i < 240; i++) { try { lines = readFileSync(marker, 'utf8').trim().split('\n'); if (lines.length === 3) break; } catch {} await pause(25); }
+    assert(lines.length === 3, 'installed parent/child/grandchild launch');
+    const page = await lifecycle('read_execution_output', { owner, id: treeRun.id, stream: 'stdout', offset: 0, length: 64 });
+    assert(Buffer.from(page.data, 'base64').toString().includes('before-cancel'), 'installed output before cancellation');
+    await lifecycle('cancel_execution', { owner, id: treeRun.id });
+    let status;
+    for (let i = 0; i < 300; i++) { status = await lifecycle('execution_status', { owner, id: treeRun.id }); if (status.state !== 'running') break; await pause(25); }
+    assert(status.state === 'cancelled', 'installed verified tree cancellation');
+    for (const line of lines) { let exists = true; try { process.kill(Number(line.split(':')[1]), 0); } catch { exists = false; } assert(!exists, 'installed owned descendant survived'); }
+    assert(control.exitCode === null && control.signalCode === null, 'installed unrelated process was killed');
+    const wrongOwner = await call('cancel_execution', { owner: 'wrong-owner', id: treeRun.id });
+    assert(wrongOwner.isError, 'installed owner isolation');
+    const conflict = await call('start_execution', { ...request, args: ['-e', 'process.exit(0)'] });
+    assert(conflict.isError, 'installed idempotency conflict');
+    const completed = await lifecycle('start_execution', { owner, idempotencyKey: 'completed-output', program: process.execPath, args: ['-e', "process.stdout.write('retained-output')"] });
+    for (let i = 0; i < 240 && (await lifecycle('execution_status', { owner, id: completed.id })).state === 'running'; i++) await pause(25);
+    // Synthetic previous-boot ownership pointing at a live unrelated PID. A real
+    // fresh server must neither adopt nor signal it, nor replay the request.
+    const metaPath = join(temp, 'powershell-mcp-executions', treeRun.id, 'meta.json');
+    const meta = JSON.parse(readFileSync(metaPath, 'utf8'));
+    await client.close();
+    writeFileSync(metaPath, JSON.stringify({ ...meta, state: 'running', pid: control.pid, supervisorPid: control.pid, bootId: 'synthetic-old-boot' }));
+    client = new Client({ name: 'installed-recovery-gate', version: '1' }); await client.connect(makeTransport());
+    assert((await lifecycle('execution_status', { owner, id: completed.id })).state === 'completed', 'installed completed recovery');
+    const retained = await lifecycle('read_execution_output', { owner, id: completed.id, stream: 'stdout', offset: 0, length: 64 });
+    assert(retained.complete && Buffer.from(retained.data, 'base64').toString() === 'retained-output', 'installed recovered completed output');
+    for (const recovered of [await lifecycle('execution_status', { owner, id: treeRun.id }), await lifecycle('cancel_execution', { owner, id: treeRun.id }), await lifecycle('start_execution', request)]) assert(recovered.state === 'unknown' && recovered.id === treeRun.id, 'installed stale-ownership reconciliation/replay refusal');
+    assert(readFileSync(marker, 'utf8').trim().split('\n').length === 3 && control.exitCode === null && control.signalCode === null, 'installed recovery signalled unrelated PID or replayed intent');
+  } finally { control.kill(); }
   const secret = 'synthetic-only-secret-24';
   const denied = await call('ssh_exec', { host: '127.0.0.1', port: 1, username: 'fixture', command: 'true', password: secret, hostKeyPins: ['SHA256:invalid'] });
   assert(denied.isError && denied.structuredContent?.detail?.error === 'invalid host key pin' && !JSON.stringify(denied).includes(secret), 'installed trust/credential boundary');
@@ -76,7 +132,7 @@ try {
   assert(mixed.isError && !JSON.stringify(mixed).includes(secret), 'mixed credential boundary');
   const { Server, utils } = createRequire(join(installed, 'package.json'))('ssh2');
   const fixtures = [];
-  const makeFixture = async (forward) => {
+  const makeFixture = async (forward, authorized = true) => {
     const key = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { format: 'pem', type: 'pkcs1' }, publicKeyEncoding: { format: 'pem', type: 'spki' } }).privateKey;
     const parsed = utils.parseKey(key);
     assert(!(parsed instanceof Error), 'invalid fixture key');
@@ -84,7 +140,7 @@ try {
     const sockets = new Set(); let commands = 0;
     const server = new Server({ hostKeys: [key] }, peer => {
       sockets.add(peer); peer.on('error', () => {}); peer.on('close', () => sockets.delete(peer));
-      peer.on('authentication', ctx => ctx.accept());
+      peer.on('authentication', ctx => authorized ? ctx.accept() : ctx.reject());
       peer.on('ready', () => {
         peer.on('tcpip', (accept, reject, info) => {
           if (!forward || info.destIP !== '127.0.0.1') return reject();
@@ -99,6 +155,15 @@ try {
     const item = { host: '127.0.0.1', port: server.address().port, username: 'fixture', password: 'synthetic', hostKeyPins: [pin], get commands() { return commands; }, async close() { for (const c of sockets) c.end(); await new Promise(resolve => server.close(resolve)); } };
     fixtures.push(item); return item;
   };
+  const unreachable = createServer(); await new Promise(resolve => unreachable.listen(0, '127.0.0.1', resolve));
+  const unavailablePort = unreachable.address().port; await new Promise(resolve => unreachable.close(resolve));
+  const refused = await call('ssh_exec', { host: '127.0.0.1', port: unavailablePort, username: 'fixture', password: 'synthetic', command: 'never-dispatch', timeoutMs: 1500, hostKeyPins: ['SHA256:' + 'A'.repeat(43)] });
+  assert(refused.isError && refused.structuredContent?.terminationStatus === 'transport_error' && refused.structuredContent?.terminationCertainty === 'unknown', 'installed inaccessible remote termination certainty');
+  const unauthorized = await makeFixture(false, false);
+  try {
+    const rejected = await call('ssh_exec', { host: unauthorized.host, port: unauthorized.port, username: unauthorized.username, password: 'synthetic', command: 'never-dispatch', timeoutMs: 1500, hostKeyPins: unauthorized.hostKeyPins });
+    assert(rejected.isError && rejected.structuredContent?.terminationStatus === 'transport_error' && rejected.structuredContent?.terminationCertainty === 'unknown' && unauthorized.commands === 0, 'installed unauthorized remote termination certainty');
+  } finally { fixtures.pop(); await unauthorized.close(); }
   try {
     const dest = await makeFixture(false), middle = await makeFixture(true), first = await makeFixture(true), wrong = await makeFixture(false);
     const route = { host: dest.host, port: dest.port, username: dest.username, password: dest.password, hostKeyPins: dest.hostKeyPins, command: 'echo routed', jumps: [first, middle].map(({ host, port, username, password, hostKeyPins }) => ({ host, port, username, password, hostKeyPins })), timeoutMs: 5000 };

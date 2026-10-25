@@ -10,6 +10,8 @@ vi.mock("node:child_process", async () => {
   return { ...actual, spawn: spawnMock };
 });
 
+vi.mock("../src/owned-process.js", () => ({ spawnOwned: spawnMock }));
+
 import { runPowerShell } from "../src/powershell.js";
 import { logStore } from "../src/full-logs.js";
 

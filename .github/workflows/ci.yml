@@ -73,11 +73,20 @@ jobs:
             command -v pwsh
             pwsh -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()'
           fi
+      - name: Install pinned supervisor compiler
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: scripts/supervisor-build/global.json
+      - name: Restore and verify locked supervisor reference pack
+        run: npm run supervisor:restore
       - name: Typecheck
         run: npm run typecheck
       - name: Build
         run: npm run build
-      - name: Test with explicit discovery counts
+      - name: Require packed supervisor on PowerShell 7.0.0 / .NET Core 3.1
+        if: runner.os == 'Linux'
+        run: npm run test:supervisor-compat
+      - name: Test with explicit discovery counts and required lifecycle acceptance
         shell: bash
         run: |
           set -euo pipefail

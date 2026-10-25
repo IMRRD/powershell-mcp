@@ -49,7 +49,7 @@ export function fromProcess(r: PsResult, transport: "powershell" | "program" | "
     truncation: { truncated: r.truncated, limitBytesPerStream: r.outputLimitBytes ?? 1_048_576,
       ...(r.stdoutCapture ? { stdout: metrics(r.stdoutCapture) } : {}),
       ...(r.stderrCapture ? { stderr: metrics(r.stderrCapture) } : {}) },
-    terminationStatus: status, terminationCertainty: r.timedOut || r.cancelled ? "unknown" : r.exitCode !== null ? "root_exited" : "unknown",
+    terminationStatus: status, terminationCertainty: transport === "winrm" || r.timedOut || r.cancelled ? "unknown" : r.exitCode !== null ? "root_exited" : "unknown",
     detail: transport === "winrm" ? { shell: r.shell, localExitCode: r.exitCode, ...(r.spawnError ? { error: r.spawnError } : {}) } : { shell: r.shell, ...(r.spawnError ? { error: r.spawnError } : {}) },
   };
 }

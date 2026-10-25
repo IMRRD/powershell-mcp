@@ -1,8 +1,8 @@
-import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { spawnOwned, CANCEL_BOUND_MS, type OwnedChild } from './owned-process.js';
 import { randomBytes, createHash } from 'node:crypto';
 import { existsSync, mkdirSync, openSync, closeSync, writeSync, readSync, statSync, readFileSync, renameSync, chmodSync, lstatSync, fsyncSync, readdirSync, unlinkSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 type State = 'reserved' | 'running' | 'completed' | 'failed' | 'cancelled' | 'unknown';
@@ -52,8 +52,8 @@ function verifyRoot(path: string) {
 }
 /** Local-only durable records. A new server never adopts or kills a previous server's processes. */
 export class ExecutionStore {
-  private children = new Map<string, ChildProcess>();
-  private nonces = new Map<string, string>();
+  private children = new Map<string, OwnedChild>();
+  private cancellations = new Map<string, NodeJS.Timeout>();
   private records = new Map<string, Record>();
   constructor(readonly root: string = join(process.env.POWERSHELL_MCP_EXEC_PARENT ?? process.env.TMPDIR ?? (process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Temp') : tmpdir()), 'powershell-mcp-executions'), private readonly flushOutput: (fd: number) => void = fsyncSync, private readonly metadataCommitted: () => void = () => {}) {
     if (!existsSync(root)) createPrivateRoot(root);
@@ -130,14 +130,9 @@ export class ExecutionStore {
     const r: Record = { id, ownerHash, keyHash, requestHash, state: 'reserved', exitCode: null, stdoutBytes: 0, stderrBytes: 0, outputComplete: true, createdAt: Date.now(), updatedAt: Date.now() };
     this.records.set(id, r);
     try { this.save(r); } catch (error) { fds.forEach(closeSync); throw error; }
-    let child: ChildProcess;
-    const windows = process.platform === 'win32';
-    const helper = join(dirname(fileURLToPath(import.meta.url)), '..', windows && import.meta.url.includes('/dist/') ? 'dist' : 'assets', 'job-supervisor.ps1');
+    let child: OwnedChild;
     try {
-      if (windows && !existsSync(helper)) throw Error('Packaged supervisor absent');
-      child = windows
-        ? spawn(join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), ['-NoProfile', '-NonInteractive', '-File', helper], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
-        : spawn(program, args, { cwd, windowsHide: true, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+      child = spawnOwned(program, args, { cwd, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     }
     catch { r.state = 'unknown'; r.outputComplete = false; this.save(r); fds.forEach(closeSync); return this.status(owner, id); }
     this.children.set(id, child);
@@ -169,52 +164,19 @@ export class ExecutionStore {
       } }
       catch { r.state = 'unknown'; r.outputComplete = false; persist(); }
     };
-    const nonce = randomBytes(24).toString('hex');
-    if (windows) this.nonces.set(id, nonce);
-    let control = '';
-    let result: { event: string; cancelled?: boolean; exitCode?: number; active?: number } | undefined;
-    let started = false;
-    if (windows) {
-      child.stdin?.on('error', () => { r.state = 'unknown'; r.outputComplete = false; });
-      child.stdin?.write(JSON.stringify({ program, args, cwd, nonce }) + '\n');
-      child.stdout?.on('data', (b: Buffer) => {
-        control += b.toString('utf8');
-        if (control.length > 131072) { r.state = 'unknown'; r.outputComplete = false; control = ''; return; }
-        const lines = control.split('\n'); control = lines.pop() ?? '';
-        for (const line of lines) {
-          try {
-            if (line.length > 8192) throw Error('Oversized supervisor frame');
-            const message = JSON.parse(line);
-            if (message.nonce !== nonce) throw Error('Unauthenticated supervisor frame');
-            if (message.event === 'started' && !started && !result) started = true;
-            else if (message.event === 'chunk' && started && !result && (message.stream === 'stdout' || message.stream === 'stderr') && typeof message.data === 'string' && /^[A-Za-z0-9+/]{0,5462}={0,2}$/.test(message.data)) {
-              const bytes = Buffer.from(message.data, 'base64');
-              if (bytes.length < 1 || bytes.length > 4096 || bytes.toString('base64') !== message.data) throw Error('Invalid chunk');
-              append(message.stream === 'stdout' ? 0 : 1, bytes);
-            } else if (message.event === 'finished' && started && !result && message.active === 0 && typeof message.cancelled === 'boolean' && Number.isSafeInteger(message.exitCode)) result = message;
-            else if (message.event === 'unknown') { r.state = 'unknown'; r.outputComplete = false; }
-            else throw Error('Invalid supervisor frame');
-          } catch { r.state = 'unknown'; r.outputComplete = false; }
-        }
-      });
-      child.stderr?.resume();
-    } else {
-      child.stdout?.on('data', (b: Buffer) => append(0, b));
-      child.stderr?.on('data', (b: Buffer) => append(1, b));
-    }
+    child.stdout?.on('data', (b: Buffer) => append(0, b));
+    child.stderr?.on('data', (b: Buffer) => append(1, b));
     child.once('error', () => { r.state = 'unknown'; r.outputComplete = false; persist(); });
     child.once('close', code => {
-      if (windows && control.trim()) { r.state = 'unknown'; r.outputComplete = false; }
       // The terminal metadata may only reference flushed output bytes.
       persist();
       fds.forEach(fd => { try { closeSync(fd); } catch { /* already closed */ } });
       this.children.delete(id);
-      this.nonces.delete(id);
+      const cancelled = this.cancellations.has(id);
+      clearTimeout(this.cancellations.get(id)); this.cancellations.delete(id);
       if (r.state !== 'unknown') {
-        if (windows) {
-          if (code === 0 && result) { r.state = result.cancelled ? 'cancelled' : result.exitCode === 0 ? 'completed' : 'failed'; r.exitCode = result.exitCode ?? null; }
-          else { r.state = 'unknown'; r.outputComplete = false; }
-        } else { r.state = code === 0 ? 'completed' : 'failed'; r.exitCode = code; }
+        if (child.treeTerminated && code !== null) { r.state = cancelled ? 'cancelled' : code === 0 ? 'completed' : 'failed'; r.exitCode = code; }
+        else { r.state = 'unknown'; r.outputComplete = false; }
       }
       persist();
     });
@@ -236,13 +198,11 @@ export class ExecutionStore {
   }
   cancel(owner: string, id: string) {
     const r = this.get(owner, id), child = this.children.get(id);
-    if (r.state !== 'running' || !child || !child.pid || child.exitCode !== null) return this.status(owner, id);
-    if (process.platform === 'win32') {
-      try { child.stdin?.write(`cancel ${this.nonces.get(id)}\n`); } catch { r.state = 'unknown'; r.outputComplete = false; this.save(r); }
-      return this.status(owner, id);
-    }
-    try { process.kill(-child.pid, 'SIGKILL'); } catch { /* failed signal */ }
-    r.state = 'unknown'; r.outputComplete = false; this.save(r);
+    if (r.state !== 'running' || !child || child.exitCode !== null) return this.status(owner, id);
+    if (this.cancellations.has(id)) return this.status(owner, id);
+    const uncertain = () => { r.state = 'unknown'; r.outputComplete = false; try { this.save(r); } catch { /* retain unknown in memory */ } };
+    this.cancellations.set(id, setTimeout(uncertain, CANCEL_BOUND_MS));
+    try { child.cancel(); } catch { clearTimeout(this.cancellations.get(id)); uncertain(); }
     return this.status(owner, id);
   }
 }

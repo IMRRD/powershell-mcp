@@ -23,13 +23,15 @@
     "node": ">=18"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && node -e \"require('node:fs').copyFileSync('assets/job-supervisor.ps1','dist/job-supervisor.ps1')\"",
+    "build": "tsc -p tsconfig.json && node scripts/build-supervisors.mjs",
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "supervisor:restore": "node scripts/restore-supervisor.mjs",
+    "test:supervisor-compat": "node scripts/check-supervisor-compat.mjs"
   },
   "keywords": [
     "mcp",
