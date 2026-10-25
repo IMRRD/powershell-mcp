@@ -279,12 +279,21 @@ Scope must match the requested transport, exact host string, port (SSH/SFTP defa
 
 ## Develop
 
-Building requires PowerShell 7 (`pwsh`) as well as Node. Run `npm run build`
-before source execution or integration tests on Linux: it compiles the private
-Linux supervisor into `dist/linux-supervisor.dll`, which is included in the
-package. Invocations load that assembly instead of starting a compiler for each
-command. Build with the oldest PowerShell 7 runtime you intend to support; a
-newer .NET assembly may require a newer runtime on the consuming Linux host.
+Building requires Node and .NET SDK **8.0.423** (roll-forward is disabled in
+`scripts/supervisor-build/global.json`). Run `npm run supervisor:restore` once
+to fetch the exact Microsoft.NETCore.App.Ref **3.1.0** package from NuGet.org.
+The archive SHA512 and extracted DLL-set SHA256 are locked in
+`scripts/supervisor-build/baseline.json` and verified before compilation.
+`NUGET_PACKAGES` can select an isolated package cache.
+
+Run `npm run build` before source execution or integration tests on Linux.
+It uses the pinned Roslyn compiler with `/nostdlib+` and only the verified
+.NET Core 3.1 reference DLLs, preserving PowerShell 7.0 compatibility.
+Missing/wrong SDK or reference assets fail the build and remove any stale DLL.
+The private `dist/linux-supervisor.dll` is included in the package; consumers
+load it without starting a compiler. Linux CI and npm publication require
+`npm run test:supervisor-compat`, which packs the artifact and executes it in
+a digest-pinned PowerShell 7.0.0 container (including streams and cancellation).
 
 ```bash
 npm run build
