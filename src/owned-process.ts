@@ -45,12 +45,13 @@ export function spawnOwned(program: string, args: string[], options: SpawnOption
   queueMicrotask(() => {
     try {
       const env = options.env ?? process.env;
-      const app = executable(program, env, options.cwd?.toString());
+      const cwd = resolve(typeof options.cwd === 'string' ? options.cwd : options.cwd ? fileURLToPath(options.cwd) : process.cwd());
+      const app = executable(program, env, cwd);
       const windows = process.platform === 'win32';
       if (!windows && process.platform !== 'linux') throw Error('Owned supervision requires Windows or Linux');
       const helper = join(dirname(fileURLToPath(import.meta.url)), import.meta.url.includes('/dist/') ? '.' : '../assets', windows ? 'job-supervisor.ps1' : 'linux-supervisor.ps1');
       const engine = windows ? join(process.env.SystemRoot ?? 'C:\\Windows', 'System32/WindowsPowerShell/v1.0/powershell.exe') : executable('pwsh', env);
-      supervisor = spawn(engine, ['-NoProfile', '-NonInteractive', '-File', helper], { cwd: options.cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+      supervisor = spawn(engine, ['-NoProfile', '-NonInteractive', ...(windows ? ['-ExecutionPolicy', 'Bypass'] : []), '-File', helper], { cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
       Object.assign(output, { pid: supervisor.pid });
       let control = '', invalid = false, started = false, result: { exitCode: number; cancelled: boolean } | undefined;
       supervisor.stdin?.on('error', () => finish(null));
@@ -76,7 +77,7 @@ export function spawnOwned(program: string, args: string[], options: SpawnOption
       const send = (input?: Buffer) => {
         if (done) return;
         sent = true;
-        supervisor!.stdin!.write(JSON.stringify({ program: app, args, cwd: options.cwd, nonce, input: input?.toString('base64') }) + '\n');
+        supervisor!.stdin!.write(JSON.stringify({ program: app, args, cwd, nonce, input: input?.toString('base64') }) + '\n');
         if (requested) supervisor!.stdin!.write(`cancel ${nonce}\n`);
       };
       if (Array.isArray(options.stdio) && options.stdio[0] === 'pipe') {

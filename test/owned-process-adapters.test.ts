@@ -1,0 +1,63 @@
+import { describe, it, expect, vi } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, relative } from 'node:path';
+import { runProgram } from '../src/program.js';
+import { runPowerShell } from '../src/powershell.js';
+import { ExecutionStore } from '../src/execution-lifecycle.js';
+
+const exe = process.env.MCP_REQUIRED_ENGINE === 'powershell' ? 'powershell.exe' : 'pwsh';
+const callers = ['program', 'powershell', 'durable'] as const;
+type Caller = typeof callers[number];
+
+async function invoke(caller: Caller, base: string, cwd?: string, policy = false) {
+  const source = policy ? 'process.stdout.write(process.env.PSExecutionPolicyPreference)' : 'process.stdout.write(process.cwd())';
+  if (caller === 'program') return runProgram(process.execPath, ['-e', source], { cwd });
+  if (caller === 'powershell') return runPowerShell(policy ? '[Console]::Write($env:PSExecutionPolicyPreference)' : '[Console]::Write((Get-Location).Path)', { exe, cwd });
+  const store = new ExecutionStore(join(base, 'store'));
+  const run = store.start('fixture', 'once', process.execPath, ['-e', source], cwd);
+  try {
+    const deadline = Date.now() + 15000;
+    let status = store.status('fixture', run.id);
+    while (['reserved', 'running'].includes(status.state) && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 25));
+      status = store.status('fixture', run.id);
+    }
+    expect(status.state).toBe('completed');
+    const page = store.read('fixture', run.id, 'stdout', 0, 4096);
+    return { exitCode: status.exitCode, stdout: Buffer.from(page.data, 'base64').toString(), timedOut: false };
+  } finally { store.cancel('fixture', run.id); }
+}
+
+describe('owned process actual adapters', () => {
+  for (const caller of callers) {
+    for (const kind of ['absolute', 'relative', 'omitted'] as const) it(`${caller} preserves ${kind} cwd`, async () => {
+      const base = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), 'owned-cwd-'));
+      const work = join(base, 'work with spaces'); mkdirSync(work);
+      const cwd = kind === 'omitted' ? undefined : kind === 'absolute' ? work : relative(process.cwd(), work);
+      try {
+        const result = await invoke(caller, base, cwd);
+        expect(result.exitCode).toBe(0);
+        expect(result.timedOut).toBe(false);
+        expect(result.stdout).toBe(kind === 'omitted' ? process.cwd() : work);
+      } finally { rmSync(base, { recursive: true, force: true }); }
+    });
+
+    it.skipIf(process.platform !== 'win32')(`${caller} bypasses synthetic Restricted only in helper process and preserves parent env`, async () => {
+      const base = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), 'owned-policy-'));
+      const before = process.env.PSExecutionPolicyPreference;
+      vi.stubEnv('PSExecutionPolicyPreference', 'Restricted');
+      try {
+        const result = await invoke(caller, base, undefined, true);
+        expect(result.exitCode).toBe(0);
+        expect(result.timedOut).toBe(false);
+        expect(result.stdout).toBe('Bypass');
+        expect(process.env.PSExecutionPolicyPreference).toBe('Restricted');
+      } finally {
+        vi.unstubAllEnvs();
+        expect(process.env.PSExecutionPolicyPreference).toBe(before);
+        rmSync(base, { recursive: true, force: true });
+      }
+    });
+  }
+});

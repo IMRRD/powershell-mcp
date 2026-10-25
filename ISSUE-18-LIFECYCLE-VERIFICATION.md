@@ -114,3 +114,67 @@ Remote verified termination and remote durable supervision remain explicitly
 unsupported, not a prerequisite silently replaced with local-host exit evidence.
 No production host, service, credential store or installed MCP deployment was used
 or changed. Tests used synthetic processes, credentials and loopback endpoints only.
+
+## Correction of independent HEAD blockers (2026-10-25)
+
+Correction baseline: `f9033b62fd8d1f32c66be7fa33ff484e8f31b7d9`. One coder,
+no agents. Read `policy-baseline-evidence.txt` and `relative-cwd-evidence.txt`
+under `C:/Users/aegis/AppData/Local/hermes/cache/scratch/issue18-independent-f9033b6`,
+the supervisor source, and all direct callers (`runProgram`, `runPowerShell`,
+`ExecutionStore.start`), including WinRM's use of the PowerShell adapter.
+
+The Windows `-File` helper now uses the established process-scoped
+`-ExecutionPolicy Bypass` launch behavior. No policy setter or parent-environment
+mutation was added. Cwd is resolved once against the Node parent, then that same
+absolute directory is used for executable resolution, supervisor cwd, and child
+request cwd. Omitted cwd inherits the parent's directory. No other production
+file changed.
+
+Added 12 real-adapter regressions: absolute/relative/omitted cwd for each of native,
+PowerShell, and durable execution, plus synthetic inherited Restricted policy for
+each adapter. Policy tests assert child Bypass, parent Restricted, and restoration
+of the original parent environment. No machine/user policy is changed. Relative
+fixtures include spaces. The PowerShell policy probe reads its process environment
+directly, avoiding dependency on autoloading the Security module.
+
+Both initial pre-fix runs discovered 12 tests: 6 passed, 6 failed, 0 skipped.
+Finalized tests were also rerun against an untouched HEAD supervisor in the scratch
+baseline: each engine again passed 6 and failed exactly the three relative-cwd
+and three policy cases. Absolute/omitted controls passed. Finalized baseline and
+candidate test files have identical SHA-256
+`085ef98b225af01bf1282dc47514081ea205d8b4e649d51b1db32eac646722f2`.
+
+The following correction results supersede the earlier final counts above.
+Runtime remains Node 20.20.2, Windows PowerShell 5.1.26100.33648, pwsh 7.6.8.
+Used the previously available Node runtime at
+`C:/Users/aegis/AppData/Local/hermes/cache/scratch/issue18-acceptance/node-v20.20.2-win-x64/node.exe`
+(SHA-256 `56c1520ee33b801e8bdb92fb321cf2e98529735b6d12bd4a2a6dec0ac0bab937`).
+Typecheck and build passed. All temporary paths, execution stores, test reports,
+and packed/installed projects use the dedicated scratch directory below.
+
+| Correction check | Discovered | Passed | Failed | Skipped |
+| --- | ---: | ---: | ---: | ---: |
+| Focused five suites, Windows PowerShell | 47 | 47 | 0 | 0 |
+| Focused five suites, pwsh | 47 | 47 | 0 | 0 |
+| Canonical npm test, Windows PowerShell | 724 | 723 | 0 | 1 |
+| Canonical npm test, pwsh | 724 | 723 | 0 | 1 |
+| Isolated collector gate | 29 | 29 | 0 | 0 |
+
+The canonical skip remains the live-SSH test. Both report gates passed.
+Installed PS5.1 smoke passed 189 assertions and pwsh passed 186 assertions with
+synthetic Restricted inherited by Node/the installed MCP server; each launching
+parent retained Restricted.
+Smoke counts include polling. The packed artifact SHA-256 is
+`4955a49c612eb79818990304f3a72032fdaec3a616f9f90915fff33b3764b1fe`.
+
+Evidence root: `C:/Users/aegis/AppData/Local/hermes/cache/scratch/issue18-correction`.
+`run.ps1` records the exact environment and commands. `before-<engine>.json`
+records pre-fix runs; `baseline-final-<engine>.json` repeats finalized regressions
+against HEAD source; `focused-<engine>.json`, `full-<engine>.json`,
+`smoke-<engine>.txt`, `collector.txt`, and `artifact/` retain correction evidence.
+`build.txt` retains successful typecheck/build output. `candidate.diff` and
+`applied.diff` retain the proposed and committed correction; they are byte-identical.
+
+Parent owns independent review and exact-commit CI. Actual Linux positive execution
+remains the hosted Ubuntu gate; Windows results do not establish Linux behavior.
+No push, merge, issue closure, release, production or credential change occurred.
