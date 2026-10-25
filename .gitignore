@@ -6,6 +6,7 @@ coverage/
 *.tsbuildinfo
 *.bat
 *.ps1
+!assets/linux-supervisor.ps1
 tidy_done.txt
 
 collector/analytics/__pycache__/

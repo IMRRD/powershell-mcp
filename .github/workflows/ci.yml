@@ -77,7 +77,7 @@ jobs:
         run: npm run typecheck
       - name: Build
         run: npm run build
-      - name: Test with explicit discovery counts
+      - name: Test with explicit discovery counts and required lifecycle acceptance
         shell: bash
         run: |
           set -euo pipefail

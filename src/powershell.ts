@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawnOwned } from "./owned-process.js";
 import os from "node:os";
 import { OutputCollector, captureDiagnostic, type StreamCapture } from "./output-collector.js";
 import { PRODUCER_BOOTSTRAP, PRODUCER_PIPELINE } from "./producer-output.js";
@@ -20,9 +20,10 @@ export interface PsResult {
   stdout: string;
   stderr: string;
   exitCode: number | null;
-  /** True if the run was killed because it exceeded timeoutMs. */
+  /** The caller deadline elapsed; does not itself prove termination. */
   timedOut: boolean;
   cancelled?: boolean;
+  treeTerminated?: boolean;
   durationMs: number;
   /** The executable that was used (e.g. "pwsh" or "powershell.exe"). */
   shell: string;
@@ -220,7 +221,7 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
       const log = opts.logOutput ? logStore.create(opts.logQuotaBytes) : undefined;
       let child;
       try {
-        child = spawn(exe, buildArgs(script), {
+        child = spawnOwned(exe, buildArgs(script), {
           cwd: opts.cwd,
           env: { ...process.env, ...(opts.env ?? {}) },
           windowsHide: true, // <-- no popup window, ever
@@ -256,16 +257,7 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
           outputLimitBytes: maxOutput, truncated: stdoutCapture.truncated || stderrCapture.truncated };
       };
 
-      const terminate = () => {
-        try {
-          // Kill the whole tree on Windows; plain kill elsewhere.
-          if (os.platform() === "win32" && child.pid) {
-            spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { windowsHide: true }).on("error", () => {});
-          } else {
-            child.kill("SIGKILL");
-          }
-        } catch { /* ignore */ }
-      };
+      const terminate = () => child.cancel();
       const timer = setTimeout(() => { timedOut = true; terminate(); }, timeoutMs);
       const abort = () => { cancelled = true; terminate(); };
       opts.signal?.addEventListener("abort", abort, { once: true });
@@ -304,7 +296,8 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
         resolve({
           ...captures(),
           exitCode: code,
-          ...(log ? { log: log.finish(!timedOut && !cancelled) } : {}),
+          treeTerminated: child.treeTerminated,
+          ...(log ? { log: log.finish(!timedOut && !cancelled && child.treeTerminated !== false) } : {}),
           timedOut,
           cancelled,
           durationMs: Date.now() - started,

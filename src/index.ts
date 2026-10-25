@@ -260,7 +260,7 @@ server.registerTool("execution_status", { description: "Read a local execution s
 server.registerTool("read_execution_output", { description: "Read a bounded base64 output page, including while running.", inputSchema: {
   owner: executionOwner, id: executionId, stream: z.enum(["stdout", "stderr"]), offset: z.number().int().nonnegative(), length: z.number().int().positive().max(65536),
 } }, async ({ owner, id, stream, offset, length }) => executionReply(executionStore.read(owner, id, stream, offset, length)));
-server.registerTool("cancel_execution", { description: "Request local cancellation. Windows confirms Job Object tree termination asynchronously; failures remain unknown.", inputSchema: {
+server.registerTool("cancel_execution", { description: "Request bounded local cancellation. Windows Job Objects and Linux subreaper/pidfds confirm owned-tree termination asynchronously; failures remain unknown. Recovered runs are never signalled.", inputSchema: {
   owner: executionOwner, id: executionId,
 } }, async ({ owner, id }) => executionReply(executionStore.cancel(owner, id)));
 server.registerTool("read_output_log", { description: "Read a bounded raw byte page from an opt-in session log; base64 encoded. Handles are process-local and expire after one hour.", inputSchema: {

@@ -1,4 +1,5 @@
 $ErrorActionPreference = 'Stop'
+[Console]::InputEncoding = New-Object Text.UTF8Encoding($false)
 $source = @'
 using System;
 using System.Text;
@@ -11,7 +12,11 @@ public static class NativeJob {
  public static string Nonce;
  static readonly object OutputLock = new object();
  public static void Emit(string message) { lock(OutputLock) Console.Out.WriteLine(message); }
- public static void ReadCancel() { CancelRequested = Console.ReadLine() == "cancel " + Nonce; }
+ public static void ReadCancel() { var line = Console.ReadLine(); CancelRequested = line == null || line == "cancel " + Nonce; }
+ public static void Input(IntPtr handle, byte[] bytes) {
+  var thread = new Thread(() => { try { using(var stream = new FileStream(new SafeFileHandle(handle, true), FileAccess.Write, 4096, false)) { stream.Write(bytes,0,bytes.Length); } } catch {} });
+  thread.IsBackground=true; thread.Start();
+ }
  public static void StartRead() { var thread = new Thread(new ThreadStart(ReadCancel)); thread.IsBackground = true; thread.Start(); }
  public static Thread Drain(IntPtr handle, string stream) {
   var thread = new Thread(() => {
@@ -38,24 +43,30 @@ public static class NativeJob {
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool InitializeProcThreadAttributeList(IntPtr list,int count,int flags,ref IntPtr size);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool UpdateProcThreadAttribute(IntPtr list,uint flags,IntPtr attribute,IntPtr value,IntPtr size,IntPtr previous,IntPtr returned);
  [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
- public static bool Launch(string app,StringBuilder cmd,string cwd,IntPtr stdout,IntPtr stderr,out PROCESS_INFORMATION pi) {
+ public static bool Launch(string app,StringBuilder cmd,string cwd,IntPtr stdin,IntPtr stdout,IntPtr stderr,out PROCESS_INFORMATION pi) {
   var size = IntPtr.Zero;
-  InitializeProcThreadAttributeList(IntPtr.Zero,1,0,ref size);
+  InitializeProcThreadAttributeList(IntPtr.Zero,2,0,ref size);
   var attributes = Marshal.AllocHGlobal(size);
-  var handles = Marshal.AllocHGlobal(IntPtr.Size * 2);
+  var handles = Marshal.AllocHGlobal(IntPtr.Size * 3);
+  var policy = Marshal.AllocHGlobal(4);
   pi = new PROCESS_INFORMATION();
   bool initialized = false;
   try {
-   if (!InitializeProcThreadAttributeList(attributes,1,0,ref size)) return false;
+   if (!InitializeProcThreadAttributeList(attributes,2,0,ref size)) return false;
    initialized = true;
-   Marshal.WriteIntPtr(handles,0,stdout); Marshal.WriteIntPtr(handles,IntPtr.Size,stderr);
-   if (!UpdateProcThreadAttribute(attributes,0,new IntPtr(0x20002),handles,new IntPtr(IntPtr.Size * 2),IntPtr.Zero,IntPtr.Zero)) return false;
+   Marshal.WriteIntPtr(handles,0,stdout); Marshal.WriteIntPtr(handles,IntPtr.Size,stderr); Marshal.WriteIntPtr(handles,IntPtr.Size * 2,stdin);
+   if (!UpdateProcThreadAttribute(attributes,0,new IntPtr(0x20002),handles,new IntPtr(IntPtr.Size * 3),IntPtr.Zero,IntPtr.Zero)) return false;
+   // Desktop Bridge (Store-installed pwsh) otherwise brokers native children out
+   // of the job. Keep its process tree in the same desktop runtime environment.
+   Marshal.WriteInt32(policy,2);
+   if (!UpdateProcThreadAttribute(attributes,0,new IntPtr(0x20012),policy,new IntPtr(4),IntPtr.Zero,IntPtr.Zero)) return false;
    var info = new STARTUPINFOEX(); info.startup.cb = (uint)Marshal.SizeOf(typeof(STARTUPINFOEX)); info.attributes = attributes;
-   info.startup.dwFlags = 0x100; info.startup.hStdOutput = stdout; info.startup.hStdError = stderr;
-   return CreateProcessLimited(app,cmd,IntPtr.Zero,IntPtr.Zero,true,0x80004,IntPtr.Zero,cwd,ref info,out pi);
+   info.startup.dwFlags = 0x100; info.startup.hStdInput = stdin; info.startup.hStdOutput = stdout; info.startup.hStdError = stderr;
+   // CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED.
+   return CreateProcessLimited(app,cmd,IntPtr.Zero,IntPtr.Zero,true,0x08080004,IntPtr.Zero,cwd,ref info,out pi);
   } finally {
    if (initialized) DeleteProcThreadAttributeList(attributes);
-   Marshal.FreeHGlobal(handles); Marshal.FreeHGlobal(attributes);
+   Marshal.FreeHGlobal(policy); Marshal.FreeHGlobal(handles); Marshal.FreeHGlobal(attributes);
   }
  }
  [DllImport("kernel32.dll",SetLastError=true)] public static extern bool AssignProcessToJobObject(IntPtr job,IntPtr process);
@@ -86,7 +97,7 @@ function Active([IntPtr]$job) {
  if (-not [NativeJob]::QueryInformationJobObject($job,1,[ref]$a,[Runtime.InteropServices.Marshal]::SizeOf([type][NativeJob+BASIC_ACCOUNTING]),[ref]$n)) { throw 'Job accounting failed' }
  return $a.ActiveProcesses
 }
-$job=[IntPtr]::Zero; $pi=New-Object NativeJob+PROCESS_INFORMATION; $out=[IntPtr]::Zero; $err=[IntPtr]::Zero; $readOut=[IntPtr]::Zero; $readErr=[IntPtr]::Zero; $launched=$false
+$job=[IntPtr]::Zero; $pi=New-Object NativeJob+PROCESS_INFORMATION; $out=[IntPtr]::Zero; $err=[IntPtr]::Zero; $readOut=[IntPtr]::Zero; $readErr=[IntPtr]::Zero; $inputRead=[IntPtr]::Zero; $inputWrite=[IntPtr]::Zero; $launched=$false
 try {
  $request=[Console]::In.ReadLine() | ConvertFrom-Json
  if (-not $request -or -not $request.program -or [string]$request.nonce -cnotmatch '^[a-f0-9]{48}$' -or $request.args.Count -gt 256) { throw 'Invalid request' }
@@ -97,12 +108,16 @@ try {
  $sa=New-Object NativeJob+SECURITY_ATTRIBUTES; $sa.length=[Runtime.InteropServices.Marshal]::SizeOf([type][NativeJob+SECURITY_ATTRIBUTES]); $sa.inherit=$true
  if (-not [NativeJob]::CreatePipe([ref]$readOut,[ref]$out,[ref]$sa,0) -or -not [NativeJob]::CreatePipe([ref]$readErr,[ref]$err,[ref]$sa,0)) { throw 'Output pipe failed' }
  if (-not [NativeJob]::SetHandleInformation($readOut,1,0) -or -not [NativeJob]::SetHandleInformation($readErr,1,0)) { throw 'Output pipe inheritance failed' }
+ if (-not [NativeJob]::CreatePipe([ref]$inputRead,[ref]$inputWrite,[ref]$sa,0) -or -not [NativeJob]::SetHandleInformation($inputWrite,1,0)) { throw 'Input pipe failed' }
  $parts=@($request.program) + @($request.args); $command=New-Object Text.StringBuilder (($parts | ForEach-Object { Quote-Arg ([string]$_) }) -join ' ')
  $cwd=if ($request.cwd) { [string]$request.cwd } else { [Environment]::CurrentDirectory }
- if (-not [NativeJob]::Launch($request.program,$command,$cwd,$out,$err,[ref]$pi)) { throw "CreateProcess failed Win32=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
- if (-not [NativeJob]::AssignProcessToJobObject($job,$pi.hProcess)) { throw "AssignProcessToJobObject failed Win32=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
+ if (-not [NativeJob]::Launch($request.program,$command,$cwd,$inputRead,$out,$err,[ref]$pi)) { throw "CreateProcess failed Win32=$([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
+ if (-not [NativeJob]::AssignProcessToJobObject($job,$pi.hProcess)) { throw 'AssignProcessToJobObject failed' }
  if ([NativeJob]::ResumeThread($pi.hThread) -eq [uint32]::MaxValue) { throw 'ResumeThread failed' }
  $launched=$true
+ [void][NativeJob]::CloseHandle($inputRead); $inputRead=[IntPtr]::Zero
+ $inputBytes=if ($request.input) { [Convert]::FromBase64String([string]$request.input) } else { New-Object byte[] 0 }
+ [NativeJob]::Input($inputWrite,$inputBytes); $inputWrite=[IntPtr]::Zero
  [void][NativeJob]::CloseHandle($out); $out=[IntPtr]::Zero
  [void][NativeJob]::CloseHandle($err); $err=[IntPtr]::Zero
  [NativeJob]::Emit('{"event":"started","nonce":"' + [NativeJob]::Nonce + '"}')
@@ -110,13 +125,13 @@ try {
  [NativeJob]::StartRead()
  $cancelled=$false; $deadline=[DateTime]::UtcNow.AddSeconds(15)
  while ($true) {
-  if ([NativeJob]::CancelRequested -and -not $cancelled) { $cancelled=$true; if (-not [NativeJob]::TerminateJobObject($job,82)) { throw 'TerminateJobObject failed' }; $deadline=[DateTime]::UtcNow.AddSeconds(10) }
+  if ([NativeJob]::CancelRequested -and -not $cancelled) { $cancelled=$true; if (-not [NativeJob]::TerminateJobObject($job,82)) { throw 'TerminateJobObject failed' }; $deadline=[DateTime]::UtcNow.AddSeconds(4) }
   $active=Active $job
   if ($active -eq 0) { break }
   if ($cancelled -and [DateTime]::UtcNow -gt $deadline) { throw 'Termination not confirmed' }
   [void][NativeJob]::WaitForSingleObject($pi.hProcess,100)
  }
- $stdoutThread.Join(); $stderrThread.Join()
+ if (-not $stdoutThread.Join(500) -or -not $stderrThread.Join(500)) { throw 'Output drain not confirmed' }
  $code=[uint32]0; if (-not [NativeJob]::GetExitCodeProcess($pi.hProcess,[ref]$code)) { throw 'Exit code unavailable' }
  [NativeJob]::Emit((@{event='finished';nonce=[NativeJob]::Nonce;cancelled=$cancelled;exitCode=[int64]$code;active=0} | ConvertTo-Json -Compress))
 } catch {
@@ -131,4 +146,6 @@ try {
  if ($err -ne [IntPtr]::Zero) { [void][NativeJob]::CloseHandle($err) }
  if ($readOut -ne [IntPtr]::Zero) { [void][NativeJob]::CloseHandle($readOut) }
  if ($readErr -ne [IntPtr]::Zero) { [void][NativeJob]::CloseHandle($readErr) }
+ if ($inputRead -ne [IntPtr]::Zero) { [void][NativeJob]::CloseHandle($inputRead) }
+ if ($inputWrite -ne [IntPtr]::Zero) { [void][NativeJob]::CloseHandle($inputWrite) }
 }
