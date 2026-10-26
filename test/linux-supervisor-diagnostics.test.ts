@@ -4,6 +4,31 @@ import { fileURLToPath } from 'node:url';
 import { expect, it } from 'vitest';
 
 const assembly = fileURLToPath(new URL('../dist/linux-supervisor.dll', import.meta.url));
+it('treats only ESRCH proc read races as disappeared processes and keeps other inspection failures closed', () => {
+  const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', `
+    Add-Type -Path $env:MCP_TEST_SUPERVISOR
+    $flags = [Reflection.BindingFlags]'NonPublic,Static'
+    $map = [LinuxJob].GetMethod('ProcFailure',$flags)
+    if (!$map) { throw 'Missing proc read race handling' }
+    $vanished = $map.Invoke($null,@([IO.IOException]::new('SECRET /proc/path',3)))
+    if ($vanished -isnot [IO.FileNotFoundException]) { throw 'ESRCH was not recognized' }
+    foreach ($failure in @(
+      [IO.IOException]::new('SECRET access denied',13),
+      [IO.IOException]::new('SECRET I/O failure',5),
+      [IO.IOException]::new('SECRET generic failure'),
+      [UnauthorizedAccessException]::new('SECRET permission'),
+      [FormatException]::new('SECRET malformed stat')
+    )) {
+      $mapped = $map.Invoke($null,@($failure))
+      if ($mapped.GetType().GetField('Reason').GetValue($mapped) -ne 'proc_inspection_failed') { throw 'Inspection guard lost' }
+    }
+    [Console]::WriteLine('ESRCH vanished; other inspection failures remain unknown')
+  `], { env: { ...process.env, MCP_TEST_SUPERVISOR: assembly }, encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stderr).toBe('');
+  expect(result.stdout.trim()).toBe('ESRCH vanished; other inspection failures remain unknown');
+  expect(result.stdout).not.toContain('SECRET');
+});
 // Exercise the shipped assembly on Windows too. Only synthetic failures; no
 // Linux emulation or changes to supervisor admission/termination behavior.
 for (const stream of ['stdout', 'stderr']) it(`emits a fixed ${stream} drain reason without exception details`, () => {

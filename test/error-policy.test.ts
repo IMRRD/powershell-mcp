@@ -1,6 +1,5 @@
 import { selectIntegrationEngines } from "./integration-engine.js";
 import { describe, it, expect } from "vitest";
-import { spawnSync } from "node:child_process";
 import { runPowerShell } from "../src/powershell.js";
 import { fromProcess } from "../src/result.js";
 
@@ -25,9 +24,18 @@ for (const exe of engines) describe(`error policy (${exe})`, () => {
       expect(JSON.stringify(result.errorRecords)).not.toContain("function broken(");
     }
   }, 20000);
-  it("does not confuse handled errors, stderr, or an earlier native exit with strict failure", async () => {
-    expect((await run("try { throw 'handled' } catch { Write-Output 'recovered' }")).errorRecords).toEqual([]);
-    expect((await run("[Console]::Error.WriteLine('diagnostic'); Write-Output 'ok'")).errorRecords).toEqual([]);
+  // Each case starts a supervisor and a real host that compiles the producer.
+  // Give each invocation the existing test budget instead of sharing it across three hosts.
+  it.each([
+    ["handled errors", "try { throw 'handled' } catch { Write-Output 'recovered' }", "recovered"],
+    ["console stderr", "[Console]::Error.WriteLine('diagnostic'); Write-Output 'ok'", "ok"],
+  ])("does not confuse %s with strict failure", async (_kind, script, output) => {
+    const result = await run(script);
+    expect(result.stdout).toContain(output);
+    expect(result.scriptError).toBe(false);
+    expect(result.errorRecords).toEqual([]);
+  }, 20000);
+  it("does not confuse an earlier native exit with strict failure", async () => {
     const native = await run(`& ${nativeExe} -e 'process.exit(7)'; Write-Output 'later cmdlet'`);
     expect(native.stdout).toContain("later cmdlet");
     expect(native.errorRecords).toEqual([]);
