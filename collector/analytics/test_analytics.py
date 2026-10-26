@@ -16,6 +16,89 @@ ROOT = pathlib.Path(__file__).parent
 
 @unittest.skipUnless(DSN, 'ANALYTICS_TEST_DSN required for disposable PostgreSQL integration')
 class AnalyticsTest(unittest.TestCase):
+    def test_digest_derivable_other_installations_complement(self):
+        import datetime as dt
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('digest_complement', ROOT / 'operations' / 'weekly_digest.py')
+        digest = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(digest)
+        now = dt.datetime.now(dt.timezone.utc)
+        start, end = digest.closed_week(now)
+        def row(host, event, at=start, **kw):
+            stamp = at.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+            return dict(hostId=host, event=event, ts=stamp, _receivedAt=stamp, **kw)
+        self.append([row('synthetic-active-0', 'startup', start + dt.timedelta(hours=i)) for i in range(168)] +
+                    [row('synthetic-active-' + str(i), 'tool_counts', counts={'ssh_exec': 1}) for i in range(11)] +
+                    [row('synthetic-other', 'probe') for i in range(10)])
+        self.assertEqual(ingest(self.db, self.source, self.classes), 189)
+        with self.db.transaction():
+            data = digest.aggregates(self.db, start, end)
+        self.assertEqual(data['adoption'], [('unknown_origin', 12, 11, 0)])
+        self.assertTrue(all(n == 0 or n >= 10 for key in ('adoption', 'events', 'tools', 'axes')
+                            for r in data[key] for n in (r[1:] if key == 'adoption' else r[-1:])))
+        for body in digest.report(data, start, end, dt.datetime.now(dt.timezone.utc)):
+            self.assertIn('withheld', body)
+            self.assertNotIn('ssh_exec', body)
+            self.assertNotIn('<table', body)
+        audience = dict(sender='fixture@example.invalid', recipient='isak@ialogics.com', approved_recipients=['isak@ialogics.com'])
+        for body in digest.report(data, start, end, dt.datetime.now(dt.timezone.utc), audience | {'private_small_counts': audience}):
+            self.assertIn('Installation proxies', body)
+            self.assertNotIn('withheld', body)
+
+    def test_digest_real_restricted_snapshot_and_missing_metrics(self):
+        import datetime as dt
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('digest_db_proof', ROOT / 'operations' / 'weekly_digest.py')
+        digest = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(digest)
+        now = dt.datetime.now(dt.timezone.utc)
+        start, end = digest.closed_week(now)
+        def stamp(t): return t.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        base = dict(event='startup', hostId='synthetic', version='0.7.0', os='win32')
+        self.append([dict(base, ts=stamp(start + dt.timedelta(hours=i)),
+                          _receivedAt=stamp(start + dt.timedelta(hours=i))) for i in range(168)])
+        self.append([dict(base, event='tool_counts', ts=stamp(start), _receivedAt=stamp(start), counts={'ssh_exec': 3}),
+                     dict(base, event='tool_metrics', schemaVersion=2, ts=stamp(start), _receivedAt=stamp(start),
+                          metrics={'ssh_exec': {'outcomes': {'success': 1, 'timeout': 1},
+                                               'durations': {'gte10000': 2}, 'features': {'remote': 2}}})])
+        self.assertEqual(ingest(self.db, self.source, self.classes), 170)
+        role = 'digest_' + os.urandom(8).hex()
+        fixture_password = os.urandom(16).hex()
+        self.db.execute(psycopg.sql.SQL('CREATE ROLE {} LOGIN PASSWORD {}').format(
+            psycopg.sql.Identifier(role), psycopg.sql.Literal(fixture_password)))
+        try:
+            self.db.execute(f'GRANT USAGE ON SCHEMA {self.schema} TO {role}')
+            self.db.execute(f'GRANT SELECT ON {self.schema}.dashboard_events, {self.schema}.dashboard_tools, {self.schema}.dashboard_metric_axes TO {role}')
+            self.db.execute(f'GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA {self.schema} TO {role}')
+            options = f'-c search_path={self.schema}'
+            login = dict(user=role, password=fixture_password, options=options)
+            with psycopg.connect(DSN, **login) as reader:
+                data = digest.aggregates(reader, start, end)
+            audience = dict(sender='fixture@example.invalid', recipient='isak@ialogics.com', approved_recipients=['isak@ialogics.com'])
+            text, html = digest.report(data, start, end, dt.datetime.now(dt.timezone.utc), audience | {'private_small_counts': audience})
+            for body in (text, html):
+                self.assertIn('Legacy count stream: 3', body)
+                self.assertIn('Metric stream: 2', body)
+                self.assertIn('1/2 (50.0%)', body)
+                self.assertNotIn('synthetic', body)
+            with psycopg.connect(DSN, **login, autocommit=True) as reader:
+                self.assertEqual(reader.execute('SELECT current_user').fetchone()[0], role)
+                self.assertEqual(reader.execute('SELECT session_user').fetchone()[0], role)
+                for sql in ('SELECT * FROM telemetry_event', "INSERT INTO telemetry_event(event_key) VALUES ('forbidden')"):
+                    with self.assertRaises(psycopg.errors.InsufficientPrivilege): reader.execute(sql)
+            self.db.execute('DELETE FROM telemetry_metric_axis')
+            self.db.execute("DELETE FROM telemetry_tool WHERE stream='metrics'")
+            with psycopg.connect(DSN, **login) as reader:
+                data = digest.aggregates(reader, start, end)
+            self.assertIn('Outcomes unavailable', digest.render(data, start, end, dt.datetime.now(dt.timezone.utc), audience | {'private_small_counts': audience}))
+            self.db.execute("UPDATE telemetry_checkpoint SET imported_at=now()-interval '3 hours'")
+            with psycopg.connect(DSN, **login) as reader:
+                data = digest.aggregates(reader, start, end)
+            with self.assertRaisesRegex(ValueError, 'stale'): digest.render(data, start, end, dt.datetime.now(dt.timezone.utc))
+        finally:
+            self.db.execute(f'DROP OWNED BY {role}')
+            self.db.execute(f'DROP ROLE {role}')
+
     def setUp(self):
         self.db = psycopg.connect(DSN, autocommit=True)
         self.schema = 'test_analytics_' + os.urandom(8).hex()

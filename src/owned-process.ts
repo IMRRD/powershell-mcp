@@ -19,13 +19,23 @@ function executable(name: string, env: NodeJS.ProcessEnv, cwd = process.cwd()): 
   return found;
 }
 
-export interface OwnedChild extends ChildProcess { cancel(): void; treeTerminated?: boolean; }
+const supervisorReasons = [
+  'proc_inspection_failed', 'pidfd_open_failed', 'ownership_changed', 'pidfd_signal_failed',
+  'stdout_drain_failed', 'stderr_drain_failed', 'subreaper_unavailable',
+  'termination_unconfirmed', 'drain_unconfirmed', 'supervisor_exception',
+] as const;
+export type SupervisorReason = typeof supervisorReasons[number] | 'supervisor_unknown' | 'stdin_error'
+  | 'cancel_bound' | 'cancel_write_failed' | 'supervisor_error' | 'control_limit' | 'invalid_frame'
+  | 'supervisor_exit' | 'incomplete_completion';
+export interface OwnedChild extends ChildProcess { cancel(): void; treeTerminated?: boolean; supervisorReason?: SupervisorReason; }
 export function spawnOwned(program: string, args: string[], options: SpawnOptions = {}): OwnedChild {
   const output = new EventEmitter() as OwnedChild;
   const stdout = new PassThrough(), stderr = new PassThrough(), stdin = new PassThrough();
   Object.assign(output, { stdout, stderr, stdin, exitCode: null, signalCode: null, treeTerminated: false });
   let supervisor: ChildProcess | undefined;
   let done = false, requested = false, sent = false, timer: NodeJS.Timeout | undefined;
+  // First failure only, from a finite vocabulary. Never retain raw frames or stderr.
+  const diagnose = (reason: SupervisorReason) => { output.supervisorReason ??= reason; };
   const finish = (code: number | null, proven = false) => {
     if (done) return; done = true; clearTimeout(timer);
     Object.assign(output, { exitCode: code, treeTerminated: proven });
@@ -37,9 +47,9 @@ export function spawnOwned(program: string, args: string[], options: SpawnOption
   const nonce = randomBytes(24).toString('hex');
   output.cancel = () => {
     if (done || requested) return; requested = true;
-    timer = setTimeout(() => finish(null), CANCEL_BOUND_MS);
+    timer = setTimeout(() => { diagnose('cancel_bound'); finish(null); }, CANCEL_BOUND_MS);
     try { if (sent) supervisor?.stdin?.write(`cancel ${nonce}\n`); }
-    catch { finish(null); }
+    catch { diagnose('cancel_write_failed'); finish(null); }
   };
   output.kill = () => { output.cancel(); return true; };
   queueMicrotask(() => {
@@ -55,12 +65,12 @@ export function spawnOwned(program: string, args: string[], options: SpawnOption
       supervisor = spawn(engine, ['-NoProfile', '-NonInteractive', ...(windows ? ['-ExecutionPolicy', 'Bypass'] : []), '-File', helper, ...(!windows ? ['-AssemblyPath', assembly] : [])], { cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
       Object.assign(output, { pid: supervisor.pid });
       let control = '', invalid = false, started = false, result: { exitCode: number; cancelled: boolean } | undefined;
-      supervisor.stdin?.on('error', () => finish(null));
+      supervisor.stdin?.on('error', () => { diagnose('stdin_error'); finish(null); });
       supervisor.stderr?.resume();
-      supervisor.once('error', error => { output.emit('error', error); finish(null); });
+      supervisor.once('error', error => { diagnose('supervisor_error'); output.emit('error', error); finish(null); });
       supervisor.stdout?.on('data', (bytes: Buffer) => {
         control += bytes.toString('utf8');
-        if (control.length > 131072) { invalid = true; control = ''; output.cancel(); return; }
+        if (control.length > 131072) { diagnose('control_limit'); invalid = true; control = ''; output.cancel(); return; }
         const lines = control.split('\n'); control = lines.pop() ?? '';
         for (const line of lines) try {
           const m = JSON.parse(line);
@@ -71,10 +81,17 @@ export function spawnOwned(program: string, args: string[], options: SpawnOption
             if (!b.length || b.length > 4096 || b.toString('base64') !== m.data) throw Error('Invalid chunk');
             (m.stream === 'stdout' ? stdout : stderr).write(b);
           } else if (m.event === 'finished' && started && !result && m.active === 0 && Number.isSafeInteger(m.exitCode) && typeof m.cancelled === 'boolean') result = m;
-          else throw Error('Supervisor did not prove termination');
-        } catch { invalid = true; output.cancel(); }
+          else {
+            if (m.event === 'unknown') diagnose(supervisorReasons.includes(m.reason) ? m.reason : 'supervisor_unknown');
+            throw Error('Supervisor did not prove termination');
+          }
+        } catch { diagnose('invalid_frame'); invalid = true; output.cancel(); }
       });
-      supervisor.once('close', code => finish(!invalid && !control.trim() && code === 0 && result ? result.exitCode : null, !invalid && !control.trim() && code === 0 && !!result));
+      supervisor.once('close', code => {
+        if (code !== 0) diagnose('supervisor_exit');
+        else if (invalid || control.trim() || !result) diagnose('incomplete_completion');
+        finish(!invalid && !control.trim() && code === 0 && result ? result.exitCode : null, !invalid && !control.trim() && code === 0 && !!result);
+      });
       const send = (input?: Buffer) => {
         if (done) return;
         sent = true;

@@ -1,4 +1,4 @@
-import { spawnOwned } from "./owned-process.js";
+import { spawnOwned, type SupervisorReason } from "./owned-process.js";
 import os from "node:os";
 import { OutputCollector, captureDiagnostic, type StreamCapture } from "./output-collector.js";
 import { PRODUCER_BOOTSTRAP, PRODUCER_PIPELINE } from "./producer-output.js";
@@ -24,6 +24,8 @@ export interface PsResult {
   timedOut: boolean;
   cancelled?: boolean;
   treeTerminated?: boolean;
+  /** Fixed, bounded supervisor failure code; never child output or exception text. */
+  supervisorReason?: SupervisorReason;
   durationMs: number;
   /** The executable that was used (e.g. "pwsh" or "powershell.exe"). */
   shell: string;
@@ -299,6 +301,7 @@ export function runPowerShell(script: string, opts: RunOptions = {}): Promise<Ps
           ...captures(),
           exitCode: code,
           treeTerminated: child.treeTerminated,
+          ...(child.supervisorReason ? { supervisorReason: child.supervisorReason } : {}),
           ...(log ? { log: log.finish(!timedOut && !cancelled && child.treeTerminated !== false) } : {}),
           timedOut,
           cancelled,

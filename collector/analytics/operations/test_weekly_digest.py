@@ -14,7 +14,7 @@ START, END = w.closed_week(NOW)
 
 
 def fixture():
-    return dict(adoption=[('unknown_origin', 12, 11, 0)], events=[('unknown_origin', 'startup', 12)],
+    return dict(adoption=[('unknown_origin', 12, 12, 0)], events=[('unknown_origin', 'startup', 12)],
                 tools=[('unknown_origin', 'counts', 'ssh_exec', 13), ('unknown_origin', 'metrics', 'ssh_exec', 13)],
                 axes=[('unknown_origin', 'ssh_exec', 'outcomes', 'success', 13)],
                 quality=[('valid', 'valid', 2)], unknown_receipt_count=0,
@@ -74,7 +74,7 @@ class DigestTests(unittest.TestCase):
         self.assertNotIn('WHERE received_at >=', conn.cur.sql[6])
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / 'config.json'
-            config.write_text(json.dumps(dict(enabled=True, recipient='private@example.invalid', approved_recipients=['private@example.invalid'], host='localhost', port=587, sender='sender@example.invalid', username='sender')))
+            config.write_text(json.dumps(dict(enabled=True, recipient='isak@ialogics.com', approved_recipients=['isak@ialogics.com'], host='mail.ialogics.co.uk', port=587, sender='sender@example.invalid', username='sender')))
             state = Path(tmp) / 'state'
             with self.assertRaisesRegex(ValueError, 'unassignable receipt'):
                 w.main(['--config', str(config), '--state-dir', str(state)], NOW,
@@ -90,8 +90,8 @@ class DigestTests(unittest.TestCase):
     def test_render_separates_streams_and_proxies(self):
         body = w.render(fixture(), START, END, NOW)
         self.assertIn('Installation IDs are proxies, not people', body)
-        self.assertIn('counts unknown_origin/ssh_exec: 13', body)
-        self.assertIn('metrics unknown_origin/ssh_exec: 13', body)
+        self.assertIn('Legacy count stream: 13 recorded calls', body)
+        self.assertIn('Metric stream: 13 recorded calls', body)
         self.assertNotIn('unique calls=6', body)
     def test_health_failures_and_privacy(self):
         for mutation in ('no_receipts', 'missing_hour', 'stale', 'quality', 'unsafe_tool'):
@@ -114,7 +114,7 @@ class DigestTests(unittest.TestCase):
             args = ['--config', str(config), '--state-dir', str(state)]
             self.assertIn('Private telemetry digest', w.main(args + ['--preview'], NOW, connect))
             with self.assertRaisesRegex(ValueError, 'disabled'): w.main(args, NOW, connect)
-            config.write_text(json.dumps(dict(enabled=True, recipient='private@example.invalid', approved_recipients=['private@example.invalid'], host='localhost', port=587, sender='sender@example.invalid', username='sender')))
+            config.write_text(json.dumps(dict(enabled=True, recipient='isak@ialogics.com', approved_recipients=['isak@ialogics.com'], host='mail.ialogics.co.uk', port=587, sender='sender@example.invalid', username='sender')))
             def uncertain(msg, recipient, config):
                 sent.append((msg, recipient))
                 raise TimeoutError('ambiguous SMTP acceptance')
@@ -126,17 +126,32 @@ class DigestTests(unittest.TestCase):
         f = fixture()
         f['adoption'] = [('internal', 1, 1, 0), ('test', 12, 11, 1)]
         f['events'] = [('internal', 'startup', 1), ('test', 'startup', 12)]
-        f['tools'] = [('internal', 'counts', 'ssh_exec', 1), ('test', 'counts', 'ssh_exec', 12)]
+        f['tools'] = [('internal', 'counts', 'ssh_exec', 1), ('test', 'counts', 'ssh_exec', 12), ('internal', 'metrics', 'ssh_exec', 1), ('test', 'metrics', 'ssh_exec', 12)]
         f['axes'] = [('internal', 'ssh_exec', 'outcomes', 'success', 1), ('test', 'ssh_exec', 'outcomes', 'success', 12)]
-        body = w.render(f, START, END, NOW)
-        self.assertNotIn('internal: observed installations=1', body)
-        self.assertNotIn('test: observed installations=12', body)
-        self.assertNotIn('internal/startup: 1', body)
-        self.assertNotIn('test/startup: 12', body)
-        self.assertNotIn('internal/ssh_exec: 1', body)
-        self.assertNotIn('test/ssh_exec: 12', body)
-        self.assertNotIn('internal/ssh_exec/outcomes/success: 1', body)
-        self.assertNotIn('test/ssh_exec/outcomes/success: 12', body)
+        for body in (w.render(f, START, END, NOW), w.render_html(f, START, END, NOW)):
+            self.assertIn('withheld', body)
+            self.assertNotIn('ssh_exec', body)
+            self.assertNotIn('internal |', body)
+            self.assertNotIn('test |', body)
+            self.assertNotIn('recorded calls', body)
+            self.assertNotIn('<table', body)
+
+    def test_derived_installation_complements_default_and_private_optin(self):
+        audience = dict(sender='sender@example.invalid', recipient=w.RECIPIENT,
+                        approved_recipients=[w.RECIPIENT])
+        for observed, active, startup in ((12, 11, 0), (29, 10, 10), (21, 0, 20)):
+            f = fixture() | {'adoption': [('unknown_origin', observed, active, startup)]}
+            for body in w.report(f, START, END, NOW):
+                self.assertIn('withheld', body)
+                self.assertNotIn('recorded calls', body)
+                self.assertNotIn('ssh_exec', body)
+                self.assertNotIn('<table', body)
+            for body in w.report(f, START, END, NOW, audience | {'private_small_counts': audience}):
+                self.assertNotIn('withheld', body)
+                self.assertIn('Installation proxies', body)
+        for observed, active, startup in ((20, 10, 10), (30, 10, 10)):
+            for body in w.report(fixture() | {'adoption': [('unknown_origin', observed, active, startup)]}, START, END, NOW):
+                self.assertNotIn('withheld', body)
 
     def test_old_invalid_event_does_not_poison_clean_receipt_week(self):
         f = fixture()
@@ -156,7 +171,7 @@ class DigestTests(unittest.TestCase):
             config = Path(tmp) / 'config.json'
             state = Path(tmp) / 'state'
             args = ['--config', str(config), '--state-dir', str(state)]
-            base = dict(enabled=True, recipient='private@example.invalid', approved_recipients=['approved@example.invalid'], host='localhost', port=587, sender='sender@example.invalid', username='sender')
+            base = dict(enabled=True, recipient='isak@ialogics.com', approved_recipients=['approved@example.invalid'], host='mail.ialogics.co.uk', port=587, sender='sender@example.invalid', username='sender')
             for change in ({}, {'recipient': 'approved@example.invalid\nBcc: other@example.invalid', 'approved_recipients': ['approved@example.invalid\nBcc: other@example.invalid']}, {'recipient': 'approved@example.invalid', 'sender': 'sender@example.invalid\nBcc: other@example.invalid'}):
                 config.write_text(json.dumps(base | change))
                 with self.assertRaises(ValueError): w.main(args, NOW, connect, lambda *a: self.fail('delivery'))

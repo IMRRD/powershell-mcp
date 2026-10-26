@@ -99,3 +99,11 @@ jobs:
         run: node scripts/check-collector-tests.mjs
       - name: Pack, install and exercise the actual artifact over MCP stdio
         run: node scripts/installed-smoke.mjs
+      - name: Retain failing test evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-evidence-${{ matrix.os }}-${{ matrix.engine }}
+          path: vitest-report.json
+          if-no-files-found: warn
+          retention-days: 7

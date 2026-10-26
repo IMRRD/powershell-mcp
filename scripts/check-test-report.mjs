@@ -11,6 +11,11 @@ for (const required of ['lifecycle-acceptance.test.ts', 'owned-process.test.ts',
 for (const title of ['program', 'powershell', 'durable'].map(c => `lifecycle acceptance ${c} cancels parent child grandchild within a bound and preserves unrelated process`)) {
   if (!report.testResults.flatMap(s => s.assertionResults ?? []).some(t => t.fullName === title && t.status === 'passed')) throw Error(`Missing owned-tree proof: ${title}`);
 }
+if (process.platform === 'linux') {
+  const suite = report.testResults.find(t => t.name.replaceAll('\\', '/').endsWith('/linux-supervisor-eof.test.ts'));
+  if (suite?.assertionResults?.length !== 4 || !suite.assertionResults.every(t => t.status === 'passed'))
+    throw Error('Missing repeated Linux native echo/EOF completion proof (four lanes, 64 invocations)');
+}
 if (process.env.MCP_REQUIRED_ENGINE === 'powershell' && process.platform !== 'win32') throw new Error('Windows PowerShell requires Windows');
 if (process.env.MCP_REQUIRED_ENGINE) {
   const proof = report.testResults.flatMap(s => s.assertionResults ?? []).find(t => t.fullName === 'runPowerShell (integration) executes required engine and verifies child version');
