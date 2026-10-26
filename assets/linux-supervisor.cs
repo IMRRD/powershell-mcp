@@ -30,7 +30,13 @@ public static class LinuxJob {
   var parts=s.Substring(s.LastIndexOf(')')+2).Split(' ');
   return int.Parse(parts[1]);
   } catch(FileNotFoundException) { throw; } catch(DirectoryNotFoundException) { throw; }
-  catch { throw new Failure("proc_inspection_failed"); }
+  catch(Exception error) { throw ProcFailure(error); }
+ }
+ static Exception ProcFailure(Exception error) {
+  // A process can vanish after /proc enumeration or open but before read(2).
+  // .NET exposes Linux ESRCH as IOException with the raw errno, not ENOENT.
+  if(error is IOException && error.HResult==3) return new FileNotFoundException();
+  return new Failure("proc_inspection_failed");
  }
  static List<int> Children() {
   try {

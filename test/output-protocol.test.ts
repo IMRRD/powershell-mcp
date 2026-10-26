@@ -18,7 +18,7 @@ describe("built stdio PowerShell capture", () => {
       script: "'😀' * 10000", errorPolicy: "strict", maxOutputBytes: 5, tail: true,
     } }, undefined, { timeout: 15000 });
     const data = response.structuredContent as Record<string, any>;
-    expect(response.isError).toBe(false);
+    expect(response.isError, JSON.stringify(response)).toBe(false);
     expect(data.terminationStatus).toBe("completed");
     expect(data.truncation).toMatchObject({ limitBytesPerStream: 5, truncated: true,
       stdout: { truncated: true } });
