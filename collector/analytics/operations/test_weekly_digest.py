@@ -14,7 +14,7 @@ START, END = w.closed_week(NOW)
 
 
 def fixture():
-    return dict(adoption=[('unknown_origin', 12, 11, 0)], events=[('unknown_origin', 'startup', 12)],
+    return dict(adoption=[('unknown_origin', 12, 12, 0)], events=[('unknown_origin', 'startup', 12)],
                 tools=[('unknown_origin', 'counts', 'ssh_exec', 13), ('unknown_origin', 'metrics', 'ssh_exec', 13)],
                 axes=[('unknown_origin', 'ssh_exec', 'outcomes', 'success', 13)],
                 quality=[('valid', 'valid', 2)], unknown_receipt_count=0,
@@ -135,6 +135,23 @@ class DigestTests(unittest.TestCase):
             self.assertNotIn('test |', body)
             self.assertNotIn('recorded calls', body)
             self.assertNotIn('<table', body)
+
+    def test_derived_installation_complements_default_and_private_optin(self):
+        audience = dict(sender='sender@example.invalid', recipient=w.RECIPIENT,
+                        approved_recipients=[w.RECIPIENT])
+        for observed, active, startup in ((12, 11, 0), (29, 10, 10), (21, 0, 20)):
+            f = fixture() | {'adoption': [('unknown_origin', observed, active, startup)]}
+            for body in w.report(f, START, END, NOW):
+                self.assertIn('withheld', body)
+                self.assertNotIn('recorded calls', body)
+                self.assertNotIn('ssh_exec', body)
+                self.assertNotIn('<table', body)
+            for body in w.report(f, START, END, NOW, audience | {'private_small_counts': audience}):
+                self.assertNotIn('withheld', body)
+                self.assertIn('Installation proxies', body)
+        for observed, active, startup in ((20, 10, 10), (30, 10, 10)):
+            for body in w.report(fixture() | {'adoption': [('unknown_origin', observed, active, startup)]}, START, END, NOW):
+                self.assertNotIn('withheld', body)
 
     def test_old_invalid_event_does_not_poison_clean_receipt_week(self):
         f = fixture()

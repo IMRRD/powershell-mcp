@@ -127,6 +127,11 @@ def report(data, start, end, now, config=None):
         seen.add(origin)
         if active > observed or startup > observed or active + startup > observed:
             raise ValueError('inconsistent installation aggregates')
+        # Active and startup-only are disjoint subsets. Published proxies also
+        # disclose their complements, including installations in neither subset.
+        if not exact and any(0 < n < 10 for n in
+                             (observed - active, observed - startup, observed - active - startup)):
+            small = True
     for key, prefix in (('events', 2), ('tools', 3)):
         dimensions = [tuple(row[:prefix]) for row in data[key]]
         if len(dimensions) != len(set(dimensions)):
@@ -171,14 +176,24 @@ def report(data, start, end, now, config=None):
         note('Failures include nonzero, error and timeout; cancelled and unknown are separate. Outcomes unavailable means reliability cannot be inferred, including weeks before instrumentation. Slow buckets are observations, not averages or a diagnosed root cause.')
         priorities = []
         for o,t in metrics:
-            outcomes = distributions.get((o,t,'outcomes'), {})
-            durations = distributions.get((o,t,'durations'), {})
-            failures = sum(outcomes.get(b,0) for b in ('nonzero','error','timeout'))
-            slow = durations.get('gte10000',0)
+            outcomes = distributions.get((o,t,'outcomes'))
+            durations = distributions.get((o,t,'durations'))
+            failures = sum(outcomes.get(b,0) for b in ('nonzero','error','timeout')) if outcomes is not None else None
+            slow = durations.get('gte10000',0) if durations is not None else None
             if failures or slow: priorities.append((o,t,failures,slow))
         if priorities:
-            table('Investigate observed failures and slow operations', ['Origin','Tool','Recorded failures','10 seconds or more'],
-                  sorted(priorities, key=lambda r: (-r[2],-r[3],r[0],r[1])))
+            # Rank only rows with comparable evidence; absent axes never become
+            # zeros or participate as zeros in a combined ranking.
+            for missing, label, columns in (
+                    (None, 'ranked by recorded failures, then slow operations', (2, 3)),
+                    (3, 'ranked by recorded failures; duration axis unavailable', (2,)),
+                    (2, 'ranked by slow operations; outcomes axis unavailable', (3,))):
+                rows = [r for r in priorities if (2 if r[2] is None else 3 if r[3] is None else None) == missing]
+                if rows:
+                    ranked = sorted(rows, key=lambda r: tuple(-r[c] for c in columns) + (r[0], r[1]))
+                    table('Investigate observed failures and slow operations — ' + label,
+                          ['Origin','Tool','Recorded failures','10 seconds or more'],
+                          [tuple('unavailable' if v is None else v for v in r) for r in ranked])
         else:
             note('No investigation priority established from available failure and slow-bucket evidence.')
         table('Installation proxies', ['Origin','Observed','Active','Startup only'], sorted(data['adoption']))

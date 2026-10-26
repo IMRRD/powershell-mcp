@@ -149,6 +149,21 @@ with patch.object(w.smtplib,'SMTP',side_effect=local), patch.object(w.ssl,'creat
         self.assertIn('<table', html)
         self.assertEqual(str(msg['To']), 'isak@ialogics.com')
 
+    def test_original_oct12_19_intent_key_and_87_bytes_block_replay(self):
+        name = '81662c20e8dbb66c17ada57f133a7bda93b901af9eda8c50a7fecf018f7675db.attempted'
+        payload = b'submission attempted; inspect transport and recipient before any manual reconciliation\n'
+        self.assertEqual(w.intent_name(START, END, w.RECIPIENT), name)
+        self.assertEqual(len(payload), 87)
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)/'state'
+            state.mkdir()
+            claim = state/name
+            claim.write_bytes(payload)
+            with self.assertRaises(FileExistsError):
+                self.run_digest(tmp, sink=lambda *a: self.fail('SMTP on original-week replay'))
+            self.assertEqual(claim.read_bytes(), payload)
+            self.assertEqual(list(state.iterdir()), [claim])
+
     def test_preview_optin_is_audience_bound(self):
         for change in ({'sender': 'other@example.invalid'}, {'recipient': 'other@example.invalid'},
                        {'approved_recipients': ['isak@ialogics.com', 'other@example.invalid']}):
@@ -157,6 +172,30 @@ with patch.object(w.smtplib,'SMTP',side_effect=local), patch.object(w.ssl,'creat
                     with self.assertRaisesRegex(ValueError, 'audience'):
                         self.run_digest(tmp, cfg=config() | change, args=[preview])
                 self.assertFalse((Path(tmp)/'state').exists())
+
+    def test_investigation_missing_axes_in_mime_and_evidence_rankings(self):
+        data = fixture()
+        data['tools'] = [('unknown_origin', 'metrics', tool, n) for tool, n in
+                         [('ssh_exec', 13), ('winrm_exec', 26), ('run_program', 13), ('system_info', 26), ('list_services', 13)]]
+        data['axes'] = [('unknown_origin', tool, axis, bucket, n) for tool, axis, bucket, n in
+                        [('ssh_exec', 'outcomes', 'error', 13), ('winrm_exec', 'outcomes', 'error', 26),
+                         ('run_program', 'durations', 'gte10000', 13), ('system_info', 'durations', 'gte10000', 26),
+                         ('list_services', 'outcomes', 'error', 13), ('list_services', 'durations', 'lt100', 13)]]
+        messages = []
+        with tempfile.TemporaryDirectory() as tmp:
+            self.run_digest(tmp, data, sink=lambda m, *a: messages.append(m.as_bytes()))
+        msg = BytesParser(policy=policy.default).parsebytes(messages[0])
+        text, html = [p.get_content() for p in msg.iter_parts()]
+        for body, separator in ((text, ' | '), (html, '</td>\n<td style="border-bottom:1px solid #d9e0eb">')):
+            investigation = body.split('Investigate observed failures and slow operations', 1)[1].split('Installation proxies', 1)[0]
+            for tool, failures, slow in [('ssh_exec', '13', 'unavailable'), ('winrm_exec', '26', 'unavailable'),
+                                         ('run_program', 'unavailable', '13'), ('system_info', 'unavailable', '26'),
+                                         ('list_services', '13', '0')]:
+                self.assertIn(separator.join((tool, failures, slow)), investigation)
+            self.assertIn('ranked by recorded failures; duration axis unavailable', investigation)
+            self.assertIn('ranked by slow operations; outcomes axis unavailable', investigation)
+            self.assertLess(investigation.index('winrm_exec'), investigation.index('ssh_exec'))
+            self.assertLess(investigation.index('system_info'), investigation.index('run_program'))
 
     def test_scheduled_outages_create_no_new_claim(self):
         monday = END + dt.timedelta(hours=3)

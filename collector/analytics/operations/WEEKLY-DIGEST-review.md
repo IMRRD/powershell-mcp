@@ -65,4 +65,23 @@ The isolated SMTP test creates a short-lived localhost certificate, uses real ST
 
 The original issue43 worktree was archived byte-for-byte (tracked and untracked files) at `C:/Users/aegis/AppData/Local/hermes/cache/scratch/issue43-candidate-20261026/original-worktree.zip`. All original worktrees remain unchanged. Neither the suggested `fix/43-digest-readable` branch nor uncommitted readable source was present at inventory. Candidate work is isolated on `fix/43-reviewed-digest` from current `origin/main` (`7e9d9e4`). Synthetic HTML/text examples in the same scratch directory are explicitly labelled, not live reports.
 
-Final local results: 24 analytics tests passed against real disposable PostgreSQL; 81 operations tests passed with one POSIX-only backup-fsync skip on Windows; the 24 digest-focused tests passed, including the real loopback SMTP race/replay. `git diff --check` passed. Hosted CI, independent review, installed-caller readiness, and live scheduled delivery remain pending.
+Baseline local results before independent review: analytics ran 24 tests with no skips; operations ran 81 tests with one POSIX-only backup-fsync skip on Windows. These results did not catch the two blockers corrected below.
+
+## Independent-review corrections, 26 October 2026
+
+Correction base: `8d3ee721a581adc3ffb2587c5d9a8e85dc190866`. Default suppression now checks derivable installation complements: observed minus active, observed minus startup-only, and observed minus both disjoint subsets. The actual importer/PostgreSQL regression produces observed 12, active 11, startup-only 0, with every positive supplied reporting aggregate at least 10. Both renderings now withhold numeric detail because the other-installations remainder is 1. Explicit audience-bound private exact-count approval still renders the proxies. Boundary tests cover complements 0, 1, 9 and 10. The general rendering fixture now uses 12/12/0 so unrelated presentation tests exercise an unsuppressed report.
+
+Investigation rows retain absent outcomes or duration axes as unavailable in both serialized MIME parts. Separate tables rank complete evidence by failures then slow operations, outcomes-only evidence by failures, and duration-only evidence by slow operations. Missing values never enter a numeric ranking. Tests cover both missing-axis directions, descending ordering within each available-evidence group, and an actual zero slow count from a present duration axis.
+
+RED was recorded before changing production code: the complement unit regression, missing-axis MIME/ranking regression, and actual PostgreSQL complement regression each failed. The same three tests passed after the fix. Logs are scratch-only under `C:/Users/aegis/AppData/Local/hermes/cache/scratch/issue43-candidate-20261026`:
+
+| Evidence | Result | SHA-256 |
+| --- | --- | --- |
+| `correction-red.log` | 3 tests, 3 expected failures | `26c4a5a1b306e17e0128ae5a08fd8d3a060af97a229ee944c32e065ffd841aa0` |
+| `correction-green.log` | Same 3 tests passed | `c481d410f638b8e666b7ef1748c18e560b36fb5d62f1c7466f67d9d26310131c` |
+| `correction-analytics.log` | 25 tests passed, no skips; actual PostgreSQL 17.11, UTC | `7da41409f7ba405ba9783f28480c58816a6ffe7daa6eaccd03e58adcbf812bca` |
+| `correction-operations.log` | 84 tests run: 83 passed, 1 skipped | `c260dfa263dd6b8fd8af326f43bb027f497d46f411e2fce59d2133e519564b69` |
+
+The sole skip is `test_private_backup.BackupTests.test_posix_receipt_syncs_parent_directory`: `POSIX directory fsync requires POSIX runner`. The real localhost STARTTLS concurrent-process/replay test ran and passed. The disposable PostgreSQL fixture was stopped after testing; zero analytics test schemas remained. All temporary fixture files stayed under the scratch root. No production SMTP, credentials, raw production data, timers, or installed state were accessed or changed.
+
+The added original-week replay regression seeds the exact synthetic copy of the 87-byte intent payload and verifies refusal before SMTP, with unchanged bytes and no extra receipt. The 12–19 October key remains `81662c20e8dbb66c17ada57f133a7bda93b901af9eda8c50a7fecf018f7675db.attempted`; production intent-generation/submission code and systemd templates are unchanged. The sole admitted audience remains `isak@ialogics.com`. `git diff --check` passed. Parent review and the live scheduled-delivery gate remain outstanding; this correction does not authorize a resend, deployment, push, merge, or issue closure.
