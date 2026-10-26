@@ -10,7 +10,7 @@ describe("bounded typed inputs", () => {
     for (const stdin of ["", `héllo " \\ 💫`]) {
       const r = await runProgram(process.execPath, ["-e", "process.stdin.on('data',b=>process.stdout.write(b));process.stdin.on('end',()=>process.stdout.write('|EOF'))"], { stdin });
       expect(r.stdout).toBe(stdin + "|EOF");
-      expect(r.exitCode).toBe(0);
+      expect(r.exitCode, JSON.stringify({ input: stdin === '' ? 'empty' : 'utf8', supervisorReason: r.supervisorReason, treeTerminated: r.treeTerminated, timedOut: r.timedOut, cancelled: r.cancelled })).toBe(0);
     }
   });
   it("refuses oversized input before launching the executable", async () => {

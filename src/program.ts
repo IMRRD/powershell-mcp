@@ -105,6 +105,7 @@ export function runProgram(program: string, args: string[] = [], opts: RunOption
         ...captures(),
         exitCode: code,
         treeTerminated: child.treeTerminated,
+        ...(child.supervisorReason ? { supervisorReason: child.supervisorReason } : {}),
         ...(log ? { log: log.finish(!timedOut && !cancelled && child.treeTerminated) } : {}),
         timedOut,
         cancelled,
