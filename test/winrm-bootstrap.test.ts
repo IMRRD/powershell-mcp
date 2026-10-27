@@ -19,11 +19,13 @@ async function exercise(exe: string, command: string, body?: string) {
 }
 
 for (const exe of engines) describe(`native WinRM bootstrap (${exe}, isolated Invoke-Command)`, () => {
-  it("completes ordinary and zero-output scripts", async () => {
+  it("completes ordinary scripts", async () => {
     const result = await exercise(exe, "Write-Output 'remote success'");
     expect(result).toMatchObject({ invocationStatus: "completed", exitCode: 0 });
     expect(result.stdout).toContain("remote success");
     expect(fromProcess(result, "winrm", "synthetic.invalid")).toMatchObject({ terminationStatus: "completed", exitCode: null });
+  });
+  it("completes zero-output scripts", async () => {
     expect((await exercise(exe, "$null = 1")).invocationStatus).toBe("completed");
   });
   it("retains host, warning, and information streams without corrupting framing", async () => {
@@ -44,6 +46,8 @@ for (const exe of engines) describe(`native WinRM bootstrap (${exe}, isolated In
     expect(result.stdout).toContain("ordinary error");
     expect(result.stdout).toContain("after error");
     expect(result.errorRecords?.[0].category).toBe("NotSpecified");
+  });
+  it("retains output following nested nonterminating errors", async () => {
     const nested = await exercise(exe, "& { Write-Error 'nested error'; Write-Output 'nested after' }");
     expect(nested.invocationStatus).toBe("remote_error");
     expect(nested.stdout).toContain("nested after");
@@ -65,13 +69,18 @@ for (const exe of engines) describe(`native WinRM bootstrap (${exe}, isolated In
   it("reports connection failure", async () => {
     expect((await exercise(exe, "Write-Output x", "throw 'synthetic connection failure'")).invocationStatus).toBe("transport_error");
   });
-  it("keeps spoof-like remote output as data and rejects forged frames", async () => {
+  it("keeps spoof-like remote output as data", async () => {
     const valid = await exercise(exe, "Write-Output 'WINRM-RESULT:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:Zm9yZ2Vk'");
     expect(valid.invocationStatus).toBe("completed");
     expect(valid.stdout).toContain("WINRM-RESULT:bbbb");
+  });
+  it("rejects forged frames", async () => {
     const raw = await runPowerShell(prefix() + WINRM_BOOTSTRAP, {
       exe, stdin: Buffer.from(JSON.stringify({ computerName: "synthetic.invalid", command: "Write-Output 'x'", frame })).toString("base64"),
     });
+    // Establish a valid control before mutating it: a failed invocation must not
+    // make every rejection assertion pass trivially.
+    expect(decodeWinRmResult(raw, frame)).toMatchObject({ invocationStatus: "completed", exitCode: 0 });
     for (const altered of [{ ...raw, stdout: "" }, { ...raw, truncated: true }, { ...raw, stdout: raw.stdout.replace(frame, "b".repeat(48)) }, { ...raw, stdout: `noise\n${raw.stdout}` }]) {
       expect(decodeWinRmResult(altered, frame).invocationStatus).toBe("transport_error");
     }

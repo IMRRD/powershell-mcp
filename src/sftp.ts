@@ -132,6 +132,35 @@ async function digest(stream: NodeJS.ReadableStream): Promise<string> {
   for await (const chunk of stream) hash.update(chunk as Buffer);
   return hash.digest('hex');
 }
+async function remoteDigest(sftp: SFTPWrapper, path: string): Promise<string> {
+  // Open first so a failed OPEN cannot leave ssh2's destroy waiting for an
+  // 'open' event that will never arrive. Own CLOSE explicitly, including after
+  // EOF: ssh2's default autoClose runs after the readable side has completed.
+  const handle = await new Promise<Buffer>((resolve, reject) =>
+    sftp.open(path, 'r', (error, value) => error ? reject(error) : resolve(value)));
+  return new Promise<string>((resolve, reject) => {
+    const stream = sftp.createReadStream(path, { handle, autoClose: false });
+    const hash = createHash('sha256');
+    let closing = false;
+    let failure: Error | undefined;
+    const complete = (error?: Error) => {
+      failure ??= error;
+      if (closing) return;
+      closing = true;
+      stream.pause();
+      stream.close(closeError => {
+        failure ??= closeError ?? undefined;
+        if (failure) reject(failure);
+        else resolve(hash.digest('hex'));
+      });
+    };
+    // Keep this owner attached through destroy's deferred error emission. A
+    // CLOSE failure is also delivered to its callback and rejects the digest.
+    stream.on('error', complete);
+    stream.on('data', (chunk: Buffer) => hash.update(chunk));
+    stream.once('end', () => complete());
+  });
+}
 async function stagedTransfer(o: SftpOptions, sftp: SFTPWrapper, fence: { cancelled: boolean; finalizationSent: boolean; finalized: boolean; creationPending: boolean; owned: boolean; verification: SftpResult['verification'] }): Promise<Partial<SftpResult>> {
   const dest = o.direction === 'upload' ? o.remotePath : o.localPath;
   const temp = join(dirname(dest), `.${basename(dest)}.mcp-${randomUUID()}.part`).replaceAll('\\', o.direction === 'upload' ? '/' : '\\');
@@ -153,7 +182,7 @@ async function stagedTransfer(o: SftpOptions, sftp: SFTPWrapper, fence: { cancel
       bytes = await new Promise<number>((resolve, reject) => sftp.stat(temp, (e, attrs) => e ? reject(e) : resolve(attrs.size)));
       verification = fence.verification = 'failed';
       const sourceHash = await digest(createReadStream(o.localPath));
-      if (sourceHash !== await digest(sftp.createReadStream(temp))) throw new Error('SHA-256 readback mismatch');
+      if (sourceHash !== await remoteDigest(sftp, temp)) throw new Error('SHA-256 readback mismatch');
       verification = fence.verification = 'sha256_matched';
       if (fence.cancelled) throw new Error('staged transfer cancelled');
       fence.finalizationSent = true;
@@ -168,7 +197,7 @@ async function stagedTransfer(o: SftpOptions, sftp: SFTPWrapper, fence: { cancel
     await invoke(cb => sftp.fastGet(o.remotePath, temp, cb));
     bytes = statSync(temp).size;
     verification = fence.verification = 'failed';
-    const sourceHash = await digest(sftp.createReadStream(o.remotePath));
+    const sourceHash = await remoteDigest(sftp, o.remotePath);
     if (sourceHash !== await digest(createReadStream(temp))) throw new Error('SHA-256 readback mismatch');
     verification = fence.verification = 'sha256_matched';
     if (fence.cancelled) throw new Error('staged transfer cancelled');
