@@ -8,7 +8,7 @@ for (const required of ['lifecycle-acceptance.test.ts', 'owned-process.test.ts',
   const suite = report.testResults.find(t => t.name.replaceAll('\\', '/').endsWith('/' + required));
   if (!suite || !suite.assertionResults?.some(t => t.status === 'passed')) throw new Error(`Required suite absent or entirely skipped: ${required}`);
 }
-for (const title of ['program', 'powershell', 'durable'].map(c => `lifecycle acceptance ${c} cancels parent child grandchild within a bound and preserves unrelated process`)) {
+for (const title of ['program', 'powershell', 'durable'].flatMap(c => [0, 4500].map(delay => `lifecycle acceptance ${c} cancels parent child grandchild after ${delay}ms startup within a bound and preserves unrelated process`))) {
   if (!report.testResults.flatMap(s => s.assertionResults ?? []).some(t => t.fullName === title && t.status === 'passed')) throw Error(`Missing owned-tree proof: ${title}`);
 }
 if (process.platform === 'linux') {

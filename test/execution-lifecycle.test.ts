@@ -117,9 +117,12 @@ else { const run = request(); writeFileSync(join(root, 'recovered'), JSON.string
   lifecycleIt('reports complete output for a fully captured nonzero exit', async () => fixture(async root => {
     const store = new ExecutionStore(root);
     const run = store.start('owner', 'failed', process.execPath, ['-e', 'process.stderr.write("bad");process.exit(7)']);
-    for (let i = 0; i < 100 && store.status('owner', run.id).state === 'running'; i++) await pause(20);
-    expect(store.status('owner', run.id).state).toBe('failed');
+    // Startup and supervisor drain share the test's budget; 100 polling turns
+    // do not prove that the child has exited under CPU contention.
+    await expect.poll(() => store.status('owner', run.id).state, { timeout: 10_000 }).not.toBe('running');
+    expect(store.status('owner', run.id)).toMatchObject({ state: 'failed', exitCode: 7, outputComplete: true });
     expect(store.read('owner', run.id, 'stderr', 0, 32).complete).toBe(true);
+    expect(Buffer.from(store.read('owner', run.id, 'stderr', 0, 32).data, 'base64').toString()).toBe('bad');
   }));
   lifecycleIt('bounds simultaneous newline-free streams on disk without raw spools', async () => fixture(async root => {
     if (process.platform !== 'win32') return;

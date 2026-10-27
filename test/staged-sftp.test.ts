@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync, readdirSync, existsSy
 import { tmpdir } from 'node:os';
 import { join, sep as fsPathSeparator } from 'node:path';
 import { runSftp } from '../src/sftp.js';
+import { setTimeout as realSetTimeout, clearTimeout as realClearTimeout } from 'node:timers';
 
 describe('staged SFTP fail closed', () => {
   it('rejects unsupported remote atomic finalization before connecting or touching destination', async () => {
@@ -23,16 +24,37 @@ import { createHash, generateKeyPairSync } from 'node:crypto';
 import { Server, utils } from 'ssh2';
 
 // A deadline reports missing completion; it never substitutes for the local-work drain.
-async function bounded(work: Promise<void>, label: string, timeoutMs = 2000): Promise<void> {
+async function bounded<T>(work: Promise<T>, label: string, timeoutMs = 2000): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([work, new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`${label} did not complete within ${timeoutMs}ms`)), timeoutMs);
+    return await Promise.race([work, new Promise<never>((_, reject) => {
+      timer = realSetTimeout(() => reject(new Error(`${label} did not complete within ${timeoutMs}ms`)), timeoutMs);
     })]);
-  } finally { clearTimeout(timer); }
+  } finally { realClearTimeout(timer); }
 }
 
-async function stagedScenario(gateClose: boolean, fault: { localOpenError?: Error; setupError?: Error } = {}) {
+type Stage = 'hardlink' | 'connection lost' | 'pending open' | 'late read' | 'download remote open' | 'download local open' | 'download read';
+type Fault = { localOpenError?: Error; setupError?: Error; delayStages?: boolean; watchdogAtLocalOpen?: boolean };
+
+// The owner cancels work at its deadline and awaits cleanup before returning.
+// A Promise.race around the whole fixture would leave its spies running behind the test.
+async function ownedScenario(gateClose: boolean, fault: Fault = {}) {
+  const controller = new AbortController();
+  const abort = () => controller.abort(new Error('scenario watchdog expired'));
+  let timer = realSetTimeout(abort, 60_000);
+  try {
+    await stagedScenario(gateClose, fault, controller.signal, name => {
+      if (fault.watchdogAtLocalOpen && name === 'download local open') {
+        // Exercise the owner's real watchdog after asynchronous local work begins.
+        realClearTimeout(timer);
+        timer = realSetTimeout(abort, 0);
+      }
+    });
+  }
+  finally { realClearTimeout(timer); }
+}
+
+async function stagedScenario(gateClose: boolean, fault: Fault, signal: AbortSignal, onStage: (name: Stage) => void) {
   const dir = mkdtempSync(join(tmpdir(), 'staged-loop-'));
   // Server shutdown drains sockets, not ssh2 fastGet's asynchronous local fds.
   const localWork: Promise<void>[] = [];
@@ -40,6 +62,66 @@ async function stagedScenario(gateClose: boolean, fault: { localOpenError?: Erro
   const closeErrors: NodeJS.ErrnoException[] = [];
   const open = fs.open, close = fs.close, write = fs.write;
   const restoreSpies: Array<() => void> = [];
+  let cancel = () => {};
+  const stages = new Map<Stage, { entered: Promise<void>; reach: () => void }>();
+  const delayedStages: Stage[] = [];
+  const stageWork: Promise<void>[] = [];
+  for (const name of ['hardlink', 'connection lost', 'pending open', 'late read', 'download remote open', 'download local open', 'download read'] as const) {
+    let reach!: () => void;
+    stages.set(name, { entered: new Promise<void>(resolve => { reach = resolve; }), reach });
+  }
+  let activeSettled = false;
+  const releases = new Set<() => void>();
+  const cancelDelays = () => { for (const release of releases) release(); };
+  signal.addEventListener('abort', cancelDelays);
+  async function reachStage(name: Stage) {
+    onStage(name);
+    if (fault.delayStages) {
+      // Real elapsed time and CPU contention exceed the unchanged operation deadline.
+      // The operation must still be pending until its intended stage is observed.
+      await new Promise<void>(resolve => {
+        const release = () => { realClearTimeout(timer); releases.delete(release); resolve(); };
+        const timer = realSetTimeout(release, 250);
+        releases.add(release);
+      });
+      const until = performance.now() + 50;
+      while (performance.now() < until) { /* bounded CPU contention */ }
+      signal.throwIfAborted();
+      expect(activeSettled, `${name}: operation settled before stage`).toBe(false);
+      delayedStages.push(name);
+    }
+    stages.get(name)!.reach();
+  }
+  function observeStage(name: Stage) {
+    // Retain ownership of asynchronous server handlers, including assertion failures.
+    const work = reachStage(name);
+    stageWork.push(work);
+    void work.catch(() => {});
+  }
+  async function transfer(options: Parameters<typeof runSftp>[0]) {
+    signal.throwIfAborted();
+    const result = await runSftp(options);
+    signal.throwIfAborted();
+    return result;
+  }
+  async function atStage(options: Parameters<typeof runSftp>[0], name: Stage, expire = true, timeoutMs = 200) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    activeSettled = false;
+    const work = transfer({ ...options, timeoutMs }).finally(() => { activeSettled = true; });
+    void work.catch(() => {});
+    try {
+      await bounded(Promise.race([stages.get(name)!.entered, work.then(() => {
+        throw new Error(`${name}: operation settled before stage`);
+      })]), `${name} reached`);
+      if (expire) await vi.advanceTimersByTimeAsync(timeoutMs);
+      return await bounded(work, `${name} result`);
+    } finally {
+      // Release an operation even if its gate/assertion failed, then own completion.
+      await vi.advanceTimersByTimeAsync(timeoutMs);
+      try { await bounded(work, `${name} completion`); }
+      finally { vi.useRealTimers(); }
+    }
+  }
   try {
   const openSpy = vi.spyOn(fs, 'open').mockImplementation(new Proxy(open, {
     apply(open, receiver, args) {
@@ -52,8 +134,15 @@ async function stagedScenario(gateClose: boolean, fault: { localOpenError?: Erro
         if (!error) descriptors.set(fd, { path, complete });
         try { callback(error, fd); } finally { if (error) complete(); }
       };
-      if (fault.localOpenError && path.includes('.held-download.mcp-')) {
-        queueMicrotask(() => args.at(-1)(fault.localOpenError));
+      if (path.includes('.held-download.mcp-')) {
+        const work = (async () => {
+          try { await reachStage('download local open'); }
+          catch (error) { args.at(-1)(error); return; }
+          if (fault.localOpenError) args.at(-1)(fault.localOpenError);
+          else Reflect.apply(open, receiver, args);
+        })();
+        stageWork.push(work);
+        void work.catch(() => {});
         return;
       }
       return Reflect.apply(open, receiver, args);
@@ -94,6 +183,8 @@ async function stagedScenario(gateClose: boolean, fault: { localOpenError?: Erro
   restoreSpies.push(() => closeSpy.mockRestore());
   const connections = new Set<import('ssh2').Connection>();
   let server: Server | undefined;
+  cancel = () => { cancelDelays(); for (const client of connections) client.end(); };
+  signal.addEventListener('abort', cancel);
   let scenarioSucceeded = false;
   try {
   if (fault.setupError) throw fault.setupError;
@@ -135,8 +226,11 @@ async function stagedScenario(gateClose: boolean, fault: { localOpenError?: Erro
           if (!files.has(path)) return sftp.status(id, 2);
           const handle = Buffer.alloc(4); handle.writeUInt32BE(++serial); handles.set(handle.toString('hex'), { path, write });
           if (createThenOpenError && path.includes('.open-error.mcp-')) sftp.status(id, 4);
-          else if (holdOpen && path.includes('.pending-open.mcp-')) delayedOpens.push(() => sftp.handle(id, handle));
-          else sftp.handle(id, handle);
+          else if (holdOpen && path.includes('.pending-open.mcp-')) { delayedOpens.push(() => sftp.handle(id, handle)); observeStage('pending open'); }
+          else if (holdDownloadRead && path === '/fixture/final') {
+            const work = reachStage('download remote open').then(() => sftp.handle(id, handle));
+            stageWork.push(work); void work.catch(() => {});
+          } else sftp.handle(id, handle);
         });
         sftp.on('STAT', (id, path) => files.has(path) ? sftp.attrs(id, { size: files.get(path)!.length }) : sftp.status(id, 2));
         sftp.on('FSTAT', (id, h) => { const f = handles.get(h.toString('hex')); f ? sftp.attrs(id, { size: files.get(f.path)!.length }) : sftp.status(id, 4); });
@@ -149,7 +243,10 @@ async function stagedScenario(gateClose: boolean, fault: { localOpenError?: Erro
         sftp.on('READ', (id, h, offset, length) => {
           const f = handles.get(h.toString('hex')); if (!f) return sftp.status(id, 4);
           const respond = () => { const data = files.get(f.path)!; offset >= data.length ? sftp.status(id, 1) : sftp.data(id, corruptRead && f.path.includes('.part') ? Buffer.from(data.subarray(offset, offset + length).map(b => b ^ 1)) : data.subarray(offset, offset + length)); };
-          if ((holdRead && f.path.includes('.late.')) || (holdDownloadRead && f.path === '/fixture/final')) delayedReads.push(respond); else respond();
+          if ((holdRead && f.path.includes('.late.')) || (holdDownloadRead && f.path === '/fixture/final')) {
+            delayedReads.push(respond);
+            observeStage(holdDownloadRead && f.path === '/fixture/final' ? 'download read' : 'late read');
+          } else respond();
         });
         sftp.on('CLOSE', (id, h) => { handles.delete(h.toString('hex')); sftp.status(id, 0); });
         sftp.on('REMOVE', (id, path) => { if (refuseRemove) return sftp.status(id, 3); files.delete(path); sftp.status(id, 0); });
@@ -159,8 +256,16 @@ async function stagedScenario(gateClose: boolean, fault: { localOpenError?: Erro
           const start = 4 + size, target = payload.subarray(start + 4, start + 4 + payload.readUInt32BE(start)).toString();
           if (!files.has(source) || files.has(target)) { sftp.status(id, 4); return; }
           const respond = () => { files.set(target, files.get(source)!); sftp.status(id, 0); };
-          if (loseAfterHardlink) { files.set(target, files.get(source)!); client.destroy(); }
-          else if (holdHardlink) delayedLinks.push(respond); else respond();
+          if (loseAfterHardlink) {
+            const work = reachStage('connection lost').then(() => {
+              files.set(target, files.get(source)!);
+              // Graceful post-hardlink ambiguity; the standalone subprocess
+              // regression separately destroys the raw socket at both stages.
+              client.end();
+            });
+            stageWork.push(work); void work.catch(() => {});
+          }
+          else if (holdHardlink) { delayedLinks.push(respond); observeStage('hardlink'); } else respond();
         });
       });
     }));
@@ -173,59 +278,59 @@ async function stagedScenario(gateClose: boolean, fault: { localOpenError?: Erro
     const options = { host: '127.0.0.1', port: address.port, username: 'fixture', password: 'synthetic', hostKeyPins: [pin], staged: true, timeoutMs: 5000 };
     const source = join(dir, 'source'), target = join(dir, 'target'); const body = Buffer.from('verified staged payload\0'.repeat(100)); writeFileSync(source, body);
     const sha256 = createHash('sha256').update(body).digest('hex');
-    const upload = await runSftp({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/final' });
+    const upload = await transfer({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/final' });
     expect(upload).toMatchObject({ ok: true, bytes: body.length, verification: 'sha256_matched', finalized: true, sha256 });
     expect(files.get('/fixture/final')).toEqual(body);
     expect([...files.keys()]).toEqual(['/fixture/final']);
-    const download = await runSftp({ ...options, direction: 'download', localPath: target, remotePath: '/fixture/final' });
+    const download = await transfer({ ...options, direction: 'download', localPath: target, remotePath: '/fixture/final' });
     expect(download).toMatchObject({ ok: true, bytes: body.length, verification: 'sha256_matched', finalized: true, sha256 });
     expect(readFileSync(target)).toEqual(body);
     files.set('/fixture/existing', Buffer.from('old remote'));
     files.set('/fixture/.unrelated.mcp-other.part', Buffer.from('other owner'));
-    const existingUpload = await runSftp({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/existing' });
+    const existingUpload = await transfer({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/existing' });
     expect(existingUpload).toMatchObject({ ok: false, cleanup: 'removed' });
     expect(existingUpload.finalized).toBeUndefined(); // rejected extended request: no remote finalization proof
     expect(files.get('/fixture/existing')?.toString()).toBe('old remote');
     writeFileSync(target, 'old local');
-    const existingDownload = await runSftp({ ...options, direction: 'download', localPath: target, remotePath: '/fixture/final' });
+    const existingDownload = await transfer({ ...options, direction: 'download', localPath: target, remotePath: '/fixture/final' });
     expect(existingDownload).toMatchObject({ ok: false, finalized: false, cleanup: 'not_needed', verification: 'not_started' });
     expect(readFileSync(target, 'utf8')).toBe('old local');
     refuseWrite = true;
-    const denied = await runSftp({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/denied' });
+    const denied = await transfer({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/denied' });
     refuseWrite = false;
     expect(denied).toMatchObject({ ok: false, finalized: false, cleanup: 'removed' });
     expect(files.has('/fixture/denied')).toBe(false);
     corruptRead = true;
-    const mismatch = await runSftp({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/mismatch' });
+    const mismatch = await transfer({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/mismatch' });
     corruptRead = false;
     expect(mismatch).toMatchObject({ ok: false, verification: 'failed', finalized: false, cleanup: 'removed' });
     expect(files.has('/fixture/mismatch')).toBe(false);
     expect(files.get('/fixture/.unrelated.mcp-other.part')?.toString()).toBe('other owner');
     mutateSource = () => writeFileSync(source, Buffer.from('changed'.repeat(100)));
-    const mutation = await runSftp({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/mutation' });
+    const mutation = await transfer({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/mutation' });
     expect(mutation).toMatchObject({ ok: false, verification: 'failed', finalized: false, cleanup: 'removed' });
     expect(files.has('/fixture/mutation')).toBe(false);
     writeFileSync(source, body);
     refuseHardlink = true;
-    const unsupported = await runSftp({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/unsupported' });
+    const unsupported = await transfer({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/unsupported' });
     refuseHardlink = false;
     expect(unsupported).toMatchObject({ ok: false, cleanup: 'removed' });
     expect(unsupported.error).toMatch(/does not support|unsupported|hardlink/i);
     expect(files.has('/fixture/unsupported')).toBe(false);
     refuseRemove = true;
-    const cleanupFailed = await runSftp({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/cleanup-failed' });
+    const cleanupFailed = await transfer({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/cleanup-failed' });
     refuseRemove = false;
     expect(cleanupFailed).toMatchObject({ ok: false, finalized: true, cleanup: 'failed' });
     expect(files.has('/fixture/cleanup-failed')).toBe(true);
     for (const key of [...files.keys()]) if (key.includes('.cleanup-failed.mcp-') && key.endsWith('.part')) files.delete(key);
     holdHardlink = true;
-    const ambiguous = await runSftp({ ...options, timeoutMs: 200, direction: 'upload', localPath: source, remotePath: '/fixture/ambiguous' });
+    const ambiguous = await atStage({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/ambiguous' }, 'hardlink');
     holdHardlink = false;
     expect(ambiguous).toMatchObject({ ok: false, timedOut: true });
     expect(ambiguous.finalized).toBeUndefined();
     delayedLinks.length = 0;
     holdOpen = true;
-    const pendingOpen = await runSftp({ ...options, timeoutMs: 200, direction: 'upload', localPath: source, remotePath: '/fixture/pending-open' });
+    const pendingOpen = await atStage({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/pending-open' }, 'pending open');
     holdOpen = false;
     expect(pendingOpen).toMatchObject({ ok: false, timedOut: true, verification: 'not_started', finalized: false, cleanup: 'unknown' });
     expect([...files.keys()].some(key => key.includes('.pending-open.mcp-') && key.endsWith('.part'))).toBe(true);
@@ -233,20 +338,21 @@ async function stagedScenario(gateClose: boolean, fault: { localOpenError?: Erro
     await new Promise(resolve => setTimeout(resolve, 80));
     expect(files.has('/fixture/pending-open')).toBe(false);
     createThenOpenError = true;
-    const openError = await runSftp({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/open-error' });
+    const openError = await transfer({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/open-error' });
     createThenOpenError = false;
     expect(openError).toMatchObject({ ok: false, verification: 'not_started', finalized: false, cleanup: 'unknown' });
     expect([...files.keys()].some(key => key.includes('.open-error.mcp-') && key.endsWith('.part'))).toBe(true);
     expect(files.has('/fixture/open-error')).toBe(false);
     loseAfterHardlink = true;
-    const lost = await runSftp({ ...options, timeoutMs: 1000, direction: 'upload', localPath: source, remotePath: '/fixture/connection-lost' });
+    // Verification and finalization submission must precede connection loss/deadline.
+    const lost = await atStage({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/connection-lost' }, 'connection lost', true, 1000);
     loseAfterHardlink = false;
     expect(lost).toMatchObject({ ok: false, verification: 'sha256_matched', cleanup: 'unknown' });
     expect(lost.finalized).toBeUndefined();
     expect(files.get('/fixture/connection-lost')).toEqual(body);
     expect([...files.keys()].some(key => key.includes('.connection-lost.mcp-') && key.endsWith('.part'))).toBe(true);
     holdRead = true;
-    const late = await runSftp({ ...options, timeoutMs: 200, direction: 'upload', localPath: source, remotePath: '/fixture/late' });
+    const late = await atStage({ ...options, direction: 'upload', localPath: source, remotePath: '/fixture/late' }, 'late read');
     expect(late).toMatchObject({ ok: false, timedOut: true, finalized: false });
     holdRead = false; for (const respond of delayedReads.splice(0)) respond();
     await new Promise(resolve => setTimeout(resolve, 80));
@@ -254,7 +360,8 @@ async function stagedScenario(gateClose: boolean, fault: { localOpenError?: Erro
     // Keep the timed-out download last so teardown must drain its local work.
     holdLocalClose = gateClose;
     holdDownloadRead = true;
-    const downloadTimeout = await runSftp({ ...options, timeoutMs: 200, direction: 'download', localPath: join(dir, 'held-download'), remotePath: '/fixture/final' });
+    const downloadTimeout = await atStage({ ...options, direction: 'download', localPath: join(dir, 'held-download'), remotePath: '/fixture/final' }, fault.localOpenError ? 'download local open' : 'download read', !fault.localOpenError);
+    if (fault.delayStages) expect(delayedStages).toEqual(['hardlink', 'pending open', 'connection lost', 'late read', 'download remote open', 'download local open', ...(fault.localOpenError ? [] : ['download read'])]);
     expect(downloadTimeout, downloadTimeout.error).toMatchObject({ ok: false, timedOut: true, verification: 'not_started', finalized: false, cleanup: 'unknown' });
     expect(readdirSync(dir).some(name => name.startsWith('.held-download.mcp-') && name.endsWith('.part'))).toBe(true);
     holdDownloadRead = false;
@@ -262,6 +369,7 @@ async function stagedScenario(gateClose: boolean, fault: { localOpenError?: Erro
     scenarioSucceeded = true;
   } finally {
     try {
+      cancelDelays();
       for (const client of connections) client.end();
       if (server?.listening) await bounded(new Promise<void>((resolve, reject) => {
         server!.close(error => error ? reject(error) : resolve());
@@ -275,8 +383,12 @@ async function stagedScenario(gateClose: boolean, fault: { localOpenError?: Erro
       // An armed interceptor is not proof that the scenario reached the gate.
       holdLocalClose = false;
       releaseClose?.();
+      const handlers = await bounded(Promise.allSettled(stageWork), 'stage handler drain');
       // The iterator also drains writes queued by callbacks during shutdown.
       await bounded((async () => { for (const work of localWork) await work; })(), 'local filesystem drain');
+      for (const handler of handlers) {
+        if (handler.status === 'rejected' && handler.reason !== signal.reason) throw handler.reason;
+      }
     }
     expect(closeErrors).toEqual([]);
     expect(descriptors.size).toBe(0);
@@ -288,6 +400,8 @@ async function stagedScenario(gateClose: boolean, fault: { localOpenError?: Erro
     rmSync(dir, { recursive: true, force: true });
   }
   } finally {
+    signal.removeEventListener('abort', cancel);
+    signal.removeEventListener('abort', cancelDelays);
     for (const restore of restoreSpies.reverse()) restore();
   }
 }
@@ -296,20 +410,47 @@ it.each([
   { name: 'uploads with advertised hardlink, verifies readback, then downloads without replacement', gateClose: false },
   { name: 'drains a timed-out download after server close before removing local files', gateClose: true },
 ])('$name', async ({ gateClose }) => {
-  await stagedScenario(gateClose);
-}, 20000);
+  await ownedScenario(gateClose);
+}, 90_000);
 
 
 it.each(['local open', 'setup'] as const)('restores filesystem spies and preserves a %s failure promptly', async failure => {
   const original = { open: fs.open, write: fs.write, close: fs.close };
   const error = Object.assign(new Error(`injected ${failure} failure`), { code: 'ENOSPC' });
-  const scenario = stagedScenario(true, failure === 'local open' ? { localOpenError: error } : { setupError: error });
+  const scenario = ownedScenario(true, failure === 'local open' ? { localOpenError: error } : { setupError: error });
   try {
-    // This deadline is shorter than Vitest's timeout, and makes a hung teardown fail explicitly.
-    await expect(bounded(scenario, 'failure-path scenario', 8000)).rejects.toThrow(error.message);
+    // Await the owner, including teardown, before inspecting global spies.
+    await expect(scenario).rejects.toThrow(error.message);
   } finally {
     expect(fs.open).toBe(original.open);
     expect(fs.write).toBe(original.write);
     expect(fs.close).toBe(original.close);
   }
-}, 10000);
+}, 90_000);
+
+it.each([false, true])('completes all stages under delayed scheduling (open failure: %s)', async failOpen => {
+  const original = { open: fs.open, write: fs.write, close: fs.close };
+  const error = new Error('injected delayed local open failure');
+  try {
+    const scenario = ownedScenario(true, { delayStages: true, ...(failOpen ? { localOpenError: error } : {}) });
+    if (failOpen) await expect(scenario).rejects.toThrow(error.message);
+    else await scenario;
+  } finally {
+    expect(fs.open).toBe(original.open);
+    expect(fs.write).toBe(original.write);
+    expect(fs.close).toBe(original.close);
+  }
+}, 90_000);
+
+it('aborts active local work through the watchdog and awaits cleanup', async () => {
+  const original = { open: fs.open, write: fs.write, close: fs.close };
+  try {
+    await expect(ownedScenario(true, { delayStages: true, watchdogAtLocalOpen: true }))
+      .rejects.toThrow('scenario watchdog expired');
+  } finally {
+    expect(fs.open).toBe(original.open);
+    expect(fs.write).toBe(original.write);
+    expect(fs.close).toBe(original.close);
+    expect(vi.isFakeTimers()).toBe(false);
+  }
+}, 90_000);
