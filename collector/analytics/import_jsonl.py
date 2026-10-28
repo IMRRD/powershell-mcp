@@ -17,6 +17,7 @@ OS = {'win32', 'linux', 'darwin', 'freebsd', 'openbsd', 'sunos', 'aix', 'android
 TOOLS = {'run_powershell', 'list_services', 'get_service', 'control_service', 'system_info', 'ssh_exec', 'winrm_exec', 'sftp_upload', 'sftp_download', 'run_program', 'runtime_capabilities', 'start_execution', 'execution_status', 'read_execution_output', 'cancel_execution', 'read_output_log', 'delete_output_log', 'start_remote_batch', 'remote_batch_status', 'cancel_remote_batch'}
 AXES = {'outcomes': {'success', 'nonzero', 'error', 'timeout', 'cancelled', 'unknown'}, 'durations': {'lt100', 'lt1000', 'lt10000', 'gte10000'}, 'features': {'execution', 'inspection', 'remote', 'transfer', 'lifecycle', 'logs'}}
 MAX_COUNT = 9007199254740991
+WINRM_REASONS = {'completed', 'remote_script_error', 'authentication_exception', 'access_exception', 'remoting_transport_exception', 'invoke_exception', 'wrapper_result_invalid', 'frame_invalid', 'frame_body_invalid', 'local_host_error', 'local_launch_error', 'timeout', 'cancelled', 'unknown'}
 
 
 def classes(path):
@@ -58,8 +59,8 @@ def valid_count(value):
     return isinstance(value, int) and not isinstance(value, bool) and 0 < value <= MAX_COUNT
 
 
-def metric_axes(value):
-    if not isinstance(value, dict) or set(value) != set(AXES):
+def metric_axes(value, tool=None):
+    if not isinstance(value, dict) or set(value) not in (set(AXES), set(AXES) | {'winrmReasons'}):
         raise ValueError('invalid metric axes')
     totals = []
     for axis, allowed in AXES.items():
@@ -69,6 +70,10 @@ def metric_axes(value):
         totals.append(sum(buckets.values()))
     if totals[0] > MAX_COUNT or len(set(totals)) != 1:
         raise ValueError('inconsistent metric totals')
+    if 'winrmReasons' in value:
+        buckets = value['winrmReasons']
+        if tool != 'winrm_exec' or not isinstance(buckets, dict) or not buckets or any(k not in WINRM_REASONS or not valid_count(n) for k, n in buckets.items()) or sum(buckets.values()) != totals[0]:
+            raise ValueError('invalid WinRM reasons')
     return totals[0]
 
 
@@ -146,7 +151,7 @@ def ingest(db, source, classification):
                         for tool, value in data.items():
                             if tool not in TOOLS:
                                 raise ValueError('invalid tool')
-                            calls = value if event == 'tool_counts' else metric_axes(value)
+                            calls = value if event == 'tool_counts' else metric_axes(value, tool)
                             if not valid_count(calls):
                                 raise ValueError('invalid calls')
                             db.execute('INSERT INTO telemetry_tool VALUES (%s,%s,%s,%s)', (key, 'counts' if event == 'tool_counts' else 'metrics', tool, calls))

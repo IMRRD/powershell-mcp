@@ -69,6 +69,31 @@ for (const exe of engines) describe(`native WinRM bootstrap (${exe}, isolated In
   it("reports connection failure", async () => {
     expect((await exercise(exe, "Write-Output x", "throw 'synthetic connection failure'")).invocationStatus).toBe("transport_error");
   });
+  it.each([
+    ["throw [System.Security.Authentication.AuthenticationException]::new('PRIVATE')", 'authentication_exception'],
+    ["throw [System.UnauthorizedAccessException]::new('PRIVATE')", 'access_exception'],
+    ["throw [System.Management.Automation.Remoting.PSRemotingTransportException]::new('PRIVATE endpoint auth access')", 'remoting_transport_exception'],
+    ["throw 'PRIVATE authentication access endpoint'", 'invoke_exception'],
+    ["$null", 'wrapper_result_invalid'],
+  ])('classifies typed local invocation boundary: %s', async (body, reason) => {
+    const result = await exercise(exe, 'Write-Output x', body);
+    expect(result).toMatchObject({ invocationStatus: 'transport_error', winrmReason: reason });
+  });
+  it('records a remote script error boundary', async () => {
+    const script = await exercise(exe, "throw 'PRIVATE'");
+    expect(script.winrmReason).toBe('remote_script_error');
+  });
+  it('does not invent a remote native exit code for unchecked nonzero exit', async () => {
+    const native = await exercise(exe, process.platform === 'win32' ? "& $env:ComSpec /d /c 'exit /b 7'; Write-Output after" : "& /bin/sh -c 'exit 7'; Write-Output after");
+    expect(native).toMatchObject({ invocationStatus: 'completed', winrmReason: 'completed' });
+    expect(fromProcess(native, 'winrm', 'synthetic.invalid').exitCode).toBeNull();
+  });
+  it('preserves the legacy remote ErrorRecord policy for redirected native stderr', async () => {
+    const native = await exercise(exe, process.platform === 'win32' ? "& $env:ComSpec /d /c 'echo native-stderr 1>&2 & exit /b 7'; Write-Output after" : "& /bin/sh -c 'echo native-stderr >&2; exit 7'; Write-Output after");
+    expect(native).toMatchObject({ invocationStatus: 'remote_error', winrmReason: 'remote_script_error' });
+    expect(native.stdout).toContain('after');
+    expect(native.errorRecords?.[0].fullyQualifiedErrorId).toBe('NativeCommandError');
+  });
   it("keeps spoof-like remote output as data", async () => {
     const valid = await exercise(exe, "Write-Output 'WINRM-RESULT:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb:Zm9yZ2Vk'");
     expect(valid.invocationStatus).toBe("completed");

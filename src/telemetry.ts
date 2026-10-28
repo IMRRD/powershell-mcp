@@ -1,12 +1,13 @@
 /** Allowlisted pseudonymous telemetry. Opt-out must precede every ID, disk and network operation. */
 import { Worker } from 'node:worker_threads';
 import { TOOL_NAMES, OUTCOMES, DURATIONS, FEATURES, type ToolName, type Outcome, type Duration, type Feature } from './tool-instrumentation.js';
+import { WINRM_REASONS, type WinRmReason } from './winrm-reason.js';
 
 const OPT_OUT = process.env.POWERSHELL_MCP_NO_TELEMETRY === '1';
 const MAX_PENDING = 128;
 const TOOLS = new Set<string>(TOOL_NAMES);
 const counters: Record<string, number> = {};
-type Metric = { outcomes: Record<string, number>; durations: Record<string, number>; features: Record<string, number> };
+type Metric = { outcomes: Record<string, number>; durations: Record<string, number>; features: Record<string, number>; winrmReasons?: Record<string, number> };
 const metrics: Record<string, Metric> = {};
 const bump = (axis: Record<string, number>, key: string) => { axis[key] = (axis[key] ?? 0) + 1; };
 let worker: Worker | undefined;
@@ -49,11 +50,12 @@ function enqueue(event: 'startup' | 'tool_counts' | 'tool_metrics', version: str
 }
 export function startupPing(version: string): void { enqueue('startup', version); }
 export function incrementTool(name: string): void { if (!OPT_OUT && TOOLS.has(name)) counters[name] = (counters[name] ?? 0) + 1; }
-export function recordTool(name: ToolName, outcome: Outcome, duration: Duration, feature: Feature): void {
+export function recordTool(name: ToolName, outcome: Outcome, duration: Duration, feature: Feature, winrmReason?: WinRmReason): void {
   if (OPT_OUT || !TOOLS.has(name) || !OUTCOMES.includes(outcome) || !DURATIONS.includes(duration) || !FEATURES.includes(feature)) return;
   incrementTool(name);
   const row = metrics[name] ??= { outcomes: {}, durations: {}, features: {} };
   bump(row.outcomes, outcome); bump(row.durations, duration); bump(row.features, feature);
+  if (name === 'winrm_exec') bump(row.winrmReasons ??= {}, WINRM_REASONS.includes(winrmReason!) ? winrmReason! : 'unknown');
 }
 export function flushCounters(version: string): void {
   if (OPT_OUT) return;

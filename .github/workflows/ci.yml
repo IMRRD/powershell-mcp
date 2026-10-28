@@ -52,6 +52,13 @@ jobs:
           git fetch --no-tags --depth=1 origin "$baseline"
           git cat-file -e "$baseline^{commit}"
           git cat-file -e "$baseline:collector/analytics/schema.sql"
+      - name: Require exact baseline schema for WinRM diagnostic migration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline=de0664a974d74064d8f805d4b3bad48f21129ac3
+          git fetch --no-tags --depth=1 origin "$baseline"
+          git cat-file -e "$baseline:collector/analytics/schema.sql"
       - run: python -m unittest discover -s collector/analytics -v
       - run: python -m unittest discover -s collector/analytics/operations -p 'test_*.py' -v
   build-test:

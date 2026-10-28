@@ -43,6 +43,8 @@ describe("built-artifact stdio structured tool contract", () => {
     expect(response.structuredContent).toMatchObject({ packageVersion: "0.7.0", protocolVersion: 1, limits: { inputBytes: 1_048_576 },
       defaultEnginePolicy: "Explicit engine selects only that engine; otherwise configured PWSH_MCP_EXE selects only that executable; without either, try pwsh then powershell.exe on Windows (pwsh only elsewhere)." });
     expect(JSON.stringify(response)).not.toContain("nonexistent-mcp-shell-15-secret");
+  }, 12_000);
+  it("explicit engine selection overrides the configured missing executable", async () => {
     const missing = await client.callTool({ name: "run_powershell", arguments: { script: "echo 'LAUNCHED'", engine: "pwsh" } });
     expect(missing.structuredContent?.detail).toHaveProperty("shell");
     if (process.platform === "win32") {
@@ -50,12 +52,16 @@ describe("built-artifact stdio structured tool contract", () => {
       expect(missing.structuredContent?.detail?.version).toMatch(/^\d+\.\d+/);
       expect(missing.structuredContent?.stdout).toContain("LAUNCHED");
     }
+  }, 12_000);
+  it("delivers literal stdin and EOF over built stdio", async () => {
     const native = await client.callTool({ name: "run_program", arguments: { program: process.execPath,
       args: ["-e", "process.stdin.on('data', b => process.stdout.write(b)); process.stdin.on('end', () => process.stdout.write('|EOF'))"], stdin: "quoted ' 💫 \\" } });
     expect(native.structuredContent?.stdout).toBe("quoted ' 💫 \\|EOF");
+  }, 12_000);
+  it("rejects oversized stdin before launching over built stdio", async () => {
     const oversized = await client.callTool({ name: "run_program", arguments: { program: process.execPath, args: ["-e", "process.stdout.write('LAUNCHED')"], stdin: "💫".repeat(300_000) } });
     expect(JSON.stringify(oversized)).not.toContain("LAUNCHED");
-  }, 12_000); // runtime_capabilities synchronously probes up to two engines at 3s each; allow that plus the subsequent stdio calls.
+  }, 12_000);
   it("configured missing executable fails rather than trying installed engines", async () => {
     const data = await check("run_powershell", { script: "Write-Output SHOULD_NOT_RUN" }, "transport_error", true);
     expect(data).toMatchObject({ exitCode: null, stdout: "", detail: { shell: "nonexistent-mcp-shell-15" } });
@@ -105,6 +111,7 @@ describe("built-artifact stdio structured tool contract", () => {
     expect(response.isError).toBe(true);
   });
   it("runs the local lifecycle over built stdio", async () => {
+    const deadline = Date.now() + 20_000; // Preserve the existing whole-test deadline, including startup.
     const owner = "protocol-owner", idempotencyKey = `protocol-${Date.now()}`;
     const call = async (name: string, args: Record<string, unknown>) => {
       const response = await client.callTool({ name, arguments: args });
@@ -115,7 +122,7 @@ describe("built-artifact stdio structured tool contract", () => {
     const started = await call("start_execution", args);
     expect((await call("start_execution", args)).id).toBe(started.id);
     let status = started;
-    for (let i = 0; i < 100 && status.state === "running"; i++) {
+    while (status.state === "running" && Date.now() < deadline) {
       await new Promise(resolve => setTimeout(resolve, 20));
       status = await call("execution_status", { owner, id: started.id });
     }

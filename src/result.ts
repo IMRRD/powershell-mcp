@@ -4,6 +4,7 @@ import type { PsResult } from "./powershell.js";
 import type { SshResult } from "./ssh.js";
 import type { SftpResult } from "./sftp.js";
 import type { StreamCapture } from "./output-collector.js";
+import { WINRM_REASONS } from './winrm-reason.js';
 
 const streamShape = z.object({ observedBytes: z.number().nonnegative(), capturedBytes: z.number().nonnegative(),
   omittedBytes: z.number().nonnegative(), truncated: z.boolean() });
@@ -30,7 +31,7 @@ export const resultShape = {
   errorRecordsTruncated: z.boolean().optional(),
   terminationCertainty: z.enum(["unknown", "root_exited"]),
   log: z.object({ handle: z.string(), complete: z.boolean(), stdoutBytes: z.number(), stderrBytes: z.number(), expiresAt: z.string() }).optional(),
-  detail: z.object({ shell: z.string().optional(), version: z.string().optional(), signal: z.string().optional(), error: z.string().optional(), direction: z.enum(["upload", "download"]).optional(), bytes: z.number().optional(), verification: z.enum(["not_started", "sha256_matched", "failed"]).optional(), finalized: z.boolean().optional(), cleanup: z.enum(["not_needed", "removed", "failed", "unknown"]).optional(), sha256: z.string().optional(), localExitCode: z.number().nullable().optional() }),
+  detail: z.object({ winrmReason: z.enum(WINRM_REASONS).optional(), shell: z.string().optional(), version: z.string().optional(), signal: z.string().optional(), error: z.string().optional(), direction: z.enum(["upload", "download"]).optional(), bytes: z.number().optional(), verification: z.enum(["not_started", "sha256_matched", "failed"]).optional(), finalized: z.boolean().optional(), cleanup: z.enum(["not_needed", "removed", "failed", "unknown"]).optional(), sha256: z.string().optional(), localExitCode: z.number().nullable().optional() }),
 };
 export type ExecutionResult = z.infer<ReturnType<typeof z.object<typeof resultShape>>>;
 
@@ -50,7 +51,7 @@ export function fromProcess(r: PsResult, transport: "powershell" | "program" | "
       ...(r.stdoutCapture ? { stdout: metrics(r.stdoutCapture) } : {}),
       ...(r.stderrCapture ? { stderr: metrics(r.stderrCapture) } : {}) },
     terminationStatus: status, terminationCertainty: transport === "winrm" || r.timedOut || r.cancelled ? "unknown" : r.exitCode !== null ? "root_exited" : "unknown",
-    detail: transport === "winrm" ? { shell: r.shell, localExitCode: r.exitCode, ...(r.spawnError ? { error: r.spawnError } : {}) } : { shell: r.shell, ...(r.spawnError ? { error: r.spawnError } : {}) },
+    detail: transport === "winrm" ? { shell: r.shell, localExitCode: r.exitCode, winrmReason: r.timedOut ? 'timeout' : r.cancelled ? 'cancelled' : r.spawnError ? 'local_launch_error' : r.protocolError ? 'local_host_error' : r.winrmReason ?? 'unknown', ...(r.spawnError ? { error: r.spawnError } : {}) } : { shell: r.shell, ...(r.spawnError ? { error: r.spawnError } : {}) },
   };
 }
 export function fromSsh(r: SshResult, target: string, limitBytesPerStream: number): ExecutionResult {

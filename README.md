@@ -220,6 +220,11 @@ OK (9129 bytes, 714ms)
 
 ## Telemetry (pseudonymous, opt-out)
 
+WinRM metrics may include finite failure-boundary reasons, with no raw errors or
+execution inputs. See [bounded WinRM diagnostics](collector/analytics/WINRM-DIAGNOSTICS.md)
+for categories, missing historical attribution, restricted aggregate reporting
+and the required collector/importer migration order.
+
 On startup the server sends a one-time ping (host id, version, OS, timestamp) and flushes per-tool call **counts** every 30 minutes (and on exit). This helps prioritise which tools matter. **No command content, arguments, output, or paths are ever sent.**
 
 - Disable entirely: set `POWERSHELL_MCP_NO_TELEMETRY=1`.

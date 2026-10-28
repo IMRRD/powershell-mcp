@@ -18,7 +18,7 @@ CREATE INDEX telemetry_event_installation ON telemetry_event (origin, installati
 CREATE INDEX telemetry_event_arrival ON telemetry_event (received_at) WHERE received_at IS NOT NULL;
 CREATE TABLE telemetry_tool (event_key text NOT NULL REFERENCES telemetry_event(event_key), stream text NOT NULL CHECK(stream IN ('counts','metrics')), tool text NOT NULL, calls bigint NOT NULL CHECK(calls > 0), PRIMARY KEY(event_key, stream, tool));
 CREATE INDEX telemetry_tool_stream ON telemetry_tool (stream, tool);
-CREATE TABLE telemetry_metric_axis (event_key text NOT NULL REFERENCES telemetry_event(event_key), tool text NOT NULL, axis text NOT NULL CHECK(axis IN ('outcomes','durations','features')), bucket text NOT NULL, calls bigint NOT NULL CHECK(calls > 0), PRIMARY KEY(event_key,tool,axis,bucket));
+CREATE TABLE telemetry_metric_axis (event_key text NOT NULL REFERENCES telemetry_event(event_key), tool text NOT NULL, axis text NOT NULL CHECK(axis IN ('outcomes','durations','features','winrmReasons')), bucket text NOT NULL, calls bigint NOT NULL CHECK(calls > 0), PRIMARY KEY(event_key,tool,axis,bucket));
 CREATE TABLE telemetry_checkpoint (source_key text PRIMARY KEY, device bigint NOT NULL, inode bigint NOT NULL, position bigint NOT NULL, prefix_hash text NOT NULL, imported_at timestamptz NOT NULL DEFAULT now());
 CREATE OR REPLACE FUNCTION adoption_utc(from_utc timestamptz, to_utc timestamptz)
 RETURNS TABLE(origin text, observed_installations bigint, active_installations bigint, startup_only_installations bigint)
@@ -72,7 +72,7 @@ $$;
 REVOKE ALL ON FUNCTION user_proxy_raw_utc(timestamptz,timestamptz), user_proxy_utc(timestamptz,timestamptz), privacy_window_safe_utc(timestamptz,timestamptz) FROM PUBLIC;
 CREATE VIEW dashboard_events AS SELECT origin, event, event_at, received_at, version_bucket, os_bucket, event_time_quality, receipt_time_quality FROM telemetry_event;
 CREATE VIEW dashboard_tools AS SELECT e.origin, e.event_at, t.stream, t.tool, t.calls FROM telemetry_tool t JOIN telemetry_event e USING(event_key);
-CREATE VIEW dashboard_metric_axes AS SELECT e.origin, e.event_at, a.tool, a.axis, a.bucket, a.calls FROM telemetry_metric_axis a JOIN telemetry_event e USING(event_key);
+CREATE VIEW dashboard_metric_axes AS SELECT e.origin, e.event_at, a.tool, a.axis, a.bucket, a.calls FROM telemetry_metric_axis a JOIN telemetry_event e USING(event_key) WHERE a.axis <> 'winrmReasons';
 CREATE OR REPLACE FUNCTION delivery_health_utc(as_of timestamptz, from_utc timestamptz, freshness interval)
 RETURNS TABLE(status text, last_receipt timestamptz, last_import timestamptz, invalid_event_times bigint, invalid_receipt_times bigint)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
@@ -88,3 +88,39 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
  FROM telemetry_event e WHERE e.received_at >= from_utc AND e.received_at < as_of
 $$;
 -- Run role.sql as an operator after replacing the password placeholder via secret provisioning.
+
+-- Issue 64: bounded diagnostics; separate marginal, never additional calls.
+CREATE OR REPLACE FUNCTION winrm_diagnostics_utc(from_utc timestamptz, to_utc timestamptz)
+RETURNS TABLE(origin text, reason text, calls numeric)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+ WITH totals AS (
+ SELECT e.origin,sum(t.calls)::numeric AS calls FROM telemetry_event e JOIN telemetry_tool t USING(event_key)
+ WHERE e.event_at >= from_utc AND e.event_at < to_utc AND t.stream='metrics' AND t.tool='winrm_exec' GROUP BY e.origin
+ ), reasons AS (
+ SELECT e.origin,a.bucket AS reason,sum(a.calls)::numeric AS calls FROM telemetry_event e JOIN telemetry_metric_axis a USING(event_key)
+ WHERE e.event_at >= from_utc AND e.event_at < to_utc AND a.tool='winrm_exec' AND a.axis='winrmReasons' GROUP BY e.origin,a.bucket
+ ), cells AS (
+ SELECT * FROM reasons
+ UNION ALL SELECT t.origin,'uninstrumented',t.calls-coalesce((SELECT sum(r.calls) FROM reasons r WHERE r.origin=t.origin),0)
+ FROM totals t
+ ), outcomes AS (
+ SELECT e.origin,a.bucket,sum(a.calls)::numeric AS calls FROM telemetry_event e JOIN telemetry_metric_axis a USING(event_key)
+ WHERE e.event_at >= from_utc AND e.event_at < to_utc AND a.tool='winrm_exec' AND a.axis='outcomes' GROUP BY e.origin,a.bucket
+ ), known AS (
+ SELECT r.origin,CASE WHEN r.reason='completed' THEN 'success'
+ WHEN r.reason IN ('timeout','cancelled') THEN r.reason ELSE 'error' END AS bucket,sum(r.calls) AS calls
+ FROM reasons r WHERE r.reason <> 'unknown' GROUP BY r.origin,
+ CASE WHEN r.reason='completed' THEN 'success' WHEN r.reason IN ('timeout','cancelled') THEN r.reason ELSE 'error' END
+ ), checks AS (
+ SELECT c.calls AS n FROM cells c
+ UNION ALL SELECT t.calls-c.calls FROM cells c JOIN totals t USING(origin)
+ -- Also guard error-outcomes minus known error reasons (and other mapped
+ -- outcomes); otherwise a large unknown bucket could disclose a small remainder.
+ UNION ALL SELECT o.calls-coalesce(k.calls,0) FROM outcomes o LEFT JOIN known k USING(origin,bucket)
+ )
+ SELECT c.origin,c.reason,c.calls FROM cells c
+ WHERE c.calls > 0 AND privacy_window_safe_utc(from_utc,to_utc)
+ AND NOT EXISTS (SELECT 1 FROM checks WHERE n < 0 OR (n > 0 AND n < 10))
+ ORDER BY c.origin,c.reason
+$$;
+REVOKE ALL ON FUNCTION winrm_diagnostics_utc(timestamptz,timestamptz) FROM PUBLIC;

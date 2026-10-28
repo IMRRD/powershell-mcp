@@ -25,3 +25,6 @@ WHERE event_at >= :from_utc AND event_at < :to_utc GROUP BY origin, tool, axis, 
 
 SELECT * FROM (SELECT event_time_quality, receipt_time_quality, count(*) AS records FROM dashboard_events
 GROUP BY event_time_quality, receipt_time_quality) privacy_query WHERE privacy_window_safe_utc(:from_utc, :to_utc);
+
+-- Separate reason marginal; uninstrumented is missing coverage, not a cause.
+SELECT * FROM winrm_diagnostics_utc(:from_utc, :to_utc);

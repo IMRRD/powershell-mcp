@@ -117,7 +117,7 @@ try {
         try:
             self.db.execute(f'GRANT USAGE ON SCHEMA {self.schema} TO {role}')
             self.db.execute(f'GRANT SELECT ON dashboard_events,dashboard_tools,dashboard_metric_axes TO {role}')
-            for signature in ('adoption_utc(timestamptz,timestamptz)', 'user_proxy_utc(timestamptz,timestamptz)', 'privacy_window_safe_utc(timestamptz,timestamptz)', 'delivery_health_utc(timestamptz,timestamptz,interval)'):
+            for signature in ('adoption_utc(timestamptz,timestamptz)', 'user_proxy_utc(timestamptz,timestamptz)', 'privacy_window_safe_utc(timestamptz,timestamptz)', 'delivery_health_utc(timestamptz,timestamptz,interval)', 'winrm_diagnostics_utc(timestamptz,timestamptz)'):
                 self.db.execute(f'GRANT EXECUTE ON FUNCTION {signature} TO {role}')
             self.db.execute('SET ROLE ' + role)
             with self.assertRaises(fixture.psycopg.errors.InsufficientPrivilege): self.db.execute('SELECT * FROM telemetry_event')

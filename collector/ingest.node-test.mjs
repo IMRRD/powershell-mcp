@@ -47,12 +47,18 @@ test('collector accepts legacy shape but rejects unknown fields and oversized bo
     assert.equal((await send(JSON.stringify(metric))).status, 202);
     const batchMetric = { ...metric, eventId: '12345678-1234-4234-8234-123456789013', metrics: { start_remote_batch: metric.metrics.run_program, remote_batch_status: metric.metrics.run_program, cancel_remote_batch: metric.metrics.run_program } };
     assert.equal((await send(JSON.stringify(batchMetric))).status, 202);
+    const winrm = { ...metric, eventId: '12345678-1234-4234-8234-123456789014', metrics: { winrm_exec: { outcomes: { error: 1 }, durations: { lt100: 1 }, features: { remote: 1 }, winrmReasons: { invoke_exception: 1 } } } };
+    assert.equal((await send(JSON.stringify(winrm))).status, 202);
+    for (const winrmReasons of [{ private: 1 }, { unknown: 2 }, {}, { unknown: true }]) {
+      assert.equal((await send(JSON.stringify({ ...winrm, metrics: { winrm_exec: { ...winrm.metrics.winrm_exec, winrmReasons } } }))).status, 422);
+    }
+    assert.equal((await send(JSON.stringify({ ...winrm, metrics: { ssh_exec: winrm.metrics.winrm_exec } }))).status, 422);
     assert.equal((await send(JSON.stringify({ ...metric, metrics: { run_program: { ...metric.metrics.run_program, host: 'private' } } }))).status, 422);
     assert.equal((await send(JSON.stringify({ ...metric, schemaVersion: 1 }))).status, 422);
     assert.equal((await send(JSON.stringify({ ...metric, metrics: { run_program: { ...metric.metrics.run_program, outcomes: { secret: 1 } } } }))).status, 422);
     assert.equal((await send('{')).status, 400);
     const rows = readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
-    assert.equal(rows.length, 6);
+    assert.equal(rows.length, 7);
     assert.deepEqual(rows[0], historical);
     assert.equal(rows[0]._ip, 'historical-private-fixture');
     assert.equal(rows[1].hostId, 'é');

@@ -1,4 +1,5 @@
 /** Fixed, private telemetry dimensions. Never pass arguments or response text to the recorder. */
+import { WINRM_REASONS, type WinRmReason } from './winrm-reason.js';
 export const TOOL_NAMES = ['run_powershell','list_services','get_service','control_service','system_info','ssh_exec','winrm_exec','sftp_upload','sftp_download','run_program','runtime_capabilities','start_execution','execution_status','read_execution_output','cancel_execution','read_output_log','delete_output_log','start_remote_batch','remote_batch_status','cancel_remote_batch'] as const;
 export const OUTCOMES = ['success','nonzero','error','timeout','cancelled','unknown'] as const;
 export const DURATIONS = ['lt100','lt1000','lt10000','gte10000'] as const;
@@ -36,7 +37,7 @@ function outcome(result: unknown): Outcome {
   }
   return 'success'; // Read-only and accepted start/cancel RPCs, not a job outcome.
 }
-export function instrumentTool<T extends (...args: any[]) => any>(name: ToolName, handler: T, record: (name: ToolName, outcome: Outcome, duration: Duration, feature: Feature) => void): T {
+export function instrumentTool<T extends (...args: any[]) => any>(name: ToolName, handler: T, record: (name: ToolName, outcome: Outcome, duration: Duration, feature: Feature, winrmReason?: WinRmReason) => void): T {
   return (async (...args: Parameters<T>) => {
     const started = performance.now();
     let result: unknown, failed = false;
@@ -45,7 +46,21 @@ export function instrumentTool<T extends (...args: any[]) => any>(name: ToolName
     finally {
       const elapsed = performance.now() - started;
       const bucket: Duration = elapsed < 100 ? 'lt100' : elapsed < 1000 ? 'lt1000' : elapsed < 10000 ? 'lt10000' : 'gte10000';
-      try { record(name, failed ? 'error' : outcome(result), bucket, features[name]); } catch { /* metrics cannot break RPC */ }
+      let reason: WinRmReason | undefined;
+      if (name === 'winrm_exec') {
+        reason = 'unknown';
+        if (!failed && object(result) && object(result.structuredContent)) {
+          const data = result.structuredContent;
+          const detail = data.detail;
+          if (data.terminationStatus === 'timeout') reason = 'timeout';
+          else if (data.terminationStatus === 'cancelled') reason = 'cancelled';
+          else if (object(detail) && WINRM_REASONS.includes(detail.winrmReason as WinRmReason)) reason = detail.winrmReason as WinRmReason;
+        }
+      }
+      try {
+        if (reason === undefined) record(name, failed ? 'error' : outcome(result), bucket, features[name]);
+        else record(name, failed ? 'error' : outcome(result), bucket, features[name], reason);
+      } catch { /* metrics cannot break RPC */ }
     }
   }) as T;
 }
