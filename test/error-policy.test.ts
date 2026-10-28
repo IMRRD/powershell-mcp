@@ -50,14 +50,16 @@ for (const exe of engines) describe(`error policy (${exe})`, () => {
     expect(result.stdout).not.toContain("AFTER_ERROR");
     expect(JSON.stringify(result)).not.toContain("SECRET_NOT_EMITTED_62091");
   });
-  it("honors deliberate per-command ErrorAction overrides", async () => {
+  it("honors deliberate per-command ErrorAction Continue", async () => {
     const continued = await run("Write-Error deliberate -ErrorAction Continue; Write-Output AFTER_CONTINUE");
     expect(continued.stdout).toContain("AFTER_CONTINUE");
     expect(continued.scriptError).toBe(true);
+  }, 15000);
+  it("honors deliberate per-command ErrorAction SilentlyContinue", async () => {
     const silent = await run("Write-Error deliberate -ErrorAction SilentlyContinue; Write-Output AFTER_SILENT");
     expect(silent.stdout).toContain("AFTER_SILENT");
     expect(silent.scriptError).toBe(false);
-  }, 15000); // Two real hosts compile the producer writer before executing.
+  }, 15000);
   it("does not fail on successful native stderr", async () => {
     const result = await run(`& ${nativeExe} -e 'process.stderr.write(String(123))'; Write-Output AFTER_NATIVE`);
     expect(result.stdout + result.stderr).toContain("123");
