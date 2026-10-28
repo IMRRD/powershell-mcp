@@ -126,6 +126,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: test-evidence-${{ matrix.os }}-${{ matrix.engine }}
-          path: vitest-report.json
+          path: |
+            vitest-report.json
+            test-evidence/packaged-client.json
           if-no-files-found: warn
           retention-days: 7

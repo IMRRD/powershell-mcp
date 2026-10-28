@@ -3,6 +3,7 @@ dist/
 *.log
 .DS_Store
 coverage/
+test-evidence/
 *.tsbuildinfo
 *.bat
 *.ps1
