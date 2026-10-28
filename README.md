@@ -218,12 +218,36 @@ OK (9129 bytes, 714ms)
 - **`ssh_exec`** uses the pure-JS [`ssh2`](https://github.com/mscdex/ssh2) client (no external binary), so it works headless and needs nothing on the target beyond an SSH server. Ideal for Linux hosts.
 - **`winrm_exec`** uses native PowerShell Remoting, so a Windows fleet needs only WinRM enabled â€” no per-server install.
 
-## Telemetry (anonymous, opt-out)
+## Telemetry (pseudonymous, opt-out)
 
 On startup the server sends a one-time ping (host id, version, OS, timestamp) and flushes per-tool call **counts** every 30 minutes (and on exit). This helps prioritise which tools matter. **No command content, arguments, output, or paths are ever sent.**
 
 - Disable entirely: set `POWERSHELL_MCP_NO_TELEMETRY=1`.
 - Override the endpoint: set `POWERSHELL_MCP_TELEMETRY_URL`.
+
+Optional privacy controls (unset by default): set `POWERSHELL_MCP_TELEMETRY_COHORT=external_self_declared`
+only to voluntarily declare an external installation. Absence means **unknown**, never external.
+Internal/test enrollment uses an operator-protected server registry of existing random installation IDs;
+clients cannot declare themselves internal. Conflicts remain explicit. Older events retain their original
+classification; enrollment does not rewrite history.
+
+To opt into user **pseudonym proxy** estimates, generate a fresh app-specific random UUIDv4 locally,
+for example `[guid]::NewGuid().ToString()` in PowerShell, and set
+`POWERSHELL_MCP_TELEMETRY_USER_ID` in your MCP server environment to that token. Keep the token private;
+never use your account, email, name, machine/hardware identity, or a hash of those values. The client
+accepts only canonical lowercase UUIDv4 tokens and omits invalid settings. Format validation cannot
+prove randomness. No token is generated or linked automatically. You may voluntarily configure the
+same random token on your own installations to link them within this app. Do not reuse it in other apps
+or share it with other people. Remove the setting to stop including it in new events; already queued
+events retain their original fields for replay and permanently retained history is not erased.
+
+Missing user tokens are unknown coverage, never a new person. Reports count distinct tokens only for
+installations whose events in the selected cohort/window consistently carry one token; mixed opt-in
+or token resets count as unknown coverage. Reset installation IDs can inflate installation proxies;
+cloning an ID file can merge installations. Reset tokens can split user estimates across windows and
+shared/cloned tokens can merge multiple people. These are pseudonymous estimates, **not anonymous
+telemetry, verified humans, or a user census**. Default reports suppress small cells and derivable
+complements. See [the enrollment, migration and reporting contract](collector/analytics/PRIVACY-ADOPTION.md).
 
 The collector under [`collector/`](collector/) is a standalone Node.js service (JSONL append, systemd unit, nginx snippet, `deploy.sh`) deployed separately. Maintainers can run an [offline private aggregate report](collector/REPORTING.md) on an authorized local export; unknown-origin installations are **not** labelled external users. Historical JSONL may contain `_ip`; new records do not store peer IP. Protect historical raw records and consult the deployment operator for actual access and retention policy. The stable random installation ID is pseudonymous, not anonymous.
 

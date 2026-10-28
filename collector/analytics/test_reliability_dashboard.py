@@ -7,8 +7,8 @@ class ReliabilityDashboardTests(unittest.TestCase):
     def test_private_metric_panels_use_marginal_axes_and_explicit_coverage(self):
         dashboard = json.loads(Path(__file__).with_name('dashboard.json').read_text())
         panels = {p['id']: p for p in dashboard['panels']}
-        self.assertEqual(dashboard['version'], 3)
-        self.assertEqual(len(panels), 11)
+        self.assertEqual(dashboard['version'], 4)
+        self.assertEqual(len(panels), 12)
         self.assertEqual([panels[n]['gridPos'] for n in (9, 10, 11)], [
             {'x': 0, 'y': 48, 'w': 24, 'h': 9},
             {'x': 0, 'y': 57, 'w': 24, 'h': 9},

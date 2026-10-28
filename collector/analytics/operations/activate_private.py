@@ -307,7 +307,8 @@ class LiveAdapter:
                 if (other or tables not in (set(), {('public', t) for t in expected})
                         or views not in (set(), {('public', v) for v in expected_views})
                         or indexes not in (set(), {('public', i) for i in expected_indexes})
-                        or functions not in (set(), {('public', f) for f in expected_functions})):
+                        or functions not in (set(), {('public', f) for f in expected_functions},
+                                             {('public', f) for f in expected_functions | {'user_proxy_raw_utc', 'user_proxy_utc', 'privacy_window_safe_utc'}})):
                     return False
                 if len({bool(tables), bool(views), bool(indexes), bool(functions)}) != 1:
                     return False

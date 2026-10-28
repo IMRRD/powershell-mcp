@@ -215,7 +215,8 @@ class AnalyticsTest(unittest.TestCase):
         self.append([dict(event='startup', ts='2026-01-01T00:00:00.000Z', _receivedAt='2026-01-01T00:00:01.000Z')])
         ingest(self.db, self.source, self.classes)
         self.assertEqual(self.db.execute("SELECT status FROM delivery_health_utc('2026-01-02', '2026-01-01', interval '1 hour')").fetchone()[0], 'Stale')
-        self.append([dict(event='startup', ts='bad', _receivedAt='2026-01-02T00:00:00.000Z')])
+        # A recent invalid event inside the half-open receipt window is partial.
+        self.append([dict(event='startup', ts='bad', _receivedAt='2026-01-01T23:30:00.000Z')])
         ingest(self.db, self.source, self.classes)
         self.assertEqual(self.db.execute("SELECT status FROM delivery_health_utc('2026-01-02', '2026-01-01', interval '1 hour')").fetchone()[0], 'Partial: invalid event time')
 

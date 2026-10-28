@@ -14,10 +14,10 @@ import ssl
 import sys
 
 UTC = dt.timezone.utc
-ORIGINS = ('internal', 'test', 'unknown_origin')
+ORIGINS = ('internal', 'test', 'unknown_origin', 'external_self_declared', 'cohort_conflict')
 RECIPIENT = 'isak@ialogics.com'
 # Same finite dimensions as the client/importer contract; never echo arbitrary SQL labels.
-TOOLS = {'run_powershell', 'list_services', 'get_service', 'control_service', 'system_info', 'ssh_exec', 'winrm_exec', 'sftp_upload', 'sftp_download', 'run_program', 'runtime_capabilities', 'start_execution', 'execution_status', 'read_execution_output', 'cancel_execution', 'read_output_log', 'delete_output_log'}
+TOOLS = {'run_powershell', 'list_services', 'get_service', 'control_service', 'system_info', 'ssh_exec', 'winrm_exec', 'sftp_upload', 'sftp_download', 'run_program', 'runtime_capabilities', 'start_execution', 'execution_status', 'read_execution_output', 'cancel_execution', 'read_output_log', 'delete_output_log', 'start_remote_batch', 'remote_batch_status', 'cancel_remote_batch'}
 AXES = {'outcomes': {'success', 'nonzero', 'error', 'timeout', 'cancelled', 'unknown'}, 'durations': {'lt100', 'lt1000', 'lt10000', 'gte10000'}, 'features': {'execution', 'inspection', 'remote', 'transfer', 'lifecycle', 'logs'}}
 DURATION_LABELS = {'lt100': 'under 100 ms', 'lt1000': '100–999 ms', 'lt10000': '1–9.999 seconds', 'gte10000': '10 seconds or more'}
 ADDRESS = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\Z")
@@ -63,7 +63,9 @@ def aggregates(connection, start, end):
         receipts = cur.fetchall()
         cur.execute("SELECT last_import FROM delivery_health_utc(%s,%s,interval '2 hours')", (end, start))
         imported = cur.fetchone()[0]
-    return dict(adoption=adoption, events=events, tools=tools, axes=axes, quality=quality, unknown_receipt_count=unknown_receipt_count, receipts=receipts, imported=imported)
+        cur.execute('SELECT * FROM user_proxy_utc(%s,%s)', (start, end))
+        users = cur.fetchall()
+    return dict(adoption=adoption, users=users, events=events, tools=tools, axes=axes, quality=quality, unknown_receipt_count=unknown_receipt_count, receipts=receipts, imported=imported)
 
 
 def render(data, start, end, now, config=None):
@@ -200,7 +202,17 @@ def report(data, start, end, now, config=None):
         table('Recorded events', ['Origin','Event','Batches / events'], sorted(data['events']))
         axes = [(o,t,a,DURATION_LABELS[b] if a == 'durations' else b,n) for o,t,a,b,n in sorted(data['axes'])]
         table('Recorded metric distributions (separate marginals)', ['Origin','Tool','Axis','Bucket','Calls'], axes)
-    note('Installation IDs are proxies, not people. Unknown origin is not external users.')
+    users = data.get('users', [])
+    for origin, observed, covered, unknown, proxies in users:
+        if origin not in ORIGINS or any(isinstance(n, bool) or not isinstance(n, int) or n < 0 for n in (observed,covered,unknown,proxies)) or covered + unknown != observed or proxies > covered:
+            raise ValueError('invalid user coverage aggregate')
+    user_small = any(0 < n < 10 for o,obs,cov,unk,p in users for n in (obs,cov,unk,p,cov-p))
+    if users and not user_small and not small:
+        table('Optional user pseudonym proxies and installation coverage', ['Origin','Observed installations','Covered installations','Unknown user installations','User proxies'], users)
+    else:
+        note('Optional user counts unavailable (privacy suppression or no coverage); missing identity is unknown, never a new person.')
+    note('Installation IDs are proxies, not people. Unknown origin is not external users. External cohort is self-declared; cohort conflicts are explicit. Cohorts may overlap across events; do not add distinct counts.')
+    note('User proxies are voluntary random pseudonyms, not anonymous or verified humans. Resets, mixed opt-in and clones limit coverage; no automatic cross-device linkage.')
     note('Counts and metrics are overlapping streams, never added into unique calls. Axis distributions are separate marginals.')
     note('Receipts cover each hour; this does not prove upstream delivery of every event.')
     note(f'Import checkpoint: {data["imported"].isoformat()}; weekly hourly receipt coverage: 168/168')

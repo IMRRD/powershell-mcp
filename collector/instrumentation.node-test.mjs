@@ -11,13 +11,13 @@ const id = '12345678-1234-4234-8234-123456789012';
 const base = { schemaVersion: 2, eventId: id, hostId: id, event: 'tool_metrics', version: '0.6.0', os: process.platform, ts: new Date().toISOString() };
 
 test('all registered tools have bounded safe classifications and outcomes', async () => {
-  const names = ['run_powershell','list_services','get_service','control_service','system_info','ssh_exec','winrm_exec','sftp_upload','sftp_download','run_program','runtime_capabilities','start_execution','execution_status','read_execution_output','cancel_execution','read_output_log','delete_output_log'];
+  const names = ['run_powershell','list_services','get_service','control_service','system_info','ssh_exec','winrm_exec','sftp_upload','sftp_download','run_program','runtime_capabilities','start_execution','execution_status','read_execution_output','cancel_execution','read_output_log','delete_output_log','start_remote_batch','remote_batch_status','cancel_remote_batch'];
   const outcomes = [];
   for (const name of names) {
     const handler = instrumentTool(name, async () => ({ structuredContent: { terminationStatus: 'nonzero_exit', target: 'private-host', stdout: 'secret' }, content: [] }), (_n, o, b, f) => outcomes.push([name,o,b,f]));
     await handler({});
   }
-  assert.equal(outcomes.length, 17);
+  assert.equal(outcomes.length, 20);
   assert.ok(outcomes.every(x => x[1] === 'nonzero' && ['lt100','lt1000','lt10000','gte10000'].includes(x[2]) && ['execution','inspection','remote','transfer','lifecycle','logs'].includes(x[3])));
   assert.equal(JSON.stringify(outcomes).includes('private-host'), false);
 });

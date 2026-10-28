@@ -23,11 +23,15 @@ test('versioned receipt deduplicates after a real collector process restart', as
   let child;
   try {
     child = await start(port, file);
-    const send = () => fetch(`http://127.0.0.1:${port}/api/telemetry`, { method: 'POST', body: JSON.stringify(fixture) });
+    const send = (value = fixture) => fetch(`http://127.0.0.1:${port}/api/telemetry`, { method: 'POST', body: JSON.stringify(value) });
     let r = await send(); assert.equal(r.status, 202); assert.deepEqual(await r.json(), { ok: true, eventId: fixture.eventId });
+    const metric = { ...fixture, event: 'tool_metrics', schemaVersion: 2, eventId: '550e8400-e29b-41d4-a716-446655440001', userId: '12345678-1234-4234-8234-123456789abc', cohort: 'external_self_declared', metrics: { winrm_exec: { outcomes: { error: 1 }, durations: { lt1000: 1 }, features: { remote: 1 } } } };
+    assert.equal((await send(metric)).status, 202);
     await stop(child); child = await start(port, file);
     r = await send(); assert.equal(r.status, 202); assert.deepEqual(await r.json(), { ok: true, eventId: fixture.eventId });
-    assert.equal(readFileSync(file, 'utf8').trim().split('\n').length, 1);
+    assert.equal((await send(metric)).status, 202);
+    assert.equal((await send({ ...metric, userId: '12345678-1234-4234-8234-123456789abd' })).status, 409);
+    assert.equal(readFileSync(file, 'utf8').trim().split('\n').length, 2);
     assert.equal((await fetch(`http://127.0.0.1:${port}/api/telemetry`, { method: 'POST', body: JSON.stringify({ ...fixture, eventId: 'not-id' }) })).status, 422);
   } finally { if (child) await stop(child); rmSync(dir, { recursive: true, force: true }); }
 });

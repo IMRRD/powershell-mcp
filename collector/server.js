@@ -28,7 +28,7 @@ const DATA_FILE = process.env.TELEMETRY_FILE ?? path.join(
 );
 
 const MAX_BODY_BYTES = 16 * 1024;
-const TOOLS = new Set(['run_powershell', 'list_services', 'get_service', 'control_service', 'system_info', 'ssh_exec', 'winrm_exec', 'sftp_upload', 'sftp_download', 'run_program', 'runtime_capabilities', 'start_execution', 'execution_status', 'read_execution_output', 'cancel_execution', 'read_output_log', 'delete_output_log']);
+const TOOLS = new Set(['run_powershell', 'list_services', 'get_service', 'control_service', 'system_info', 'ssh_exec', 'winrm_exec', 'sftp_upload', 'sftp_download', 'run_program', 'runtime_capabilities', 'start_execution', 'execution_status', 'read_execution_output', 'cancel_execution', 'read_output_log', 'delete_output_log', 'start_remote_batch', 'remote_batch_status', 'cancel_remote_batch']);
 const OUTCOMES = new Set(['success','nonzero','error','timeout','cancelled','unknown']);
 const DURATIONS = new Set(['lt100','lt1000','lt10000','gte10000']);
 const FEATURES = new Set(['execution','inspection','remote','transfer','lifecycle','logs']);
@@ -94,7 +94,7 @@ function rebuildReceipts() {
     const ingest = line => {
       if (!line.length) return;
       const row = JSON.parse(line.toString('utf8'));
-      if (row.schemaVersion !== 1 || typeof row.eventId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(row.eventId)) return; // legacy rows preserved
+      if (![1, 2].includes(row.schemaVersion) || typeof row.eventId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(row.eventId)) return; // legacy rows preserved
       const { _receivedAt, ...payload } = row;
       receipt(row.eventId, digest(payload));
     };
@@ -166,6 +166,8 @@ function validPayload(p) {
   if (('eventId' in p || 'schemaVersion' in p) && !versioned) return false;
   const expected = p.event === 'startup' ? ['event', 'hostId', 'os', 'ts', 'version'] : p.event === 'tool_counts' ? ['counts', 'event', 'hostId', 'os', 'ts', 'version'] : ['metrics','event','hostId','os','ts','version'];
   if (versioned) expected.push('eventId', 'schemaVersion');
+  if ('userId' in p) { if (!versioned || typeof p.userId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(p.userId)) return false; expected.push('userId'); }
+  if ('cohort' in p) { if (!versioned || p.cohort !== 'external_self_declared') return false; expected.push('cohort'); }
   expected.sort();
   if (Object.keys(p).sort().join(',') !== expected.join(',')) return false;
   if (typeof p.hostId !== 'string' || !p.hostId || p.hostId.length > 256 || typeof p.version !== 'string' || !p.version || p.version.length > 256 || !OS.has(p.os) || !date(p.ts)) return false;

@@ -9,5 +9,6 @@ GRANT SELECT, INSERT, UPDATE ON telemetry_event, telemetry_tool, telemetry_metri
 GRANT SELECT ON dashboard_events, dashboard_tools, dashboard_metric_axes TO telemetry_dashboard;
 GRANT EXECUTE ON FUNCTION adoption_utc(timestamptz,timestamptz) TO telemetry_dashboard;
 GRANT EXECUTE ON FUNCTION delivery_health_utc(timestamptz,timestamptz,interval) TO telemetry_dashboard;
+GRANT EXECUTE ON FUNCTION user_proxy_utc(timestamptz,timestamptz), privacy_window_safe_utc(timestamptz,timestamptz) TO telemetry_dashboard;
 -- PostgreSQL views run as their owner; dashboard role cannot SELECT raw tables.
 -- Analytics database must contain only this schema; manage other schemas separately.

@@ -24,13 +24,13 @@
         "type": "postgres",
         "uid": "powershell-mcp-pg"
       },
-      "description": "Metric-instrumented calls in selected event-time window. Legacy count batches are excluded; not a total of every historical call.",
+      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external.",
       "targets": [
         {
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT sum(calls) AS calls FROM dashboard_metric_axes WHERE $__timeFilter(event_at) AND axis = 'outcomes'",
+          "rawSql": "SELECT * FROM (SELECT sum(calls) AS calls FROM dashboard_metric_axes WHERE event_at >= $__timeFrom()::timestamptz AND event_at < $__timeTo()::timestamptz AND axis = 'outcomes') privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
           "datasource": {
             "type": "postgres",
             "uid": "powershell-mcp-pg"
@@ -65,13 +65,13 @@
         "type": "postgres",
         "uid": "powershell-mcp-pg"
       },
-      "description": "Includes nonzero exits, errors, timeouts, cancellations and unknown outcomes. A nonzero exit is not necessarily a product defect.",
+      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external.",
       "targets": [
         {
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT sum(calls) FILTER (WHERE bucket IN ('nonzero','error','timeout','cancelled','unknown')) AS outcomes FROM dashboard_metric_axes WHERE $__timeFilter(event_at) AND axis = 'outcomes'",
+          "rawSql": "SELECT * FROM (SELECT sum(calls) FILTER (WHERE bucket IN ('nonzero','error','timeout','cancelled','unknown')) AS outcomes FROM dashboard_metric_axes WHERE event_at >= $__timeFrom()::timestamptz AND event_at < $__timeTo()::timestamptz AND axis = 'outcomes') privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
           "datasource": {
             "type": "postgres",
             "uid": "powershell-mcp-pg"
@@ -106,13 +106,13 @@
         "type": "postgres",
         "uid": "powershell-mcp-pg"
       },
-      "description": "Recorded duration bucket, not an inferred p95 or execution-time percentile.",
+      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external.",
       "targets": [
         {
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT sum(calls) FILTER (WHERE bucket = 'gte10000') AS slow_calls FROM dashboard_metric_axes WHERE $__timeFilter(event_at) AND axis = 'durations'",
+          "rawSql": "SELECT * FROM (SELECT sum(calls) FILTER (WHERE bucket = 'gte10000') AS slow_calls FROM dashboard_metric_axes WHERE event_at >= $__timeFrom()::timestamptz AND event_at < $__timeTo()::timestamptz AND axis = 'durations') privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
           "datasource": {
             "type": "postgres",
             "uid": "powershell-mcp-pg"
@@ -147,13 +147,13 @@
         "type": "postgres",
         "uid": "powershell-mcp-pg"
       },
-      "description": "Latest received telemetry at or before the window end. Receipt is not end-to-end delivery or instrumentation proof.",
+      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external.",
       "targets": [
         {
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT (extract(epoch FROM max(received_at))*1000)::bigint AS last_receipt FROM dashboard_events WHERE received_at <= $__timeTo()::timestamptz",
+          "rawSql": "SELECT * FROM (SELECT (extract(epoch FROM max(received_at))*1000)::bigint AS last_receipt FROM dashboard_events WHERE received_at >= $__timeFrom()::timestamptz AND received_at < $__timeTo()::timestamptz) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
           "datasource": {
             "type": "postgres",
             "uid": "powershell-mcp-pg"
@@ -209,13 +209,13 @@
         "type": "postgres",
         "uid": "powershell-mcp-pg"
       },
-      "description": "Metric stream only. Non-success includes nonzero, errors, timeout, cancelled and unknown; slow is ≥10 seconds. Independent outcome/duration marginals aggregated before joining by tool. A missing axis is unknown.",
+      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external.",
       "targets": [
         {
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "WITH outcomes AS (\n SELECT tool,sum(calls) AS recorded_calls,\n sum(calls) FILTER (WHERE bucket IN ('nonzero','error','timeout','cancelled','unknown')) AS non_success,\n sum(calls) FILTER (WHERE bucket = 'timeout') AS timeouts,\n sum(calls) FILTER (WHERE bucket = 'error') AS errors,\n sum(calls) FILTER (WHERE bucket = 'nonzero') AS nonzero_exits,\n sum(calls) FILTER (WHERE bucket = 'cancelled') AS cancelled,\n sum(calls) FILTER (WHERE bucket = 'unknown') AS unknown_outcomes\n FROM dashboard_metric_axes WHERE $__timeFilter(event_at) AND axis = 'outcomes' GROUP BY tool\n), durations AS (\n SELECT tool,sum(calls) AS duration_recorded_calls,\n sum(calls) FILTER (WHERE bucket = 'gte10000') AS slow_calls\n FROM dashboard_metric_axes WHERE $__timeFilter(event_at) AND axis = 'durations' GROUP BY tool\n)\nSELECT coalesce(o.tool,d.tool) AS tool, o.recorded_calls,\n coalesce(o.non_success,0) AS non_success,\n round(100.0*coalesce(o.non_success,0)/NULLIF(o.recorded_calls,0),1) AS non_success_pct,\n coalesce(o.timeouts,0) AS timeouts,\n d.slow_calls AS slow_calls,\n round(100.0*d.slow_calls/NULLIF(d.duration_recorded_calls,0),1) AS slow_pct\nFROM outcomes o FULL OUTER JOIN durations d ON o.tool=d.tool\nORDER BY non_success DESC NULLS LAST, slow_calls DESC NULLS LAST, tool",
+          "rawSql": "SELECT * FROM (WITH outcomes AS (\n SELECT tool,sum(calls) AS recorded_calls,\n sum(calls) FILTER (WHERE bucket IN ('nonzero','error','timeout','cancelled','unknown')) AS non_success,\n sum(calls) FILTER (WHERE bucket = 'timeout') AS timeouts,\n sum(calls) FILTER (WHERE bucket = 'error') AS errors,\n sum(calls) FILTER (WHERE bucket = 'nonzero') AS nonzero_exits,\n sum(calls) FILTER (WHERE bucket = 'cancelled') AS cancelled,\n sum(calls) FILTER (WHERE bucket = 'unknown') AS unknown_outcomes\n FROM dashboard_metric_axes WHERE event_at >= $__timeFrom()::timestamptz AND event_at < $__timeTo()::timestamptz AND axis = 'outcomes' GROUP BY tool\n), durations AS (\n SELECT tool,sum(calls) AS duration_recorded_calls,\n sum(calls) FILTER (WHERE bucket = 'gte10000') AS slow_calls\n FROM dashboard_metric_axes WHERE event_at >= $__timeFrom()::timestamptz AND event_at < $__timeTo()::timestamptz AND axis = 'durations' GROUP BY tool\n)\nSELECT coalesce(o.tool,d.tool) AS tool, o.recorded_calls,\n coalesce(o.non_success,0) AS non_success,\n round(100.0*coalesce(o.non_success,0)/NULLIF(o.recorded_calls,0),1) AS non_success_pct,\n coalesce(o.timeouts,0) AS timeouts,\n d.slow_calls AS slow_calls,\n round(100.0*d.slow_calls/NULLIF(d.duration_recorded_calls,0),1) AS slow_pct\nFROM outcomes o FULL OUTER JOIN durations d ON o.tool=d.tool\nORDER BY non_success DESC NULLS LAST, slow_calls DESC NULLS LAST, tool) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
           "datasource": {
             "type": "postgres",
             "uid": "powershell-mcp-pg"
@@ -326,13 +326,13 @@
         "type": "postgres",
         "uid": "powershell-mcp-pg"
       },
-      "description": "Distinct outcomes; a nonzero exit alone does not establish a defect.",
+      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external.",
       "targets": [
         {
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT tool, sum(calls) FILTER (WHERE bucket = 'success') AS success, sum(calls) FILTER (WHERE bucket = 'nonzero') AS nonzero, sum(calls) FILTER (WHERE bucket = 'error') AS errors, sum(calls) FILTER (WHERE bucket = 'timeout') AS timeouts, sum(calls) FILTER (WHERE bucket = 'cancelled') AS cancelled, sum(calls) FILTER (WHERE bucket = 'unknown') AS unknown FROM dashboard_metric_axes WHERE $__timeFilter(event_at) AND axis = 'outcomes' GROUP BY tool ORDER BY tool",
+          "rawSql": "SELECT * FROM (SELECT tool, sum(calls) FILTER (WHERE bucket = 'success') AS success, sum(calls) FILTER (WHERE bucket = 'nonzero') AS nonzero, sum(calls) FILTER (WHERE bucket = 'error') AS errors, sum(calls) FILTER (WHERE bucket = 'timeout') AS timeouts, sum(calls) FILTER (WHERE bucket = 'cancelled') AS cancelled, sum(calls) FILTER (WHERE bucket = 'unknown') AS unknown FROM dashboard_metric_axes WHERE event_at >= $__timeFrom()::timestamptz AND event_at < $__timeTo()::timestamptz AND axis = 'outcomes' GROUP BY tool ORDER BY tool) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
           "datasource": {
             "type": "postgres",
             "uid": "powershell-mcp-pg"
@@ -364,13 +364,13 @@
         "type": "postgres",
         "uid": "powershell-mcp-pg"
       },
-      "description": "One metric stream only. Legacy counts are separately available below.",
+      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external.",
       "targets": [
         {
           "refId": "A",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT tool, sum(calls) AS calls FROM dashboard_metric_axes WHERE $__timeFilter(event_at) AND axis = 'outcomes' GROUP BY tool ORDER BY calls DESC",
+          "rawSql": "SELECT * FROM (SELECT tool, sum(calls) AS calls FROM dashboard_metric_axes WHERE event_at >= $__timeFrom()::timestamptz AND event_at < $__timeTo()::timestamptz AND axis = 'outcomes' GROUP BY tool ORDER BY calls DESC) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
           "datasource": {
             "type": "postgres",
             "uid": "powershell-mcp-pg"
@@ -417,13 +417,14 @@
               "refId": "A",
               "format": "table",
               "rawQuery": true,
-              "rawSql": "SELECT * FROM adoption_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
+              "rawSql": "SELECT * FROM (SELECT * FROM adoption_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
               "datasource": {
                 "type": "postgres",
                 "uid": "powershell-mcp-pg"
               }
             }
-          ]
+          ],
+          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
         },
         {
           "id": 202,
@@ -444,13 +445,14 @@
               "refId": "A",
               "format": "table",
               "rawQuery": true,
-              "rawSql": "SELECT origin, event, count(*) AS delivered_events FROM dashboard_events WHERE $__timeFilter(event_at) GROUP BY origin, event",
+              "rawSql": "SELECT * FROM (SELECT origin, event, count(*) AS delivered_events FROM dashboard_events WHERE event_at >= $__timeFrom()::timestamptz AND event_at < $__timeTo()::timestamptz GROUP BY origin, event) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
               "datasource": {
                 "type": "postgres",
                 "uid": "powershell-mcp-pg"
               }
             }
-          ]
+          ],
+          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
         },
         {
           "id": 203,
@@ -471,13 +473,14 @@
               "refId": "A",
               "format": "table",
               "rawQuery": true,
-              "rawSql": "SELECT origin, stream, tool, sum(calls) AS delivered_calls FROM dashboard_tools WHERE $__timeFilter(event_at) GROUP BY origin, stream, tool",
+              "rawSql": "SELECT * FROM (SELECT origin, stream, tool, sum(calls) AS delivered_calls FROM dashboard_tools WHERE event_at >= $__timeFrom()::timestamptz AND event_at < $__timeTo()::timestamptz GROUP BY origin, stream, tool) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
               "datasource": {
                 "type": "postgres",
                 "uid": "powershell-mcp-pg"
               }
             }
-          ]
+          ],
+          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
         },
         {
           "id": 204,
@@ -498,13 +501,14 @@
               "refId": "A",
               "format": "table",
               "rawQuery": true,
-              "rawSql": "SELECT origin, version_bucket, os_bucket, count(*) AS delivered_events FROM dashboard_events WHERE $__timeFilter(event_at) GROUP BY origin, version_bucket, os_bucket",
+              "rawSql": "SELECT * FROM (SELECT origin, version_bucket, os_bucket, count(*) AS delivered_events FROM dashboard_events WHERE event_at >= $__timeFrom()::timestamptz AND event_at < $__timeTo()::timestamptz GROUP BY origin, version_bucket, os_bucket) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
               "datasource": {
                 "type": "postgres",
                 "uid": "powershell-mcp-pg"
               }
             }
-          ]
+          ],
+          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
         },
         {
           "id": 205,
@@ -525,13 +529,14 @@
               "refId": "A",
               "format": "table",
               "rawQuery": true,
-              "rawSql": "SELECT origin, date_trunc('day', received_at) AS received_day, count(*) AS received_events, percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM (received_at-event_at))) AS p95_lag_seconds FROM dashboard_events WHERE $__timeFilter(received_at) AND event_at IS NOT NULL GROUP BY origin, received_day",
+              "rawSql": "SELECT * FROM (SELECT origin, date_trunc('day', received_at) AS received_day, count(*) AS received_events, percentile_cont(0.95) WITHIN GROUP (ORDER BY extract(epoch FROM (received_at-event_at))) AS p95_lag_seconds FROM dashboard_events WHERE received_at >= $__timeFrom()::timestamptz AND received_at < $__timeTo()::timestamptz AND event_at IS NOT NULL GROUP BY origin, received_day) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
               "datasource": {
                 "type": "postgres",
                 "uid": "powershell-mcp-pg"
               }
             }
-          ]
+          ],
+          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
         },
         {
           "id": 206,
@@ -552,7 +557,7 @@
               "refId": "A",
               "format": "table",
               "rawQuery": true,
-              "rawSql": "SELECT * FROM delivery_health_utc($__timeTo()::timestamptz, $__timeFrom()::timestamptz, interval '2 hours')",
+              "rawSql": "SELECT * FROM (SELECT * FROM delivery_health_utc($__timeTo()::timestamptz, $__timeFrom()::timestamptz, interval '2 hours')) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
               "datasource": {
                 "type": "postgres",
                 "uid": "powershell-mcp-pg"
@@ -622,7 +627,8 @@
                 ]
               }
             ]
-          }
+          },
+          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
         },
         {
           "id": 207,
@@ -643,13 +649,14 @@
               "refId": "A",
               "format": "table",
               "rawQuery": true,
-              "rawSql": "SELECT origin, tool, axis, bucket, sum(calls) AS calls FROM dashboard_metric_axes WHERE $__timeFilter(event_at) GROUP BY origin, tool, axis, bucket",
+              "rawSql": "SELECT * FROM (SELECT origin, tool, axis, bucket, sum(calls) AS calls FROM dashboard_metric_axes WHERE event_at >= $__timeFrom()::timestamptz AND event_at < $__timeTo()::timestamptz GROUP BY origin, tool, axis, bucket) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
               "datasource": {
                 "type": "postgres",
                 "uid": "powershell-mcp-pg"
               }
             }
-          ]
+          ],
+          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
         },
         {
           "id": 208,
@@ -670,13 +677,14 @@
               "refId": "A",
               "format": "table",
               "rawQuery": true,
-              "rawSql": "SELECT event_time_quality, receipt_time_quality, count(*) AS records FROM dashboard_events GROUP BY event_time_quality, receipt_time_quality",
+              "rawSql": "SELECT * FROM (SELECT event_time_quality, receipt_time_quality, count(*) AS records FROM dashboard_events GROUP BY event_time_quality, receipt_time_quality) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
               "datasource": {
                 "type": "postgres",
                 "uid": "powershell-mcp-pg"
               }
             }
-          ]
+          ],
+          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
         },
         {
           "id": 209,
@@ -697,13 +705,14 @@
               "refId": "A",
               "format": "table",
               "rawQuery": true,
-              "rawSql": "SELECT a.origin, a.tool, sum(a.calls) AS recorded_calls, coalesce(sum(a.calls) FILTER (WHERE a.bucket IN ('nonzero','error','timeout','cancelled','unknown')),0) AS recorded_not_success, round(100.0 * coalesce(sum(a.calls) FILTER (WHERE a.bucket IN ('nonzero','error','timeout','cancelled','unknown')),0) / NULLIF(sum(a.calls), 0), 1) AS not_success_pct, coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'nonzero'),0) AS nonzero, coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'error'),0) AS errors, coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'timeout'),0) AS timeouts, coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'cancelled'),0) AS cancelled, coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'unknown'),0) AS unknown_outcomes FROM dashboard_metric_axes a WHERE $__timeFilter(a.event_at) AND a.axis = 'outcomes' GROUP BY a.origin,a.tool ORDER BY recorded_not_success DESC NULLS LAST,a.tool",
+              "rawSql": "SELECT * FROM (SELECT a.origin, a.tool, sum(a.calls) AS recorded_calls, coalesce(sum(a.calls) FILTER (WHERE a.bucket IN ('nonzero','error','timeout','cancelled','unknown')),0) AS recorded_not_success, round(100.0 * coalesce(sum(a.calls) FILTER (WHERE a.bucket IN ('nonzero','error','timeout','cancelled','unknown')),0) / NULLIF(sum(a.calls), 0), 1) AS not_success_pct, coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'nonzero'),0) AS nonzero, coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'error'),0) AS errors, coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'timeout'),0) AS timeouts, coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'cancelled'),0) AS cancelled, coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'unknown'),0) AS unknown_outcomes FROM dashboard_metric_axes a WHERE a.event_at >= $__timeFrom()::timestamptz AND a.event_at < $__timeTo()::timestamptz AND a.axis = 'outcomes' GROUP BY a.origin,a.tool ORDER BY recorded_not_success DESC NULLS LAST,a.tool) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
               "datasource": {
                 "type": "postgres",
                 "uid": "powershell-mcp-pg"
               }
             }
-          ]
+          ],
+          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
         },
         {
           "id": 210,
@@ -724,13 +733,14 @@
               "refId": "A",
               "format": "table",
               "rawQuery": true,
-              "rawSql": "SELECT a.origin,a.tool,sum(a.calls) AS recorded_calls,coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'gte10000'),0) AS at_least_10_seconds,round(100.0 * coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'gte10000'),0) / NULLIF(sum(a.calls),0),1) AS at_least_10_seconds_pct,coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'lt100'),0) AS under_100_ms,coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'lt1000'),0) AS under_1_second,coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'lt10000'),0) AS under_10_seconds FROM dashboard_metric_axes a WHERE $__timeFilter(a.event_at) AND a.axis = 'durations' GROUP BY a.origin,a.tool ORDER BY at_least_10_seconds DESC,a.tool",
+              "rawSql": "SELECT * FROM (SELECT a.origin,a.tool,sum(a.calls) AS recorded_calls,coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'gte10000'),0) AS at_least_10_seconds,round(100.0 * coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'gte10000'),0) / NULLIF(sum(a.calls),0),1) AS at_least_10_seconds_pct,coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'lt100'),0) AS under_100_ms,coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'lt1000'),0) AS under_1_second,coalesce(sum(a.calls) FILTER (WHERE a.bucket = 'lt10000'),0) AS under_10_seconds FROM dashboard_metric_axes a WHERE a.event_at >= $__timeFrom()::timestamptz AND a.event_at < $__timeTo()::timestamptz AND a.axis = 'durations' GROUP BY a.origin,a.tool ORDER BY at_least_10_seconds DESC,a.tool) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
               "datasource": {
                 "type": "postgres",
                 "uid": "powershell-mcp-pg"
               }
             }
-          ]
+          ],
+          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
         },
         {
           "id": 211,
@@ -751,7 +761,36 @@
               "refId": "A",
               "format": "table",
               "rawQuery": true,
-              "rawSql": "SELECT e.origin,e.version_bucket,count(*) FILTER (WHERE e.event = 'tool_counts') AS legacy_count_batches,count(*) FILTER (WHERE e.event = 'tool_metrics') AS metric_batches,CASE WHEN count(*) FILTER (WHERE e.event = 'tool_metrics') > 0 THEN 'Metrics observed; coverage of all tools unknown' WHEN count(*) FILTER (WHERE e.event = 'tool_counts') > 0 THEN 'Legacy counts only; outcomes/durations uninstrumented' ELSE 'Unknown: no tool batches' END AS evidence FROM dashboard_events e WHERE $__timeFilter(e.event_at) AND e.event IN ('tool_counts','tool_metrics') GROUP BY e.origin,e.version_bucket ORDER BY e.origin,e.version_bucket",
+              "rawSql": "SELECT * FROM (SELECT e.origin,e.version_bucket,count(*) FILTER (WHERE e.event = 'tool_counts') AS legacy_count_batches,count(*) FILTER (WHERE e.event = 'tool_metrics') AS metric_batches,CASE WHEN count(*) FILTER (WHERE e.event = 'tool_metrics') > 0 THEN 'Metrics observed; coverage of all tools unknown' WHEN count(*) FILTER (WHERE e.event = 'tool_counts') > 0 THEN 'Legacy counts only; outcomes/durations uninstrumented' ELSE 'Unknown: no tool batches' END AS evidence FROM dashboard_events e WHERE e.event_at >= $__timeFrom()::timestamptz AND e.event_at < $__timeTo()::timestamptz AND e.event IN ('tool_counts','tool_metrics') GROUP BY e.origin,e.version_bucket ORDER BY e.origin,e.version_bucket) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
+              "datasource": {
+                "type": "postgres",
+                "uid": "powershell-mcp-pg"
+              }
+            }
+          ],
+          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
+        },
+        {
+          "id": 250,
+          "title": "Optional user pseudonym proxies and installation coverage (not verified humans)",
+          "type": "table",
+          "gridPos": {
+            "x": 0,
+            "y": 75,
+            "w": 24,
+            "h": 9
+          },
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          },
+          "description": "Explicit opt-in only. Absent, mixed or reset tokens are unknown coverage. Shared tokens link only voluntarily; clones and resets distort estimates. Empty results mean unavailable or suppressed.",
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT * FROM user_proxy_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz) WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
               "datasource": {
                 "type": "postgres",
                 "uid": "powershell-mcp-pg"

@@ -3,6 +3,12 @@ import { validQueuedEvent, readAcknowledgement } from '../src/telemetry-wire.js'
 const eventId = '12345678-1234-4234-8234-123456789abc';
 const payload = { schemaVersion: 1, eventId, event: 'startup', version: '0.6.0', hostId: eventId, os: 'win32', ts: '2026-10-21T00:00:00.000Z' };
 describe('telemetry wire boundaries', () => {
+  it('validates optional pseudonyms and explicit external declarations on disk replay', () => {
+    expect(validQueuedEvent({ ...payload, userId: eventId, cohort: 'external_self_declared' }, eventId)).toBe(true);
+    for (const extra of [{ userId: 'name@example.invalid' }, { userId: eventId.toUpperCase() }, { cohort: 'internal' }, { cohort: 'external' }, { userId: null }, { hostname: 'private' }]) {
+      expect(validQueuedEvent({ ...payload, ...extra }, eventId)).toBe(false);
+    }
+  });
   it('accepts only the complete allowlisted event', () => {
     expect(validQueuedEvent(payload, eventId)).toBe(true);
     expect(validQueuedEvent({ ...payload, command: 'private' }, eventId)).toBe(false);

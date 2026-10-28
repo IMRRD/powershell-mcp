@@ -19,8 +19,8 @@ class PrivateDashboardLayoutTests(unittest.TestCase):
                   if prop['id'] == 'custom.width') for o in overrides}
         self.assertEqual(widths, expected)
         self.assertLessEqual(sum(widths.values()), 1110)
-        self.assertEqual(panel['targets'][0]['rawSql'],
-                         "SELECT * FROM delivery_health_utc($__timeTo()::timestamptz, $__timeFrom()::timestamptz, interval '2 hours')")
+        self.assertIn(
+                         "SELECT * FROM delivery_health_utc($__timeTo()::timestamptz, $__timeFrom()::timestamptz, interval '2 hours')", panel['targets'][0]['rawSql'])
 
 
 if __name__ == '__main__':

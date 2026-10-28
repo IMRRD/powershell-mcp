@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parentPort } from 'node:worker_threads';
-import { validQueuedEvent, readAcknowledgement } from './telemetry-wire.js';
+import { validQueuedEvent, readAcknowledgement, USER_ID } from './telemetry-wire.js';
 import type { ToolName, Outcome, Duration, Feature } from './tool-instrumentation.js';
 
 const URL = process.env.POWERSHELL_MCP_TELEMETRY_URL ?? 'https://paperclip.mplace.co.za/api/telemetry';
@@ -66,7 +66,11 @@ function enqueue(event: 'startup' | 'tool_counts' | 'tool_metrics', version: str
   try {
     privateRoot();
     const eventId = randomUUID();
-    const payload = { schemaVersion: event === 'tool_metrics' ? 2 : 1, eventId, event, version, hostId: id(), os: process.platform, ts: new Date().toISOString(), ...(counts ? { counts } : {}), ...(metrics ? { metrics } : {}) };
+    const user = process.env.POWERSHELL_MCP_TELEMETRY_USER_ID;
+    const payload = { schemaVersion: event === 'tool_metrics' ? 2 : 1, eventId, event, version, hostId: id(), os: process.platform, ts: new Date().toISOString(),
+      ...(user && USER_ID.test(user) ? { userId: user } : {}),
+      ...(process.env.POWERSHELL_MCP_TELEMETRY_COHORT === 'external_self_declared' ? { cohort: 'external_self_declared' } : {}),
+      ...(counts ? { counts } : {}), ...(metrics ? { metrics } : {}) };
     const body = JSON.stringify(payload);
     if (Buffer.byteLength(body) > MAX_BODY || !validQueuedEvent(payload, eventId)) { dropped++; return; }
     // Atomic slot creation reserves capacity across processes, including orphan files.
