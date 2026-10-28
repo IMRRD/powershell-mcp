@@ -1,8 +1,32 @@
 import { test, expect } from 'vitest';
-import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
+
+test('explicit random user token links two installations only voluntarily; cloning preserves the installation proxy', () => {
+  const homes = Array.from({ length: 4 }, () => mkdtempSync(join(tmpdir(), 'telemetry-user-')));
+  const token = '12345678-1234-4234-8234-123456789abc';
+  const payloads: any[] = [];
+  try {
+    for (const [index, home] of homes.entries()) {
+      if (index === 3) copyFileSync(join(homes[0], '.powershell-mcp-id'), join(home, '.powershell-mcp-id'));
+      const r = spawnSync(process.execPath, ['--input-type=module', '-e', `import {startupPing,telemetryStatus} from './dist/telemetry.js'; startupPing('0.7.0'); while(telemetryStatus().outstanding) await new Promise(r=>setTimeout(r,10));`], {
+        env: { ...process.env, USERPROFILE: home, HOME: home, POWERSHELL_MCP_NO_TELEMETRY: '0', POWERSHELL_MCP_TELEMETRY_USER_ID: index === 2 ? 'private@example.invalid' : token, POWERSHELL_MCP_TELEMETRY_COHORT: 'external_self_declared', POWERSHELL_MCP_TELEMETRY_URL: 'http://127.0.0.1:1/telemetry' }, cwd: process.cwd(), timeout: 15000 });
+      expect(r.status).toBe(0);
+      const root = join(home, '.powershell-mcp-telemetry');
+      const slot = readdirSync(root).find(x=>x.startsWith('slot-'))!;
+      const file = readdirSync(join(root, slot)).find(x=>x.startsWith('event.'))!;
+      payloads.push(JSON.parse(readFileSync(join(root, slot, file), 'utf8')));
+    }
+    expect(payloads[0].hostId).not.toBe(payloads[1].hostId);
+    expect(payloads[0].userId).toBe(token);
+    expect(payloads[1].userId).toBe(token);
+    expect(payloads[2].userId).toBeUndefined();
+    expect(payloads[3].hostId).toBe(payloads[0].hostId);
+    expect(payloads.every(p=>p.cohort === 'external_self_declared')).toBe(true);
+  } finally { for (const home of homes) rmSync(home, { recursive: true, force: true }); }
+}, 60000);
 
 test('dispatch never performs synchronous filesystem work on the main thread', () => {
   const home = mkdtempSync(join(tmpdir(), 'telemetry-main-'));
@@ -52,7 +76,7 @@ test('startup survives a real process restart with the same event identity', () 
 test('opt out does not create an ID, queue or network event', () => {
   const home = mkdtempSync(join(tmpdir(), 'telemetry-optout-'));
   try {
-    const r = spawnSync(process.execPath, ['--input-type=module', '-e', `import {startupPing,incrementTool,flushCounters} from './dist/telemetry.js'; startupPing('0.6.0');incrementTool('run_program');flushCounters('0.6.0');`], { env: { ...process.env, USERPROFILE: home, HOME: home, POWERSHELL_MCP_NO_TELEMETRY: '1' }, cwd: process.cwd(), timeout: 5000 });
+    const r = spawnSync(process.execPath, ['--input-type=module', '-e', `import {startupPing,incrementTool,flushCounters} from './dist/telemetry.js'; startupPing('0.6.0');incrementTool('run_program');flushCounters('0.6.0');`], { env: { ...process.env, USERPROFILE: home, HOME: home, POWERSHELL_MCP_NO_TELEMETRY: '1', POWERSHELL_MCP_TELEMETRY_USER_ID: '12345678-1234-4234-8234-123456789abc', POWERSHELL_MCP_TELEMETRY_COHORT: 'external_self_declared' }, cwd: process.cwd(), timeout: 5000 });
     expect(r.status).toBe(0);
     expect(readdirSync(home)).toEqual([]);
   } finally { rmSync(home, { recursive: true, force: true }); }

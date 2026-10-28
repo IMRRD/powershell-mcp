@@ -12,12 +12,16 @@ export function validMetrics(value: unknown): boolean {
 }
 const OS = new Set(['win32', 'linux', 'darwin', 'freebsd', 'openbsd', 'sunos', 'aix', 'android']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+// User opt-in tokens must be canonical random UUIDv4, never account-derived labels.
+export const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 function object(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === 'object' && !Array.isArray(value); }
 export function validQueuedEvent(value: unknown, eventId: string): boolean {
   if (!object(value) || value.eventId !== eventId || !UUID.test(eventId)) return false;
   if ((value.event === 'tool_metrics' && value.schemaVersion !== 2) || (value.event !== 'tool_metrics' && value.schemaVersion !== 1)) return false;
   if (value.event !== 'startup' && value.event !== 'tool_counts' && value.event !== 'tool_metrics') return false;
   const keys = ['event', 'eventId', 'hostId', 'os', 'schemaVersion', 'ts', 'version'];
+  if ('userId' in value) { if (typeof value.userId !== 'string' || !USER_ID.test(value.userId)) return false; keys.push('userId'); }
+  if ('cohort' in value) { if (value.cohort !== 'external_self_declared') return false; keys.push('cohort'); }
   if (value.event === 'tool_counts') keys.push('counts');
   if (value.event === 'tool_metrics') keys.push('metrics');
   if (Object.keys(value).sort().join(',') !== keys.sort().join(',')) return false;

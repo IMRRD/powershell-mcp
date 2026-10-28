@@ -14,19 +14,31 @@ import psycopg
 UTC = re.compile(r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$')
 VERSION = re.compile(r'^(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})$')
 OS = {'win32', 'linux', 'darwin', 'freebsd', 'openbsd', 'sunos', 'aix', 'android'}
-TOOLS = {'run_powershell', 'list_services', 'get_service', 'control_service', 'system_info', 'ssh_exec', 'winrm_exec', 'sftp_upload', 'sftp_download', 'run_program', 'runtime_capabilities', 'start_execution', 'execution_status', 'read_execution_output', 'cancel_execution', 'read_output_log', 'delete_output_log'}
+TOOLS = {'run_powershell', 'list_services', 'get_service', 'control_service', 'system_info', 'ssh_exec', 'winrm_exec', 'sftp_upload', 'sftp_download', 'run_program', 'runtime_capabilities', 'start_execution', 'execution_status', 'read_execution_output', 'cancel_execution', 'read_output_log', 'delete_output_log', 'start_remote_batch', 'remote_batch_status', 'cancel_remote_batch'}
 AXES = {'outcomes': {'success', 'nonzero', 'error', 'timeout', 'cancelled', 'unknown'}, 'durations': {'lt100', 'lt1000', 'lt10000', 'gte10000'}, 'features': {'execution', 'inspection', 'remote', 'transfer', 'lifecycle', 'logs'}}
 MAX_COUNT = 9007199254740991
 
 
 def classes(path):
+    if Path(path).stat().st_size > 1024 * 1024:
+        raise ValueError('classification too large')
     c = json.loads(Path(path).read_text())
-    if set(c) != {'internalHostIds', 'testHostIds'}:
+    if set(c) not in ({'internalHostIds', 'testHostIds'}, {'internalHostIds', 'testHostIds', 'enrollments'}):
         raise ValueError('invalid classification')
     a, b = c['internalHostIds'], c['testHostIds']
+    if not isinstance(a, list) or not isinstance(b, list) or len(a) + len(b) > 10000:
+        raise ValueError('invalid classification')
     if any(not isinstance(x, str) or not x or len(x) > 256 for x in a + b) or len(set(a)) != len(a) or len(set(b)) != len(b) or set(a) & set(b):
         raise ValueError('invalid classification')
-    return set(a), set(b)
+    enrollments = c.get('enrollments', [])
+    if not isinstance(enrollments, list) or len(a) + len(b) + len(enrollments) > 10000:
+        raise ValueError('invalid classification')
+    seen = set(a + b)
+    for entry in enrollments:
+        if not isinstance(entry, dict) or set(entry) != {'hostId', 'cohort', 'fromReceiptUtc'} or not isinstance(entry['hostId'], str) or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', entry['hostId']) or entry['hostId'] in seen or entry['cohort'] not in ('internal', 'test') or not timestamp(entry['fromReceiptUtc']):
+            raise ValueError('invalid enrollment')
+        seen.add(entry['hostId'])
+    return set(a), set(b), {e['hostId']: e for e in enrollments}
 
 
 def timestamp(s):
@@ -61,7 +73,7 @@ def metric_axes(value):
 
 
 def ingest(db, source, classification):
-    internal, test = classes(classification)
+    internal, test, enrollments = classes(classification)
     source = Path(source).resolve(strict=True)
     stat = source.stat()
     source_key = hashlib.sha256(str(source).encode()).hexdigest()
@@ -98,6 +110,16 @@ def ingest(db, source, classification):
                     raise ValueError('invalid record')
                 host = row.get('hostId')
                 origin = 'internal' if isinstance(host, str) and host in internal else 'test' if isinstance(host, str) and host in test else 'unknown_origin'
+                enrollment = enrollments.get(host) if isinstance(host, str) else None
+                if enrollment and timestamp(row.get('_receivedAt')) and row['_receivedAt'] >= enrollment['fromReceiptUtc']:
+                    origin = enrollment['cohort']
+                if 'cohort' in row and row['cohort'] != 'external_self_declared':
+                    raise ValueError('invalid cohort')
+                if row.get('cohort') == 'external_self_declared':
+                    origin = 'external_self_declared' if origin == 'unknown_origin' else 'cohort_conflict'
+                user = row.get('userId')
+                if 'userId' in row and (not isinstance(user, str) or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', user)):
+                    raise ValueError('invalid user pseudonym')
                 safe_host = host if isinstance(host, str) and 0 < len(host) <= 256 else None
                 event = row.get('event') if row.get('event') in ('startup', 'tool_counts', 'tool_metrics') else 'historical_other'
                 event_id = row.get('eventId')
@@ -115,6 +137,8 @@ def ingest(db, source, classification):
                         raise ValueError('event collision')
                 else:
                     inserted += 1
+                    if user:
+                        db.execute('UPDATE telemetry_event SET user_key=%s WHERE event_key=%s', (hashlib.sha256(('powershell-mcp-user-v1:' + user).encode()).hexdigest(), key))
                     if event in ('tool_counts', 'tool_metrics'):
                         data = row.get('counts') if event == 'tool_counts' else row.get('metrics')
                         if not isinstance(data, dict):
@@ -141,5 +165,11 @@ if __name__ == '__main__':
     p.add_argument('--source', required=True)
     p.add_argument('--classification', required=True)
     a = p.parse_args()
-    with psycopg.connect(os.environ['ANALYTICS_DSN']) as db:
-        print('inserted:', ingest(db, a.source, a.classification))
+    try:
+        with psycopg.connect(os.environ['ANALYTICS_DSN']) as db:
+            print('inserted:', ingest(db, a.source, a.classification))
+    except Exception:
+        # Database/source exceptions can embed identifiers or credentials.
+        import sys
+        print('Import failed; transaction rolled back. Inspect protected inputs and database availability.', file=sys.stderr)
+        sys.exit(1)

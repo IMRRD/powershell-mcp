@@ -46,9 +46,19 @@ class Conn:
 
 def result_rows(f):
     return [f['adoption'], f['events'], f['tools'], f['axes'], f['quality'],
-            [(f['unknown_receipt_count'],)], f['receipts'], [(f['imported'],)]]
+            [(f['unknown_receipt_count'],)], f['receipts'], [(f['imported'],)], f.get('users', [])]
 
 class DigestTests(unittest.TestCase):
+    def test_user_proxy_coverage_rendering_and_complement_suppression_in_both_parts(self):
+        data = fixture() | {'users': [('unknown_origin',20,10,10,10)]}
+        for body in w.report(data, START, END, NOW):
+            self.assertIn('Optional user pseudonym proxies and installation coverage', body)
+            self.assertIn('Unknown user installations', body)
+            self.assertIn('not anonymous or verified humans', body)
+        data['users'] = [('unknown_origin',21,21,0,20)]
+        for body in w.report(data, START, END, NOW):
+            self.assertNotIn('Unknown user installations', body)
+            self.assertIn('privacy suppression', body)
     def test_week_boundaries(self):
         self.assertEqual((START.isoformat(), END.isoformat()), ('2026-10-12T00:00:00+00:00', '2026-10-19T00:00:00+00:00'))
     def test_aggregate_grants_only_and_parameters(self):
