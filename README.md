@@ -333,6 +333,18 @@ npm run typecheck
 
 CI requires three lanes: Windows PowerShell 5.1 (`powershell.exe`), Windows PowerShell 7 (`pwsh`), and Linux PowerShell 7 (`pwsh`). Missing engines fail instead of skipping the installed-artifact engine gate. Each lane runs locked `npm ci`, typecheck, build, the existing regression suite with explicit discovered/passed/failed/skipped counts and required-suite discovery checks, then `npm pack` and installs the resulting tarball into a temporary project. The installed CLI is exercised over MCP stdio for schema/version, native arguments and byte bounds, failure, timeout, synthetic credential/trust rejection, and explicit engine selection. SSH/SFTP tests use synthetic/loopback fixtures; opt-in live SSH tests remain skipped unless intentionally configured and are not release evidence. A green local run on Windows does not prove the Linux lane passed.
 
+The collector's packaged-client fixture keeps best-effort diagnostics in
+`test-evidence/packaged-client.json`, outside its removed installation. CI uploads
+this explicit file alongside the existing report on failure. It contains only
+fixed phase/status names, bounded numeric durations and npm's numeric exit code;
+raw npm logs, paths, arguments, environment and arbitrary timer names are excluded.
+Snapshots include successful install evidence before the ACK proof and separate
+proof/cleanup timings. A `started` phase has no completion duration and does not
+prove success; missing npm timings can mean unavailable, incomplete, oversized or
+unrecognized input. Raw npm timing/debug files remain inside the disposable fixture.
+The acceptance budget remains 120000ms; diagnostics do not identify the cause of
+the previously observed slow install.
+
 ### Release compatibility and operator gates
 
 The candidate is canonical `@imrrd/powershell-mcp@0.7.0` with MCP output `schemaVersion: 1`; existing text `content` accompanies structured results. Telemetry wire schema v2 is separate from the MCP output schema; the collector must remain v2-compatible once any v2 client can send or replay queued events. The frozen unscoped `powershell-mcp` compatibility package receives no changes or release. The CI tarball is a local build artifact, not proof of a published registry version. Before any separately authorized release, compare the candidate tag/commit, package and lockfile version, `server.json` identity/version and packed manifest; preserve the CI run and tarball digest as provenance. Verify clients consuming text-only responses and schema v1, credential/trust migrations, and runtime behavior against an approved previous version. Roll back by pinning/reinstalling the previously approved **scoped** package version and restoring its client configuration; do not publish or revive the legacy name. Persisted lifecycle records and credential stores are not automatically reversible: reconcile running/unknown jobs and back up/reprovision DPAPI entries through approved operator processes before switching versions. A tag or CI pass does not authorize publishing, deployment, or production rollover. On a real interactive Windows desktop, manually verify no popup and unchanged foreground focus for `run_powershell`/`run_program` and cancellation; headless CI cannot prove foreground focus preservation.

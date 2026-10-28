@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, readdirSync, utimesSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, utimesSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -8,6 +8,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { runCommand, runClient, startProcess, stopProcess, waitFor, cleanup } from './fixtures/packaged-process.mjs';
+import { installEvidence } from './fixtures/packaged-evidence.mjs';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
 const delay = ms => new Promise(r => setTimeout(r, ms));
@@ -31,15 +32,23 @@ test('installed tarball persists through real collector ACK; wrong/lost ACK reta
   const { signal } = t;
   const dir = mkdtempSync(join(tmpdir(), 'packaged-telemetry-'));
   const home = join(dir, 'home'), install = join(dir, 'install'), file = join(dir, 'records.jsonl');
-  let collector, proxy, primary;
+  const evidenceDirectory = join(repo, 'test-evidence');
+  try { mkdirSync(evidenceDirectory, { recursive: true }); } catch {}
+  const evidence = installEvidence(join(evidenceDirectory, 'packaged-client.json'));
+  const acceptanceFinished = evidence.start('acceptance');
+  let collector, proxy, primary, proofFinished;
   try {
-    const { mkdirSync } = await import('node:fs'); mkdirSync(home); mkdirSync(install);
+    mkdirSync(home); mkdirSync(install);
     const npm = process.platform === 'win32' ? resolve(process.execPath, '../node_modules/npm/bin/npm-cli.js') : 'npm';
     const command = process.platform === 'win32' ? process.execPath : npm;
     const args = process.platform === 'win32' ? [npm] : [];
-    const packed = await runCommand(command, [...args, 'pack', '--pack-destination', dir, '--json'], { cwd: repo, signal, label: 'npm pack' });
+    const packed = await evidence.measure('pack', () => runCommand(command, [...args, 'pack', '--pack-destination', dir, '--json'], { cwd: repo, signal, label: 'npm pack' }));
     const tar = join(dir, JSON.parse(packed)[0].filename);
-    await runCommand(command, [...args, 'install', '--no-audit', '--no-fund', '--prefix', install, tar], { signal, label: 'npm install' });
+    const npmLogs = join(dir, 'npm-logs');
+    try {
+      await evidence.measure('install', () => runCommand(command, [...args, 'install', '--no-audit', '--no-fund', '--timing', '--logs-max=2', '--logs-dir', npmLogs, '--prefix', install, tar], { signal, label: 'npm install' }));
+    } finally { evidence.npm(npmLogs); }
+    proofFinished = evidence.start('proof');
     const module = pathToFileURL(resolve(install, 'node_modules/@imrrd/powershell-mcp/dist/telemetry.js')).href;
     const metric = `import {recordTool,flushCounters,telemetryStatus} from ${JSON.stringify(module)}; import {readdirSync} from 'node:fs'; import {join} from 'node:path'; import {homedir} from 'node:os'; recordTool('runtime_capabilities','success','lt100','inspection'); flushCounters('0.6.0'); const root=join(homedir(),'.powershell-mcp-telemetry'); const end=Date.now()+10000; do { if(Date.now()>end) throw Error('metric ACK deadline'); await new Promise(r=>setTimeout(r,20)); } while(telemetryStatus().outstanding || readdirSync(root).some(n=>/^slot-\\d{3}$/.test(n)));`;
     const startup = `import {startupPing,telemetryStatus} from ${JSON.stringify(module)}; startupPing('0.6.0'); while(telemetryStatus().outstanding) await new Promise(r=>setTimeout(r,20));`;
@@ -94,15 +103,19 @@ test('installed tarball persists through real collector ACK; wrong/lost ACK reta
     assert.deepEqual(records.find(r => r.event === 'tool_metrics').metrics.runtime_capabilities, { outcomes: { success: 1 }, durations: { lt100: 1 }, features: { inspection: 1 } });
     console.log('packaged positive ACK, wrong ACK retention, replay dedupe, queue deletion: verified');
   } catch (e) { primary = e; } finally {
-    await cleanup(primary, [async () => {
+    proofFinished?.(primary !== undefined || signal.aborted);
+    let cleanupFailed = false;
+    try { await cleanup(primary, [() => evidence.measure('proxyClose', async () => {
       if (proxy) {
         const closed = new Promise((resolve, reject) => proxy.close(e => e ? reject(e) : resolve()));
         await cleanup(undefined, [
-          () => proxy.closeAllConnections(),
-          () => waitFor(closed, { timeout: 5000, label: 'proxy close' }),
+          () => evidence.measure('proxyConnectionsClose', () => proxy.closeAllConnections()),
+          () => evidence.measure('proxyWaitClose', () => waitFor(closed, { timeout: 5000, label: 'proxy close' })),
         ]);
       }
-    }, () => stopProcess(collector),
-    () => rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 })]);
+    }), () => evidence.measure('collectorClose', () => stopProcess(collector)),
+    () => evidence.measure('directoryRemove', () => rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }))]);
+    } catch (e) { cleanupFailed = true; throw e; }
+    finally { acceptanceFinished(cleanupFailed || signal.aborted); }
   }
 });
