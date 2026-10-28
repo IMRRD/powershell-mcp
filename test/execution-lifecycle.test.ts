@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, symlinkSync, renameSync, readdirSync, statSync, unlinkSync, truncateSync } from 'node:fs';
 import * as fs from 'node:fs';
 import { spawnSync, spawn } from 'node:child_process';
@@ -6,10 +6,27 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ExecutionStore } from '../src/execution-lifecycle.js';
+import * as owned from '../src/owned-process.js';
 
-const fixture = async (fn: (root: string) => Promise<void>) => {
+const fixture = async (fn: (root: string, drain: () => Promise<unknown>) => Promise<void>) => {
   const root = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), 'execution-test-'));
-  try { await fn(join(root, 'store')); } finally {
+  // A recovered store's unknown state says nothing about the original owner's
+  // handles. Track actual close events, including cancellation during startup.
+  const lifetimes: { child: owned.OwnedChild; closed: Promise<void>; done: boolean }[] = [];
+  const spawn = owned.spawnOwned;
+  const spy = vi.spyOn(owned, 'spawnOwned').mockImplementation((...args) => {
+    const child = spawn(...args);
+    const lifetime = { child, closed: Promise.resolve(), done: false };
+    lifetime.closed = new Promise(resolve => child.once('close', () => { lifetime.done = true; resolve(); }));
+    lifetimes.push(lifetime);
+    return child;
+  });
+  const drain = () => Promise.all(lifetimes.map(lifetime => lifetime.closed));
+  try { await fn(join(root, 'store'), drain); } finally {
+    try {
+      for (const lifetime of lifetimes) if (!lifetime.done) lifetime.child.cancel();
+      await drain();
+    } finally { spy.mockRestore(); }
     for (let i = 0; i < 30; i++) {
       try { rmSync(root, { recursive: true, force: true }); break; }
       catch (error) { if (i === 29) throw error; await new Promise(resolve => setTimeout(resolve, 100)); }
@@ -23,7 +40,9 @@ const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 const lifecycleIt = (name: string, fn: () => void | Promise<void>, timeout = 20_000) => it(name, fn, timeout);
 
 describe('durable local executions', () => {
-  lifecycleIt('deduplicates across real server processes after an unproven launch and restores completed output', async () => fixture(async root => {
+  for (const recovery of ['ambiguous', 'completed'] as const) lifecycleIt(recovery === 'ambiguous'
+    ? 'deduplicates across real server processes after an unproven launch'
+    : 'restores completed output across real server processes', async () => fixture(async root => {
     const base = join(root, '..');
     const entry = join(base, 'server.mjs');
     const moduleUrl = new URL('../src/execution-lifecycle.ts', import.meta.url).href;
@@ -41,6 +60,7 @@ else if (phase === 'verify') { const id = (await import('node:fs')).readFileSync
 else { const run = request(); writeFileSync(join(root, 'recovered'), JSON.stringify(run)); }
 `);
     const run = (phase: string) => spawnSync(process.execPath, ['--import', pathToFileURL(join(process.cwd(), 'node_modules/tsx/dist/loader.mjs')).href, entry, base, phase], { cwd: process.cwd(), env: { ...process.env, TMPDIR: process.env.TMPDIR ?? root }, encoding: 'utf8' });
+    if (recovery === 'ambiguous') {
     const firstProcess = run('first');
     expect(firstProcess.stderr).toBe('');
     expect(firstProcess.status).toBe(0);
@@ -48,17 +68,19 @@ else { const run = request(); writeFileSync(join(root, 'recovered'), JSON.string
     expect(run('second').status).toBe(0);
     expect(JSON.parse(readFileSync(join(base, 'recovered'), 'utf8')).state).toBe('unknown');
     expect(readFileSync(join(base, 'marker'), 'utf8')).toBe('x');
+    } else {
     expect(run('complete').status).toBe(0);
     expect(run('verify').status).toBe(0);
     const completed = JSON.parse(readFileSync(join(base, 'completed'), 'utf8'));
     expect(completed.status.state).toBe('completed');
     expect(Buffer.from(completed.output.data, 'base64').toString()).toBe('ready\n');
+    }
   }), 30000);
-  lifecycleIt('starts, polls, reads byte pages and survives a fresh store', async () => fixture(async root => {
+  lifecycleIt('starts, polls, reads byte pages and survives a fresh store', async () => fixture(async (root, drain) => {
     const store = new ExecutionStore(root);
     const { id } = store.start('owner-a', 'key-a', process.execPath, ['-e', script]);
-    let result = store.status('owner-a', id);
-    for (let i = 0; i < 100 && result.state === 'running'; i++) { await pause(20); result = store.status('owner-a', id); }
+    await drain();
+    const result = store.status('owner-a', id);
     expect(result.state).toBe('completed');
     expect(result.exitCode).toBe(0);
     expect(Buffer.from(store.read('owner-a', id, 'stdout', 0, 64).data, 'base64').toString()).toBe('ready\n');
@@ -84,15 +106,18 @@ else { const run = request(); writeFileSync(join(root, 'recovered'), JSON.string
     }
     await pause(200);
   }));
-  lifecycleIt('does not relaunch a persisted ambiguous intent after restart', async () => fixture(async root => {
+  lifecycleIt('does not relaunch a persisted ambiguous intent after restart', async () => fixture(async (root, drain) => {
     const first = new ExecutionStore(root);
     const run = first.start('owner-a', 'slow', process.execPath, ['-e', 'setTimeout(() => {}, 3000)']);
     const recovered = new ExecutionStore(root);
     expect(recovered.start('owner-a', 'slow', process.execPath, ['-e', 'setTimeout(() => {}, 3000)']).id).toBe(run.id);
     expect(recovered.status('owner-a', run.id).state).toBe('unknown');
     expect(recovered.cancel('owner-a', run.id).state).toBe('unknown');
+    expect(owned.spawnOwned).toHaveBeenCalledTimes(1);
     first.cancel('owner-a', run.id);
-    await pause(200);
+    await drain();
+    expect(first.status('owner-a', run.id).state).not.toBe('running');
+    expect(recovered.status('owner-a', run.id).state).toBe('unknown');
   }));
   lifecycleIt('rejects malformed recovered metadata without relaunching its reservation', async () => fixture(async root => {
     const first = new ExecutionStore(root);
@@ -219,34 +244,42 @@ setInterval(()=>{},1000);`);
     const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8' });
     expect(result.status, (result.stderr || result.stdout).slice(0, 2048)).toBe(0);
   }));
-  lifecycleIt('recovers missing and truncated completed outputs as unknown without replay', async () => fixture(async root => {
+  lifecycleIt('recovers missing and truncated completed outputs as unknown without replay', async () => fixture(async (root, drain) => {
     const store = new ExecutionStore(root);
     const code = 'process.stdout.write("durable-output")';
     const run = store.start('owner', 'lost-output', process.execPath, ['-e', code]);
-    for (let i = 0; i < 100 && store.status('owner', run.id).state === 'running'; i++) await pause(20);
+    await drain();
     expect(store.status('owner', run.id).state).toBe('completed');
     truncateSync(join(root, run.id, 'stdout'), 3);
     const recovered = new ExecutionStore(root);
     expect(recovered.status('owner', run.id).state).toBe('unknown');
     expect(() => recovered.read('owner', run.id, 'stdout', 0, 64)).toThrow();
     expect(recovered.start('owner', 'lost-output', process.execPath, ['-e', code]).state).toBe('unknown');
+    expect(owned.spawnOwned).toHaveBeenCalledTimes(1);
     unlinkSync(join(root, run.id, 'stderr'));
     expect(new ExecutionStore(root).status('owner', run.id).state).toBe('unknown');
   }));
-  lifecycleIt('flushes output before committing metadata and fails closed if output flush fails', async () => fixture(async root => {
+  lifecycleIt('flushes output before committing metadata', async () => fixture(async (root, drain) => {
     const events: string[] = [];
     const store = new ExecutionStore(root, fd => {
       events.push(`flush:${fd}`);
       fs.fsyncSync(fd);
     }, () => events.push('metadata'));
     const run = store.start('owner', 'flush', process.execPath, ['-e', 'process.stdout.write("x")']);
-    for (let i = 0; i < 100 && store.status('owner', run.id).state === 'running'; i++) await pause(20);
+    await drain();
+    expect(store.status('owner', run.id)).toMatchObject({ state: 'completed', stdoutBytes: 1, outputComplete: true });
     expect(events.some(e => e.startsWith('flush:'))).toBe(true);
     expect(events.lastIndexOf('metadata')).toBeGreaterThan(events.findIndex(e => e.startsWith('flush:')));
-    const failed = new ExecutionStore(join(root, '..', 'failed-store'), () => { throw Error('flush failure'); });
+  }));
+  lifecycleIt('fails closed if output flush fails', async () => fixture(async (root, drain) => {
+    let flushAttempts = 0;
+    const failed = new ExecutionStore(join(root, '..', 'failed-store'), () => { flushAttempts++; throw Error('flush failure'); });
     const second = failed.start('owner', 'flush-failure', process.execPath, ['-e', 'process.stdout.write("x")']);
-    for (let i = 0; i < 100 && failed.status('owner', second.id).state === 'running'; i++) await pause(20);
+    await drain();
+    expect(flushAttempts).toBe(1);
     expect(failed.status('owner', second.id).state).toBe('unknown');
+    expect(failed.status('owner', second.id).outputComplete).toBe(false);
+    expect(failed.status('owner', second.id).stdoutBytes).toBe(0);
     expect(new ExecutionStore(failed.root).status('owner', second.id).state).toBe('unknown');
   }));
   lifecycleIt('bounds key-only orphan reservations', async () => fixture(async root => {

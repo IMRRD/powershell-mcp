@@ -12,3 +12,5 @@ GRANT EXECUTE ON FUNCTION delivery_health_utc(timestamptz,timestamptz,interval) 
 GRANT EXECUTE ON FUNCTION user_proxy_utc(timestamptz,timestamptz), privacy_window_safe_utc(timestamptz,timestamptz) TO telemetry_dashboard;
 -- PostgreSQL views run as their owner; dashboard role cannot SELECT raw tables.
 -- Analytics database must contain only this schema; manage other schemas separately.
+
+GRANT EXECUTE ON FUNCTION winrm_diagnostics_utc(timestamptz,timestamptz) TO telemetry_dashboard;

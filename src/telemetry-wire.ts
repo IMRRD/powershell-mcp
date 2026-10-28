@@ -1,12 +1,14 @@
 import { TOOL_NAMES, OUTCOMES, DURATIONS, FEATURES } from './tool-instrumentation.js';
+import { WINRM_REASONS } from './winrm-reason.js';
 const TOOLS = new Set<string>(TOOL_NAMES);
 const allowed = (entries: Record<string, unknown>, keys: readonly string[]) => Object.keys(entries).length > 0 && Object.entries(entries).every(([key, count]) => keys.includes(key) && typeof count === 'number' && Number.isSafeInteger(count) && count > 0);
 export function validMetrics(value: unknown): boolean {
   if (!object(value) || !Object.keys(value).length || Object.keys(value).length > TOOLS.size) return false;
   return Object.entries(value).every(([name, row]) => {
-    if (!TOOLS.has(name) || !object(row) || Object.keys(row).sort().join(',') !== 'durations,features,outcomes' || !object(row.outcomes) || !object(row.durations) || !object(row.features)) return false;
+    if (!TOOLS.has(name) || !object(row) || Object.keys(row).sort().join(',') !== ('winrmReasons' in row ? 'durations,features,outcomes,winrmReasons' : 'durations,features,outcomes') || !object(row.outcomes) || !object(row.durations) || !object(row.features)) return false;
     if (!allowed(row.outcomes, OUTCOMES) || !allowed(row.durations, DURATIONS) || !allowed(row.features, FEATURES)) return false;
     const total = (r: Record<string, unknown>) => Object.values(r).reduce<number>((n, v) => n + (v as number), 0);
+    if ('winrmReasons' in row && (name !== 'winrm_exec' || !object(row.winrmReasons) || !allowed(row.winrmReasons, WINRM_REASONS) || total(row.winrmReasons) !== total(row.outcomes))) return false;
     return Number.isSafeInteger(total(row.outcomes)) && total(row.outcomes) === total(row.durations) && total(row.outcomes) === total(row.features);
   });
 }

@@ -5,6 +5,7 @@ import { displayCapture, captureFromEnvelope, frameLimit, payloadLimit, protecte
 import { captureDiagnostic, combineCaptures, OutputCollector } from "./output-collector.js";
 import { logStore } from "./full-logs.js";
 import { PARAMETER_BOOTSTRAP, validateParameters, INPUT_LIMIT } from "./typed-input.js";
+import { WINRM_TRANSPORT_REASONS, type WinRmReason } from './winrm-reason.js';
 
 export interface WinRmOptions {
   computerName: string;
@@ -78,13 +79,26 @@ $bounded = $producer.Snapshot()
   "  $payload.password = $null;",
   "  $plain = $null;",
   "}",
+  "$reason = 'invoke_exception';",
   "try {",
   "  $results = @(Invoke-Command @invoke -ErrorAction Stop);",
+  "  $reason = 'wrapper_result_invalid';",
   "  if ($results.Count -ne 1 -or $null -eq $results[0] -or $null -eq $results[0].PSObject.Properties['Output'] -or $null -eq $results[0].PSObject.Properties['RemoteError'] -or $null -eq $results[0].PSObject.Properties['ErrorRecords'] -or $null -eq $results[0].PSObject.Properties['ErrorRecordsTruncated'] -or $results[0].Output -isnot [string] -or $results[0].RemoteError -isnot [bool] -or $results[0].ErrorRecordsTruncated -isnot [bool]) { throw 'Invalid WinRM wrapper result' };",
   "  $result = $results[0];",
   "  $bounded = $result;",
   "  $body = @{ status = $(if ($result.RemoteError) { 'remote_error' } else { 'completed' }); output = $bounded.Output; stderr = $result.stderr; observedBytes = $bounded.observedBytes; capturedBytes = $bounded.capturedBytes; omittedBytes = $bounded.omittedBytes; truncated = $bounded.truncated; records = @($result.ErrorRecords); recordsTruncated = $result.ErrorRecordsTruncated };",
-  "} catch { $body = @{ status = 'transport_error'; output = ([string]$_).Substring(0, [Math]::Min(512, ([string]$_).Length)) } }",
+  `} catch {
+  # Inspect the caught local exception's exact runtime type, never its text,
+  # remote ErrorRecord fields or a guessed numeric WSMan error mapping.
+  if ($reason -eq 'invoke_exception') {
+    switch ($_.Exception.GetType().FullName) {
+      'System.Security.Authentication.AuthenticationException' { $reason = 'authentication_exception' }
+      'System.UnauthorizedAccessException' { $reason = 'access_exception' }
+      'System.Management.Automation.Remoting.PSRemotingTransportException' { $reason = 'remoting_transport_exception' }
+    }
+  }
+  $body = @{ status = 'transport_error'; reason = $reason; output = ([string]$_).Substring(0, [Math]::Min(512, ([string]$_).Length)) }
+}`,
   "[Console]::Out.WriteLine('WINRM-RESULT:' + $payload.frame + ':' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Depth 6 -Compress))));",
 ].join("\n");
 
@@ -143,27 +157,31 @@ export function runWinRm(opts: WinRmOptions): Promise<PsResult> {
 
 /** Validate the local frame before interpreting remote output as data. */
 export function decodeWinRmResult(result: PsResult, frame: string, maxOutput = 1_048_576, tail = false, logOutput = false, quota?: number, reservedLog?: ReturnType<typeof logStore.create>): PsResult {
-    const failure = (diagnostic?: string): PsResult => {
+    const failure = (reason: WinRmReason, diagnostic?: string): PsResult => {
       const stderrCapture = diagnostic === undefined
         ? result.stderrCapture && displayCapture(result.stderrCapture, maxOutput, tail)
         : captureDiagnostic(result.stderrCapture, `\n${diagnostic}`, maxOutput, tail);
       return { ...result, stdout: "", stdoutCapture: undefined, stderr: stderrCapture?.text ?? "",
-        stderrCapture, truncated: !!stderrCapture?.truncated, outputLimitBytes: maxOutput, invocationStatus: "transport_error" };
+        stderrCapture, truncated: !!stderrCapture?.truncated, outputLimitBytes: maxOutput, invocationStatus: "transport_error", winrmReason: reason };
     };
-    if (result.timedOut || result.cancelled || result.spawnError) return failure();
+    if (result.timedOut) return failure('timeout');
+    if (result.cancelled) return failure('cancelled');
+    if (result.spawnError) return failure('local_launch_error');
+    if (result.protocolError || result.exitCode !== 0) return failure('local_host_error', 'Missing or invalid WinRM result envelope');
     const match = result.stdout.match(/^WINRM-RESULT:([0-9a-f]{48}):([A-Za-z0-9+/=]+)\s*$/);
-    if (result.stdoutCapture?.truncated || (result.truncated && !result.stderrCapture?.truncated) || result.exitCode !== 0 || !match || match[1] !== frame) {
-      return failure("Missing or invalid WinRM result envelope");
+    if (result.stdoutCapture?.truncated || (result.truncated && !result.stderrCapture?.truncated) || !match || match[1] !== frame) {
+      return failure('frame_invalid', "Missing or invalid WinRM result envelope");
     }
     try {
       const body = JSON.parse(Buffer.from(match[2], "base64").toString("utf8"));
       if (!["completed", "remote_error", "transport_error"].includes(body.status) || typeof body.output !== "string") throw Error("Invalid result body");
+      if ('reason' in body && (body.status !== 'transport_error' || !WINRM_TRANSPORT_REASONS.includes(body.reason))) throw Error('Invalid boundary reason');
       if (body.status !== "transport_error" && (typeof body.recordsTruncated !== "boolean" || !Array.isArray(body.records) || body.records.length > 8 || body.records.some((r: any) => !r || ["category", "fullyQualifiedErrorId", "exceptionType", "message"].some(k => typeof r[k] !== "string")) || (body.status === "remote_error" && body.records.length === 0))) throw Error("Invalid remote records");
       const records = body.status === "transport_error" ? undefined : body.records.map((r: any) => Object.fromEntries(["category", "fullyQualifiedErrorId", "exceptionType", "message"].map(k => [k, Buffer.from(r[k], "utf8").subarray(0, 256).toString("utf8")])));
       if (body.status === "transport_error") {
         const stderrCapture = captureDiagnostic(result.stderrCapture, body.output, maxOutput, tail);
         return { ...result, stdout: "", stdoutCapture: undefined, stderr: stderrCapture.text, stderrCapture,
-          outputLimitBytes: maxOutput, truncated: stderrCapture.truncated, invocationStatus: "transport_error" };
+          outputLimitBytes: maxOutput, truncated: stderrCapture.truncated, invocationStatus: "transport_error", winrmReason: body.reason ?? 'unknown' };
       }
       const remoteStderr = body.stderr === undefined ? undefined : captureFromEnvelope(body.stderr, body.stderr.output);
       if (remoteStderr && remoteStderr.capturedBytes > payloadLimit(maxOutput, logOutput, quota)) throw Error("Stderr exceeds limit");
@@ -181,8 +199,9 @@ export function decodeWinRmResult(result: PsResult, frame: string, maxOutput = 1
       const stderrCapture = displayCapture(combinedStderr, maxOutput, tail);
       return { ...result, stdout: stdoutCapture.text, ...(protectedResult ? { log: protectedResult.log } : {}), stderr: stderrCapture?.text ?? result.stderr, stderrCapture, stdoutCapture,
         outputLimitBytes: maxOutput, truncated: !!stdoutCapture?.truncated || !!stderrCapture?.truncated,
+        winrmReason: body.status === 'completed' ? 'completed' : 'remote_script_error',
         invocationStatus: body.status as PsResult["invocationStatus"], ...(records ? { errorRecords: records, errorRecordsTruncated: body.recordsTruncated || body.records.some((r: any) => ["category", "fullyQualifiedErrorId", "exceptionType", "message"].some(k => Buffer.byteLength(r[k], "utf8") > 256)) } : {}) };
     } catch {
-      return failure("Invalid WinRM result body");
+      return failure('frame_body_invalid', "Invalid WinRM result body");
     }
 }

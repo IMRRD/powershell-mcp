@@ -1,5 +1,9 @@
 # Issue 42: private analytics deployment contract (not activated)
 
+Issue 64 adds [bounded WinRM diagnostics](WINRM-DIAGNOSTICS.md) and the repeatable
+`migrate_issue64.sql` migration after issue 63. Existing report axes stay compatible;
+diagnostic coverage and reasons use a separate restricted aggregate function.
+
 Issue 63 extends this contract with an additive migration, protected future-receipt
 enrollment, explicit self-declared external/conflict cohorts and optional user-token
 coverage. Read [PRIVACY-ADOPTION.md](PRIVACY-ADOPTION.md) before operating the new

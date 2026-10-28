@@ -6,6 +6,7 @@ import { captureFromEnvelope, frameLimit, payloadLimit, protectedPayload } from 
 import { randomBytes } from "node:crypto";
 import { logStore } from "./full-logs.js";
 import { PARAMETER_BOOTSTRAP, validateParameters, INPUT_LIMIT } from "./typed-input.js";
+import type { WinRmReason } from './winrm-reason.js';
 
 const TYPED_BOOTSTRAP = `[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 ${PARAMETER_BOOTSTRAP}
@@ -36,6 +37,7 @@ export interface PsResult {
   outputLimitBytes?: number;
   spawnError?: string;
   invocationStatus?: "completed" | "remote_error" | "transport_error";
+  winrmReason?: WinRmReason;
   errorRecords?: ErrorRecordSummary[];
   errorRecordsTruncated?: boolean;
   scriptError?: boolean;

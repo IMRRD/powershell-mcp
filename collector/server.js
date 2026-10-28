@@ -32,11 +32,13 @@ const TOOLS = new Set(['run_powershell', 'list_services', 'get_service', 'contro
 const OUTCOMES = new Set(['success','nonzero','error','timeout','cancelled','unknown']);
 const DURATIONS = new Set(['lt100','lt1000','lt10000','gte10000']);
 const FEATURES = new Set(['execution','inspection','remote','transfer','lifecycle','logs']);
+const WINRM_REASONS = new Set(['completed','remote_script_error','authentication_exception','access_exception','remoting_transport_exception','invoke_exception','wrapper_result_invalid','frame_invalid','frame_body_invalid','local_host_error','local_launch_error','timeout','cancelled','unknown']);
 function validAxis(axis, allowed) { return object(axis) && Object.keys(axis).length > 0 && Object.entries(axis).every(([key, count]) => allowed.has(key) && Number.isSafeInteger(count) && count > 0); }
 function validMetrics(metrics) {
   return object(metrics) && Object.keys(metrics).length > 0 && Object.keys(metrics).length <= TOOLS.size && Object.entries(metrics).every(([name,row]) => {
-    if (!TOOLS.has(name) || !object(row) || Object.keys(row).sort().join(',') !== 'durations,features,outcomes' || !validAxis(row.outcomes, OUTCOMES) || !validAxis(row.durations, DURATIONS) || !validAxis(row.features, FEATURES)) return false;
+    if (!TOOLS.has(name) || !object(row) || Object.keys(row).sort().join(',') !== ('winrmReasons' in row ? 'durations,features,outcomes,winrmReasons' : 'durations,features,outcomes') || !validAxis(row.outcomes, OUTCOMES) || !validAxis(row.durations, DURATIONS) || !validAxis(row.features, FEATURES)) return false;
     const total = axis => Object.values(axis).reduce((n,v) => n + v, 0);
+    if ('winrmReasons' in row && (name !== 'winrm_exec' || !validAxis(row.winrmReasons, WINRM_REASONS) || total(row.winrmReasons) !== total(row.outcomes))) return false;
     return Number.isSafeInteger(total(row.outcomes)) && total(row.outcomes) === total(row.durations) && total(row.outcomes) === total(row.features);
   });
 }

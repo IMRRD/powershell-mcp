@@ -1,3 +1,4 @@
+import { WINRM_REASONS, type WinRmReason } from './winrm-reason.js';
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -62,6 +63,7 @@ export function sanitizeCredentialResult<T>(result: T, auth: Pick<StoredCredenti
     if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([k]) => k !== "log").map(([k, v]) => {
       // Only root adapter metadata is structural. Nested remote fields remain untrusted text.
       if (root && k === "invocationStatus") return [k, typeof v === "string" && ["completed", "remote_error", "transport_error"].includes(v) ? v : "transport_error"];
+      if (root && k === 'winrmReason') return [k, WINRM_REASONS.includes(v as WinRmReason) ? v : 'unknown'];
       if (root && k === "status" && typeof v === "string" && statuses.has(v)) return [k, v];
       return [k, scrub(v)];
     }));
