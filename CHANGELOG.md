@@ -1,6 +1,18 @@
 # Changelog
 
-## 0.7.0 — release candidate (not published)
+## 0.8.0 — release candidate (not published)
+
+This minor release adds optional privacy adoption fields and finite WinRM failure diagnostics to the published 0.7.0 client. The minor increment follows [Semantic Versioning](https://semver.org/) for added functionality; package versions remain in initial development (0.y.z).
+
+- Optional external self-declaration and app-specific random user pseudonyms remain opt-in. Internal/test enrollment uses the protected server registry, never a client claim. Missing consent leaves user pseudonyms disabled; installation proxies are not people. Telemetry opt-out continues to prevent identity, queue and network activity.
+- WinRM discards remote payloads unless local completion is proved and reports bounded, allowlisted failure reasons without sending targets, commands, credentials, raw errors or output. MCP output schema remains version 1; telemetry wire schema is separate.
+- Installed-package acceptance retains privacy-safe package timing evidence for slow or failed setup. No dependency or release workflow changes are included in this release preparation.
+
+Deploy compatible collector and analytics ingestion before activating this client. Keep compatible ingestion, additive analytics state, all historical records and pending client events through any client rollback; never reactivate a schema-1-only collector while newer events may replay. Client rollback pins the previously approved scoped package and restores its protected configuration. The deprecated unscoped package remains frozen.
+
+Publication and live installation require separate review and the existing cross-engine/analytics CI and trusted-publishing gates. Local validation and previously accepted source CI do not establish CI acceptance for this release candidate.
+
+## 0.7.0 — published October 21, 2026
 
 This minor release adds reliable, privacy-bounded telemetry delivery on top of 0.6.0. Clients emit schema v2 startup and aggregate tool-metric events with stable event IDs; the local bounded durable queue retries ambiguous deliveries without duplicating collector records. The collector accepts both historical schema v1 and schema v2, rebuilds its receipt index from the retained JSONL on restart, and fails closed when storage is unavailable. No raw commands, arguments, addresses, or result text belong in telemetry.
 
