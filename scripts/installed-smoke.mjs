@@ -9,6 +9,7 @@ import { connect as tcpConnect, createServer } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { parseFixturePids, witnessFixturePid } from '../test/fixture-pids.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 const temp = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), 'mcp-installed-smoke-'));
@@ -90,21 +91,22 @@ try {
         : { script: `& ${quote(process.execPath)} ${quote(tree)} parent ${quote(path)}`, engine: process.env.MCP_REQUIRED_ENGINE ?? 'pwsh' };
       const result = await call(tool, { ...args, timeoutMs: 5000 });
       assert(result.structuredContent?.timedOut && result.structuredContent?.stdout.includes('before-cancel'), `installed ${tool} timeout/prefix`);
-      const lines = readFileSync(path, 'utf8').trim().split('\n'); assert(lines.length === 3, `installed ${tool} tree launch`);
-      for (const line of lines) { let exists = true; try { process.kill(Number(line.split(':')[1]), 0); } catch { exists = false; } assert(!exists, `installed ${tool} descendant survived`); }
+      const pids = parseFixturePids(readFileSync(path, 'utf8'), ['parent', 'child', 'grandchild']); assert(pids?.length === 3, `installed ${tool} tree launch`);
+      for (const pid of pids) { let exists = true; try { process.kill(pid, 0); } catch { exists = false; } assert(!exists, `installed ${tool} descendant survived`); }
     }
     treeRun = await lifecycle('start_execution', request);
     assert((await lifecycle('start_execution', request)).id === treeRun.id, 'installed idempotency');
-    let lines = [];
-    for (let i = 0; i < 240; i++) { try { lines = readFileSync(marker, 'utf8').trim().split('\n'); if (lines.length === 3) break; } catch {} await pause(25); }
-    assert(lines.length === 3, 'installed parent/child/grandchild launch');
+    let pids = [];
+    for (let i = 0; i < 240; i++) { try { pids = parseFixturePids(readFileSync(marker, 'utf8'), ['parent', 'child', 'grandchild']) ?? []; if (pids.length === 3) break; } catch {} await pause(25); }
+    assert(pids.length === 3, 'installed parent/child/grandchild launch');
+    for (const pid of pids) witnessFixturePid(pid, marker);
     const page = await lifecycle('read_execution_output', { owner, id: treeRun.id, stream: 'stdout', offset: 0, length: 64 });
     assert(Buffer.from(page.data, 'base64').toString().includes('before-cancel'), 'installed output before cancellation');
     await lifecycle('cancel_execution', { owner, id: treeRun.id });
     let status;
     for (let i = 0; i < 300; i++) { status = await lifecycle('execution_status', { owner, id: treeRun.id }); if (status.state !== 'running') break; await pause(25); }
     assert(status.state === 'cancelled', 'installed verified tree cancellation');
-    for (const line of lines) { let exists = true; try { process.kill(Number(line.split(':')[1]), 0); } catch { exists = false; } assert(!exists, 'installed owned descendant survived'); }
+    for (const pid of pids) { let exists = true; try { process.kill(pid, 0); } catch { exists = false; } assert(!exists, 'installed owned descendant survived'); }
     assert(control.exitCode === null && control.signalCode === null, 'installed unrelated process was killed');
     const wrongOwner = await call('cancel_execution', { owner: 'wrong-owner', id: treeRun.id });
     assert(wrongOwner.isError, 'installed owner isolation');
@@ -123,7 +125,7 @@ try {
     const retained = await lifecycle('read_execution_output', { owner, id: completed.id, stream: 'stdout', offset: 0, length: 64 });
     assert(retained.complete && Buffer.from(retained.data, 'base64').toString() === 'retained-output', 'installed recovered completed output');
     for (const recovered of [await lifecycle('execution_status', { owner, id: treeRun.id }), await lifecycle('cancel_execution', { owner, id: treeRun.id }), await lifecycle('start_execution', request)]) assert(recovered.state === 'unknown' && recovered.id === treeRun.id, 'installed stale-ownership reconciliation/replay refusal');
-    assert(readFileSync(marker, 'utf8').trim().split('\n').length === 3 && control.exitCode === null && control.signalCode === null, 'installed recovery signalled unrelated PID or replayed intent');
+    assert(parseFixturePids(readFileSync(marker, 'utf8'), ['parent', 'child', 'grandchild'])?.length === 3 && control.exitCode === null && control.signalCode === null, 'installed recovery signalled unrelated PID or replayed intent');
   } finally { control.kill(); }
   const secret = 'synthetic-only-secret-24';
   const denied = await call('ssh_exec', { host: '127.0.0.1', port: 1, username: 'fixture', command: 'true', password: secret, hostKeyPins: ['SHA256:invalid'] });

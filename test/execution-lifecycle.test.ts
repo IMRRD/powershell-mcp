@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, symlinkSync, renameSync, readdirSync, statSync, unlinkSync, truncateSync } from 'node:fs';
+import { parseFixturePids, witnessFixturePid } from './fixture-pids.mjs';
 import * as fs from 'node:fs';
 import { spawnSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -204,17 +205,18 @@ setInterval(()=>{},1000);`);
     try {
       const store = new ExecutionStore(root);
       const run = store.start('owner', 'tree', process.execPath, [tree, 'parent', marker]);
-      let lines: string[] = [];
+      let pids: number[] = [];
       for (let i = 0; i < 200; i++) {
-        try { lines = readFileSync(marker, 'utf8').trim().split('\n'); } catch { /* not launched */ }
-        if (lines.length === 3) break;
+        try { pids = parseFixturePids(readFileSync(marker, 'utf8'), ['parent', 'child', 'grandchild']) ?? []; } catch { /* not launched */ }
+        if (pids.length === 3) break;
         await pause(25);
       }
-      expect(lines.map(x => x.split(':')[0])).toEqual(['parent', 'child', 'grandchild']);
+      expect(pids).toHaveLength(3);
+      for (const pid of pids) witnessFixturePid(pid, marker);
       store.cancel('owner', run.id);
       for (let i = 0; i < 200 && store.status('owner', run.id).state === 'running'; i++) await pause(25);
       expect(store.status('owner', run.id).state).toBe('cancelled');
-      for (const line of lines) expect(() => process.kill(Number(line.split(':')[1]), 0)).toThrow();
+      for (const pid of pids) expect(() => process.kill(pid, 0)).toThrow();
       expect(() => process.kill(control.pid!, 0)).not.toThrow();
     } finally { control.kill(); }
   }), 20000);

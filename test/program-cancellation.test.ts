@@ -5,6 +5,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { parseFixturePids, witnessFixturePid } from './fixture-pids.mjs';
 
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
@@ -30,10 +31,11 @@ setTimeout(()=>{},20000);`);
     pending = client.callTool({ name: 'run_program', arguments: { program: process.execPath, args: [entry, 'root', marker] } }, undefined,
       { signal: abort.signal, timeout: 30000 }).catch(error => error);
     await expect.poll(() => {
-      try { pids = readFileSync(marker, 'utf8').trim().split('\n').map(line => Number(line.split(':')[1])); } catch { /* startup */ }
+      try { pids = parseFixturePids(readFileSync(marker, 'utf8'), ['root', 'child']) ?? []; } catch { /* startup */ }
       return pids.length;
     }, { timeout: 15000, interval: 25 }).toBe(2);
     expect(pids.every(pid => Number.isInteger(pid) && pid > 0 && alive(pid))).toBe(true);
+    for (const pid of pids) witnessFixturePid(pid, marker);
     const started = Date.now();
     abort.abort();
     await pending;

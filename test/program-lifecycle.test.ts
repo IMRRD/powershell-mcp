@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import type { PsResult } from '../src/powershell.js';
 import { selectIntegrationEngines } from './integration-engine.js';
+import { parseFixturePids, witnessFixturePid } from './fixture-pids.mjs';
 
 // Reuse the actual native acceptance against a freshly installed tarball. The
 // artifact lane imports only installed production modules and their helpers.
@@ -50,9 +51,10 @@ else {process.stdout.write('child-ready\\n');setTimeout(()=>{process.stdout.writ
           void pending.then(() => { settled = true; });
         }
         await expect.poll(() => {
-          try { pids = readFileSync(marker, 'utf8').trim().split('\n').map(line => Number(line.split(':')[1])); } catch { /* startup */ }
+          try { pids = parseFixturePids(readFileSync(marker, 'utf8'), ['root', 'child']) ?? []; } catch { /* startup */ }
           return pids.length === 2 && !alive(pids[0]) && alive(pids[1]);
         }, { timeout: 15000, interval: 25 }).toBe(true);
+        witnessFixturePid(pids[1], marker);
         expect(settled).toBe(false);
         if (store && id) expect(store.status('owner', id).state).toBe('running');
         if (action === 'cancel') { abort.abort(); if (store && id) store.cancel('owner', id); }
@@ -104,12 +106,13 @@ else {process.stdout.write('child-ready\\n');setTimeout(()=>{process.stdout.writ
     const sentinel = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore', windowsHide: true });
     // Synchronous writes exceed each OS pipe's capacity. The child never reads
     // its 1 MiB stdin, so the supervisor's input writer remains blocked.
-    const source = `const fs=require('node:fs');const b=Buffer.alloc(65536,120);for(let i=0;i<32;i++){fs.writeSync(1,b);fs.writeSync(2,b)}fs.writeFileSync(${JSON.stringify(marker)},String(process.pid));setInterval(()=>{},1000)`;
-    const pending = runProgram(process.execPath, ['-e', source], { stdin: 'i'.repeat(1048576), maxOutputBytes: 7, tail: true,
+    const source = `const fs=require('node:fs');const b=Buffer.alloc(65536,120);for(let i=0;i<32;i++){fs.writeSync(1,b);fs.writeSync(2,b)}fs.writeFileSync(process.argv[1],String(process.pid)+'\\n');setInterval(()=>{},1000)`;
+    const pending = runProgram(process.execPath, ['-e', source, marker], { stdin: 'i'.repeat(1048576), maxOutputBytes: 7, tail: true,
       timeoutMs: action === 'timeout' ? 5000 : 60000, signal: abort.signal });
     let pid: number | undefined;
     try {
-      await expect.poll(() => { try { pid = Number(readFileSync(marker, 'utf8')); return alive(pid); } catch { return false; } }, { timeout: 15000, interval: 25 }).toBe(true);
+      await expect.poll(() => { try { pid = parseFixturePids(readFileSync(marker, 'utf8'))?.[0]; return pid !== undefined && alive(pid); } catch { return false; } }, { timeout: 15000, interval: 25 }).toBe(true);
+      witnessFixturePid(pid!, marker);
       // The marker follows both write loops, so cancellation cannot race setup.
       if (action === 'cancel') abort.abort();
       const result = await pending;

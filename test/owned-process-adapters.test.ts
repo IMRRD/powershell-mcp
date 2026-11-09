@@ -7,6 +7,7 @@ import { runProgram } from '../src/program.js';
 import { runPowerShell } from '../src/powershell.js';
 import { ExecutionStore } from '../src/execution-lifecycle.js';
 import { spawnOwned } from '../src/owned-process.js';
+import { parseFixturePids, witnessFixturePid } from './fixture-pids.mjs';
 
 const exe = process.env.MCP_REQUIRED_ENGINE === 'powershell' ? 'powershell.exe' : 'pwsh';
 const callers = ['program', 'powershell', 'durable'] as const;
@@ -115,11 +116,13 @@ else setTimeout(()=>{},20000);`);
       expect(Number.isFinite(value), raw).toBe(true);
       return value;
     };
+    let pids: number[] = [];
     try {
       await expect.poll(() => {
-        try { const pids = readFileSync(marker, 'utf8').trim().split('\n').map(Number); return pids.length === 2 && !alive(pids[0]) && alive(pids[1]); }
+        try { pids = parseFixturePids(readFileSync(marker, 'utf8'), ['', '']) ?? []; return pids.length === 2 && !alive(pids[0]) && alive(pids[1]); }
         catch { return false; }
       }, { timeout: 15000, interval: 25 }).toBe(true);
+      witnessFixturePid(pids[1], marker);
       // Exclude helper compilation/launch and measure only the orphan-wait phase.
       const before = cpu(), started = Date.now();
       await new Promise(resolve => setTimeout(resolve, 2000));
