@@ -90,7 +90,13 @@ try {
       $nativeErrorsAreDiagnostics = $true
       # Catch upstream so a terminating script error cannot stop the formatter
       # before it has drained output already emitted by the script.
-      & { try { & ([ScriptBlock]::Create($source)) } catch { RecordError $_; [string]$_.Exception.Message } } 2>&1 3>&1 4>&1 5>&1 6>&1 | ${PRODUCER_PIPELINE}
+      & { try { & ([ScriptBlock]::Create($source)) } catch { RecordError $_; [string]$_.Exception.Message } } 2>&1 3>&1 4>&1 5>&1 6>&1 | ForEach-Object {
+        # Native stderr continuation records are diagnostics too. Require the
+        # native exception type so a cmdlet using this ErrorId still fails.
+        if ($_ -is [System.Management.Automation.ErrorRecord] -and $_.FullyQualifiedErrorId -eq 'NativeCommandErrorMessage' -and $_.Exception -is [System.Management.Automation.RemoteException]) {
+          [string]$_.Exception.Message
+        } else { $_ }
+      } | ${PRODUCER_PIPELINE}
     } catch { RecordError $_; $producer.WriteLine([string]$_.Exception.Message) }
   }
 } finally { [Console]::SetOut($consoleOut) }
