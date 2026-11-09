@@ -83,6 +83,19 @@ for (const exe of engines) describe(`native WinRM bootstrap (${exe}, isolated In
     const script = await exercise(exe, "throw 'PRIVATE'");
     expect(script.winrmReason).toBe('remote_script_error');
   });
+  it.each([
+    'System.Security.Authentication.AuthenticationException',
+    'System.UnauthorizedAccessException',
+    'System.Management.Automation.Remoting.PSRemotingTransportException',
+  ])('keeps a remote %s throw at the remote-script boundary', async exceptionType => {
+    const result = await exercise(exe, `throw [${exceptionType}]::new('PRIVATE authentication access endpoint')`);
+    expect(result).toMatchObject({ invocationStatus: 'remote_error', winrmReason: 'remote_script_error', exitCode: 0 });
+    expect(result.errorRecords?.[0].exceptionType).toBe(exceptionType);
+    expect(fromProcess(result, 'winrm', 'synthetic.invalid')).toMatchObject({
+      terminationStatus: 'remote_error', terminationCertainty: 'unknown', exitCode: null,
+      detail: { localExitCode: 0, winrmReason: 'remote_script_error' },
+    });
+  });
   it('does not invent a remote native exit code for unchecked nonzero exit', async () => {
     const native = await exercise(exe, process.platform === 'win32' ? "& $env:ComSpec /d /c 'exit /b 7'; Write-Output after" : "& /bin/sh -c 'exit 7'; Write-Output after");
     expect(native).toMatchObject({ invocationStatus: 'completed', winrmReason: 'completed' });
