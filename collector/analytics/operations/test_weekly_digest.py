@@ -22,14 +22,24 @@ def fixture():
                 imported=NOW - dt.timedelta(minutes=15))
 
 
+def reason_fixture():
+    return fixture() | dict(
+        tools=[('unknown_origin', 'counts', 'winrm_exec', 60), ('unknown_origin', 'metrics', 'winrm_exec', 60)],
+        axes=[('unknown_origin', 'winrm_exec', a, b, n) for a, b, n in
+              [('outcomes', 'error', 60), ('durations', 'lt100', 60), ('features', 'remote', 60)]],
+        winrm_reasons=[('unknown_origin', b, 20) for b in ('invoke_exception', 'unknown', 'uninstrumented')])
+
+
 class Cursor:
     def __init__(self, rows):
         self.rows = iter(rows)
         self.sql = []
+        self.params = []
     def __enter__(self): return self
     def __exit__(self, *a): pass
     def execute(self, sql, params=None):
         self.sql.append(sql)
+        self.params.append(params)
         if sql.startswith('SET TRANSACTION'):
             return
         self.current = iter(next(self.rows))
@@ -46,9 +56,97 @@ class Conn:
 
 def result_rows(f):
     return [f['adoption'], f['events'], f['tools'], f['axes'], f['quality'],
-            [(f['unknown_receipt_count'],)], f['receipts'], [(f['imported'],)], f.get('users', [])]
+            [(f['unknown_receipt_count'],)], f['receipts'], [(f['imported'],)], f.get('users', []), f.get('winrm_reasons', [])]
 
 class DigestTests(unittest.TestCase):
+    def test_first_screen_summary_distinguishes_error_volume_from_rate(self):
+        f = fixture() | dict(
+            adoption=[('internal', 30, 20, 10), ('external_self_declared', 10, 10, 0)],
+            tools=[('internal', 'metrics', 'run_powershell', 100), ('internal', 'metrics', 'winrm_exec', 20)],
+            axes=[('internal', t, 'outcomes', b, n) for t, b, n in
+                  [('run_powershell', 'error', 30), ('run_powershell', 'success', 70), ('winrm_exec', 'error', 20)]])
+        for body in w.report(f, START, END, NOW):
+            summary = body.split('Legacy count stream', 1)[0]
+            for value in ('Weekly findings', '30 observed', '20 active', '10 startup-only', 'installations, not people',
+                          'external_self_declared', 'Largest error volume: run_powershell',
+                          'Highest error rate: winrm_exec', '20/20', '100.0%',
+                          'Comparison unavailable', 'equivalent completed UTC weeks', 'version/instrumentation',
+                          'Action: review', 'Release/deployment status unavailable'):
+                self.assertIn(value, summary)
+            self.assertLess(body.index('Weekly findings'), body.index('Legacy count stream'))
+            self.assertIn('Nonzero', body)
+            self.assertIn('Timeout', body)
+        for f in (fixture() | {'axes': []}, fixture() | {'tools': [], 'axes': []}):
+            for body in w.report(f, START, END, NOW):
+                summary = body.split('Legacy count stream', 1)[0]
+                self.assertIn('Outcomes unavailable', summary)
+                self.assertNotIn('Largest error volume:', summary)
+                self.assertNotIn('Highest error rate:', summary)
+
+    def test_safe_reasons_and_coverage_render_as_separate_marginal(self):
+        for body in w.report(reason_fixture(), START, END, NOW):
+            for value in ('invoke_exception', 'unknown', 'uninstrumented', '40/60', '66.7%', 'not a root cause'):
+                self.assertIn(value, body)
+            self.assertIn('Metric stream: 60 recorded calls', body)
+            self.assertNotIn('120 recorded calls', body)
+
+    def test_invalid_reason_aggregates_refuse_without_echoing_fields(self):
+        from decimal import Decimal
+        invalid = [
+            [('PRIVATE', 'unknown', 60)], [('unknown_origin', 'PRIVATE', 60)],
+            [('unknown_origin', ['unknown'], 60)], [('unknown_origin', None, 60)],
+            [('unknown_origin', 'unknown', 60, 'PRIVATE')],
+            [('unknown_origin', 'unknown', 30)] * 2,
+            [('unknown_origin', 'unknown', 59)],
+        ] + [[('unknown_origin', 'unknown', n)] for n in
+             (True, 0, -1, 1.5, Decimal('NaN'), Decimal('Infinity'), '60')]
+        for rows in invalid:
+            with self.subTest(rows=rows):
+                with self.assertRaises(ValueError):
+                    w.report(reason_fixture() | {'winrm_reasons': rows}, START, END, NOW)
+
+    def test_empty_reasons_are_unavailable_and_never_inferred_zero(self):
+        for rows in (None, []):
+            f = reason_fixture()
+            f.pop('winrm_reasons')
+            if rows is not None: f['winrm_reasons'] = rows
+            for body in w.report(f, START, END, NOW):
+                self.assertIn('WinRM diagnostics unavailable or withheld', body)
+                self.assertNotIn('Reason coverage:', body)
+
+    def test_reason_suppression_and_outcome_complements_ignore_private_optin(self):
+        audience = dict(sender='sender@example.invalid', recipient=w.RECIPIENT, approved_recipients=[w.RECIPIENT])
+        for reasons, outcomes in (
+            ([('invoke_exception', 59), ('unknown', 1)], [('error', 60)]),
+            ([('invoke_exception', 59), ('uninstrumented', 1)], [('error', 60)]),
+            ([('invoke_exception', 20), ('unknown', 40)], [('error', 21), ('success', 39)]),
+        ):
+            f = reason_fixture() | {
+                'winrm_reasons': [('unknown_origin', r, n) for r, n in reasons],
+                'axes': [('unknown_origin', 'winrm_exec', 'outcomes', r, n) for r, n in outcomes]}
+            for config in ({}, audience | {'private_small_counts': audience}):
+                for body in w.report(f, START, END, NOW, config):
+                    self.assertIn('WinRM diagnostics unavailable or withheld', body)
+                    self.assertNotIn('invoke_exception', body)
+                    self.assertNotIn('Reason coverage:', body)
+
+
+    def test_restricted_reasons_use_same_snapshot_and_window(self):
+        f = fixture() | {'winrm_reasons': [('unknown_origin', 'invoke_exception', 20)]}
+        conn = Conn(result_rows(f))
+        data = w.aggregates(conn, START, END)
+        self.assertEqual(data.get('winrm_reasons'), f['winrm_reasons'])
+        self.assertEqual(conn.cur.sql[-1], 'SELECT origin, reason, calls FROM winrm_diagnostics_utc(%s,%s)')
+        self.assertEqual(conn.cur.params[-1], (START, END))
+
+    def test_reason_enum_matches_existing_importer_without_extending_general_axes(self):
+        import ast
+        tree = ast.parse((Path(__file__).parents[1] / 'import_jsonl.py').read_text())
+        contract = next(ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
+                        and any(isinstance(t, ast.Name) and t.id == 'WINRM_REASONS' for t in n.targets))
+        self.assertEqual(w.WINRM_REASONS, contract | {'uninstrumented'})
+        self.assertNotIn('winrmReasons', w.AXES)
+
     def test_user_proxy_coverage_rendering_and_complement_suppression_in_both_parts(self):
         data = fixture() | {'users': [('unknown_origin',20,10,10,10)]}
         for body in w.report(data, START, END, NOW):

@@ -24,7 +24,7 @@
         "type": "postgres",
         "uid": "powershell-mcp-pg"
       },
-      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external.",
+      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external. Metric-instrumented calls in selected event-time window. Legacy count batches are excluded; not a total of every historical call.",
       "targets": [
         {
           "refId": "A",
@@ -65,7 +65,7 @@
         "type": "postgres",
         "uid": "powershell-mcp-pg"
       },
-      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external.",
+      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external. Includes nonzero exits, errors, timeouts, cancellations and unknown outcomes. A nonzero exit is not necessarily a product defect.",
       "targets": [
         {
           "refId": "A",
@@ -106,7 +106,7 @@
         "type": "postgres",
         "uid": "powershell-mcp-pg"
       },
-      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external.",
+      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external. Recorded duration bucket, not an inferred p95 or execution-time percentile.",
       "targets": [
         {
           "refId": "A",
@@ -147,7 +147,7 @@
         "type": "postgres",
         "uid": "powershell-mcp-pg"
       },
-      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external.",
+      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external. Latest received telemetry in the selected receipt window. Receipt is not end-to-end delivery or instrumentation proof.",
       "targets": [
         {
           "refId": "A",
@@ -209,7 +209,7 @@
         "type": "postgres",
         "uid": "powershell-mcp-pg"
       },
-      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external.",
+      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external. Metric stream only. Non-success includes nonzero, errors, timeout, cancelled and unknown; slow is ≥10 seconds. Independent outcome/duration marginals aggregated before joining by tool. A missing axis is unknown.",
       "targets": [
         {
           "refId": "A",
@@ -326,7 +326,7 @@
         "type": "postgres",
         "uid": "powershell-mcp-pg"
       },
-      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external.",
+      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external. Distinct outcomes; a nonzero exit alone does not establish a defect.",
       "targets": [
         {
           "refId": "A",
@@ -364,7 +364,7 @@
         "type": "postgres",
         "uid": "powershell-mcp-pg"
       },
-      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external.",
+      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external. One metric stream only. Legacy counts are separately available below.",
       "targets": [
         {
           "refId": "A",
@@ -387,12 +387,40 @@
       }
     },
     {
+      "id": 110,
+      "title": "WinRM diagnostics — separate reason marginal",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 25,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "postgres",
+        "uid": "powershell-mcp-pg"
+      },
+      "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external. unknown is instrumented without specific evidence; uninstrumented has no reason axis. Empty results are unavailable or withheld, never zero. Reasons are independent of outcomes, not extra calls or proven root causes.",
+      "targets": [
+        {
+          "refId": "A",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT * FROM (SELECT origin, reason, calls FROM winrm_diagnostics_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)) privacy_panel WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          }
+        }
+      ]
+    },
+    {
       "id": 109,
       "title": "Data and delivery details",
       "type": "row",
       "gridPos": {
         "x": 0,
-        "y": 25,
+        "y": 33,
         "w": 24,
         "h": 1
       },
@@ -424,7 +452,7 @@
               }
             }
           ],
-          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
+          "description": "Default suppression: empty results may be withheld for small cells or derivable complements; no zero implied. Cohorts are per event and can overlap across installations. External is self-declared; unknown is not external."
         },
         {
           "id": 202,
@@ -452,7 +480,7 @@
               }
             }
           ],
-          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
+          "description": "Default suppression: empty results may be withheld for small cells or derivable complements; no zero implied. Cohorts are per event and can overlap across installations. External is self-declared; unknown is not external."
         },
         {
           "id": 203,
@@ -480,7 +508,7 @@
               }
             }
           ],
-          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
+          "description": "Default suppression: empty results may be withheld for small cells or derivable complements; no zero implied. Cohorts are per event and can overlap across installations. External is self-declared; unknown is not external."
         },
         {
           "id": 204,
@@ -508,7 +536,7 @@
               }
             }
           ],
-          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
+          "description": "Default suppression: empty results may be withheld for small cells or derivable complements; no zero implied. Cohorts are per event and can overlap across installations. External is self-declared; unknown is not external."
         },
         {
           "id": 205,
@@ -536,7 +564,7 @@
               }
             }
           ],
-          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
+          "description": "Default suppression: empty results may be withheld for small cells or derivable complements; no zero implied. Cohorts are per event and can overlap across installations. External is self-declared; unknown is not external."
         },
         {
           "id": 206,
@@ -628,7 +656,7 @@
               }
             ]
           },
-          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
+          "description": "Default suppression: empty results may be withheld for small cells or derivable complements; no zero implied. Cohorts are per event and can overlap across installations. External is self-declared; unknown is not external."
         },
         {
           "id": 207,
@@ -656,7 +684,7 @@
               }
             }
           ],
-          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
+          "description": "Default suppression: empty results may be withheld for small cells or derivable complements; no zero implied. Cohorts are per event and can overlap across installations. External is self-declared; unknown is not external."
         },
         {
           "id": 208,
@@ -684,7 +712,7 @@
               }
             }
           ],
-          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
+          "description": "Default suppression: empty results may be withheld for small cells or derivable complements; no zero implied. Cohorts are per event and can overlap across installations. External is self-declared; unknown is not external."
         },
         {
           "id": 209,
@@ -712,7 +740,7 @@
               }
             }
           ],
-          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
+          "description": "Default suppression: empty results may be withheld for small cells or derivable complements; no zero implied. Cohorts are per event and can overlap across installations. External is self-declared; unknown is not external."
         },
         {
           "id": 210,
@@ -740,7 +768,7 @@
               }
             }
           ],
-          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
+          "description": "Default suppression: empty results may be withheld for small cells or derivable complements; no zero implied. Cohorts are per event and can overlap across installations. External is self-declared; unknown is not external."
         },
         {
           "id": 211,
@@ -768,10 +796,10 @@
               }
             }
           ],
-          "description": "Default privacy suppression applies to all counts and complements. Empty results mean unavailable or suppressed, never zero use. External is self-declared; unknown is not external."
+          "description": "Default suppression: empty results may be withheld for small cells or derivable complements; no zero implied. Cohorts are per event and can overlap across installations. External is self-declared; unknown is not external."
         },
         {
-          "id": 250,
+          "id": 212,
           "title": "Optional user pseudonym proxies and installation coverage (not verified humans)",
           "type": "table",
           "gridPos": {
@@ -791,6 +819,34 @@
               "format": "table",
               "rawQuery": true,
               "rawSql": "SELECT * FROM user_proxy_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz) WHERE privacy_window_safe_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
+              "datasource": {
+                "type": "postgres",
+                "uid": "powershell-mcp-pg"
+              }
+            }
+          ]
+        },
+        {
+          "id": 213,
+          "title": "WinRM diagnostics — separate reason marginal",
+          "type": "table",
+          "gridPos": {
+            "x": 0,
+            "y": 84,
+            "w": 24,
+            "h": 9
+          },
+          "datasource": {
+            "type": "postgres",
+            "uid": "powershell-mcp-pg"
+          },
+          "description": "unknown is instrumented without specific evidence; uninstrumented has no reason axis. Empty results are unavailable or withheld, never zero. Reasons are independent of outcomes, not extra calls or proven root causes. Default SQL small-cell and complementary suppression applies.",
+          "targets": [
+            {
+              "refId": "A",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT origin, reason, calls FROM winrm_diagnostics_utc($__timeFrom()::timestamptz, $__timeTo()::timestamptz)",
               "datasource": {
                 "type": "postgres",
                 "uid": "powershell-mcp-pg"

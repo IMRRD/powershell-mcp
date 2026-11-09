@@ -119,6 +119,10 @@ class MigratedPrivacyReviewRegressions(PrivacyReviewRegressions):
         migration = (fixture.ROOT/'migrate_issue63.sql').read_text().replace('SET search_path = public, pg_temp', f'SET search_path = {self.schema}, pg_temp')
         self.db.execute(migration)
         self.db.execute(migration)
+        # Current dashboard consumers also require the existing issue64 function.
+        diagnostics = (fixture.ROOT/'migrate_issue64.sql').read_text().replace('SET search_path = public, pg_temp', f'SET search_path = {self.schema}, pg_temp')
+        self.db.execute(diagnostics)
+        self.db.execute(diagnostics)
 
     def drop_fixture_role(self):
         self.db.execute('DROP OWNED BY telemetry_dashboard')

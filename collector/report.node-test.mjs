@@ -52,6 +52,67 @@ test('versioned metric outcomes, durations and features aggregate without doubli
   const bad = fixture([{ ...row, metrics: { runtime_capabilities: { ...row.metrics.runtime_capabilities, secret: 'private' } } }]);
   assert.notEqual(bad.status, 0);
   assert.equal(bad.stdout, '');
+  const winrm = (host, reasons) => event(host, 'tool_metrics', '2026-10-02T00:00:00.000Z', {
+    schemaVersion: 2, metrics: { winrm_exec: { outcomes: { error: 20 }, durations: { lt100: 20 }, features: { remote: 20 },
+      ...(reasons === undefined ? {} : { winrmReasons: reasons }) } } });
+  const rows = Array.from({length: 20}, (_, i) => winrm('synthetic-' + i, i < 10 ? {unknown: 20} : undefined));
+  const mixed = fixture(rows);
+  assert.equal(mixed.status, 0, mixed.stderr);
+  const metrics = mixed.raw.groups.unknownOrigin.toolMetrics.winrm_exec;
+  assert.deepEqual(metrics.outcomes, {error: 400});
+  assert.deepEqual(metrics.winrmReasons, {unknown: 200, uninstrumented: 200});
+  assert.equal(JSON.parse(mixed.stdout).withheld, false);
+  for (const reason of ['completed','remote_script_error','authentication_exception','access_exception',
+    'remoting_transport_exception','invoke_exception','wrapper_result_invalid','frame_invalid',
+    'frame_body_invalid','local_host_error','local_launch_error','timeout','cancelled','unknown']) {
+    const positive = fixture([winrm('synthetic', {[reason]: 20})]);
+    assert.equal(positive.status, 0, reason);
+    assert.equal(positive.raw.groups.unknownOrigin.toolMetrics.winrm_exec.winrmReasons[reason], 20);
+  }
+  for (const invalid of [{}, {PRIVATE: 20}, {unknown: true}, {unknown: 0}, {unknown: -1}, {unknown: 1.5},
+                         {unknown: 19}, {unknown: 21}, {uninstrumented: 20}, [], null, {unknown: Number.MAX_SAFE_INTEGER, completed: 1}]) {
+    const refused = fixture([winrm('synthetic', invalid)]);
+    assert.notEqual(refused.status, 0);
+    assert.equal(refused.stdout, '');
+    assert.doesNotMatch(refused.stderr, /PRIVATE|synthetic/);
+  }
+  const wrong = winrm('synthetic', {unknown: 20});
+  wrong.metrics.ssh_exec = wrong.metrics.winrm_exec;
+  delete wrong.metrics.winrm_exec;
+  for (const invalid of [wrong,
+    {...winrm('synthetic', {unknown: 20}), command: 'PRIVATE'},
+    {...winrm('synthetic', {unknown: 20}), metrics: {winrm_exec: {...winrm('synthetic').metrics.winrm_exec, secret: 'PRIVATE'}}}]) {
+    const refused = fixture([invalid]);
+    assert.notEqual(refused.status, 0);
+    assert.equal(refused.stdout, '');
+    assert.doesNotMatch(refused.stderr, /PRIVATE/);
+  }
+  // All reason and outcome cells are safe, but error(21)-known(20)=1.
+  const complement = Array.from({length: 41}, (_, i) => {
+    const row = winrm('synthetic-' + i, i < 20 ? {invoke_exception: 1} : {unknown: 1});
+    Object.assign(row.metrics.winrm_exec, {outcomes: {[i < 21 ? 'error' : 'success']: 1}, durations: {lt100: 1}, features: {remote: 1}});
+    return row;
+  });
+  const withheld = fixture(complement);
+  assert.equal(withheld.status, 0, withheld.stderr);
+  assert.equal(JSON.parse(withheld.stdout).withheld, true);
+  assert.doesNotMatch(withheld.stdout, /invoke_exception/);
+  // Above-threshold remainder is still disclosed.
+  for (let i = 21; i < 30; i++) complement[i].metrics.winrm_exec.outcomes = {error: 1};
+  assert.equal(JSON.parse(fixture(complement).stdout).withheld, false);
+  for (const kind of ['reason_cell', 'uninstrumented']) {
+    const sparse = Array.from({length: 20}, (_, i) => winrm('synthetic-' + i, {invoke_exception: 20}));
+    if (kind === 'reason_cell') sparse[0].metrics.winrm_exec.winrmReasons = {invoke_exception: 19, unknown: 1};
+    else {
+      const legacy = winrm('synthetic-0');
+      Object.assign(legacy.metrics.winrm_exec, {outcomes: {error: 1}, durations: {lt100: 1}, features: {remote: 1}});
+      sparse.push(legacy);
+    }
+    const refused = fixture(sparse);
+    assert.equal(refused.status, 0);
+    assert.equal(JSON.parse(refused.stdout).withheld, true);
+    assert.doesNotMatch(refused.stdout, /invoke_exception/);
+  }
 });
 
 test('ambiguous classification and invalid windows fail closed', () => {

@@ -1,5 +1,34 @@
 # Issue 43: readable private digest candidate
 
+Issue 75 adds a bounded consumer repair, developed against synthetic fixtures.
+The first screen now distinguishes observed, active and startup-only installations
+by origin, names the largest recorded error volume and highest error proportion
+independently, and offers at most three evidence-backed review actions. Error,
+nonzero, timeout, cancellation and unknown remain separate in the detail table.
+Outcome coverage describes complete metric tool/origin marginals, not the share
+of all executed calls. Groups with fewer than 100 recorded outcomes are labelled
+small samples; this is a descriptive caution, not a statistical confidence bound.
+
+The same read-only repeatable-read snapshot now requests
+`winrm_diagnostics_utc(start,end)` separately from general metric axes. Both
+alternatives render only validated finite reasons and same-window reason coverage
+when disclosed. `unknown` is instrumented without a specific reason;
+`uninstrumented` is a missing reason axis. Reasons are independent marginals,
+never extra calls or error-specific rates, and observed boundaries do not prove
+authentication, permission, transport or script root causes. Empty results are
+unavailable or withheld; the renderer never reconstructs suppressed reasons from
+other totals. Diagnostic small-cell, missing-axis and outcome-minus-known-reason
+complement protection applies even with private small-count permission. The
+existing audience opt-in continues to govern other private aggregate counts.
+
+This slice does not query a prior week or version cohorts. It explicitly marks
+comparison and release/deployment status unavailable, instead of inventing trend
+data. Remaining issue75 work includes actual equivalent completed UTC weeks with
+compatible version/instrumentation cohorts and uncertainty, operator review of
+the real restricted preview, and installed dashboard/frontend acceptance. Late
+arrivals can revise a reconstructed event-time week. No timer, recipient,
+transport, config or original intent ledger is changed by these source repairs.
+
 This source is prepared for parent review. No deployment, timer activation, production authentication or mail submission is performed here. The operator confirmed receipt of the original 12–19 October 2026 UTC email. Preserve its intent permanently; presentation changes never authorize a resend. Issue 43 remains open until an actual timer-triggered delivery is confirmed separately from the manual one-shot.
 
 The report uses the existing restricted PostgreSQL views and repeatable-read, read-only snapshot. It renders matching plain-text and HTML alternatives, readable UTC dates, separate legacy-count and metric-stream totals, per-tool bars, installation proxies and startup-only segmentation, failure numerators and compatible outcome denominators, cancellations, unknown outcomes, and recorded duration buckets. Investigation rows rank observed failures and slow operations without asserting root causes. Missing outcomes are unavailable, including weeks preceding instrumentation; no synthetic zeros, averages or percentiles fill missing evidence. HTML escapes dynamic values and has no remote assets or tracking.

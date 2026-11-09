@@ -19,6 +19,7 @@ RECIPIENT = 'isak@ialogics.com'
 # Same finite dimensions as the client/importer contract; never echo arbitrary SQL labels.
 TOOLS = {'run_powershell', 'list_services', 'get_service', 'control_service', 'system_info', 'ssh_exec', 'winrm_exec', 'sftp_upload', 'sftp_download', 'run_program', 'runtime_capabilities', 'start_execution', 'execution_status', 'read_execution_output', 'cancel_execution', 'read_output_log', 'delete_output_log', 'start_remote_batch', 'remote_batch_status', 'cancel_remote_batch'}
 AXES = {'outcomes': {'success', 'nonzero', 'error', 'timeout', 'cancelled', 'unknown'}, 'durations': {'lt100', 'lt1000', 'lt10000', 'gte10000'}, 'features': {'execution', 'inspection', 'remote', 'transfer', 'lifecycle', 'logs'}}
+WINRM_REASONS = {'completed', 'remote_script_error', 'authentication_exception', 'access_exception', 'remoting_transport_exception', 'invoke_exception', 'wrapper_result_invalid', 'frame_invalid', 'frame_body_invalid', 'local_host_error', 'local_launch_error', 'timeout', 'cancelled', 'unknown', 'uninstrumented'}
 DURATION_LABELS = {'lt100': 'under 100 ms', 'lt1000': '100–999 ms', 'lt10000': '1–9.999 seconds', 'gte10000': '10 seconds or more'}
 ADDRESS = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\Z")
 
@@ -65,7 +66,9 @@ def aggregates(connection, start, end):
         imported = cur.fetchone()[0]
         cur.execute('SELECT * FROM user_proxy_utc(%s,%s)', (start, end))
         users = cur.fetchall()
-    return dict(adoption=adoption, users=users, events=events, tools=tools, axes=axes, quality=quality, unknown_receipt_count=unknown_receipt_count, receipts=receipts, imported=imported)
+        cur.execute('SELECT origin, reason, calls FROM winrm_diagnostics_utc(%s,%s)', (start, end))
+        winrm_reasons = cur.fetchall()
+    return dict(adoption=adoption, users=users, events=events, tools=tools, axes=axes, winrm_reasons=winrm_reasons, quality=quality, unknown_receipt_count=unknown_receipt_count, receipts=receipts, imported=imported)
 
 
 def render(data, start, end, now, config=None):
@@ -120,7 +123,7 @@ def report(data, start, end, now, config=None):
             for n in (row[1:] if key == 'adoption' else row[-1:]):
                 if isinstance(n, bool) or not isinstance(n, (int, Decimal)) or n < 0 or n != int(n):
                     raise ValueError('invalid aggregate count')
-    small = not exact and any(0 < n < 10 for key in ('adoption', 'events', 'tools', 'axes')
+    policy_small = any(0 < n < 10 for key in ('adoption', 'events', 'tools', 'axes')
                 for row in data[key] for n in (row[1:] if key == 'adoption' else row[-1:]))
     seen = set()
     for origin, observed, active, startup in data['adoption']:
@@ -131,9 +134,9 @@ def report(data, start, end, now, config=None):
             raise ValueError('inconsistent installation aggregates')
         # Active and startup-only are disjoint subsets. Published proxies also
         # disclose their complements, including installations in neither subset.
-        if not exact and any(0 < n < 10 for n in
+        if any(0 < n < 10 for n in
                              (observed - active, observed - startup, observed - active - startup)):
-            small = True
+            policy_small = True
     for key, prefix in (('events', 2), ('tools', 3)):
         dimensions = [tuple(row[:prefix]) for row in data[key]]
         if len(dimensions) != len(set(dimensions)):
@@ -156,6 +159,78 @@ def report(data, start, end, now, config=None):
     for (o,t,a), buckets in distributions.items():
         if (o,t) not in metrics or sum(buckets.values()) != metrics[o,t]:
             raise ValueError('incomplete metric marginal')
+    reasons = {}
+    for row in data.get('winrm_reasons', []):
+        if not isinstance(row, (tuple, list)) or len(row) != 3:
+            raise ValueError('invalid WinRM diagnostic row')
+        o, reason, n = row
+        if isinstance(n, Decimal) and not n.is_finite():
+            raise ValueError('invalid WinRM diagnostic count')
+        if isinstance(n, bool) or not isinstance(n, (int, Decimal)) or n <= 0 or n != int(n):
+            raise ValueError('invalid WinRM diagnostic count')
+        if not isinstance(o, str) or not isinstance(reason, str) or o not in ORIGINS or reason not in WINRM_REASONS:
+            raise ValueError('invalid WinRM diagnostic dimension')
+        buckets = reasons.setdefault(o, {})
+        if reason in buckets:
+            raise ValueError('duplicate WinRM diagnostic dimension')
+        buckets[reason] = n
+    reason_unsafe = policy_small
+    if reasons and set(reasons) != {o for o, t in metrics if t == 'winrm_exec'}:
+        raise ValueError('incomplete WinRM diagnostic marginal')
+    for o, buckets in reasons.items():
+        total = metrics[o, 'winrm_exec']
+        if sum(buckets.values()) != total:
+            raise ValueError('incomplete WinRM diagnostic marginal')
+        # Same protections as the restricted SQL function, even with private
+        # small-count permission. These mappings guard disclosure, not joint rates.
+        if any(0 < n < 10 for count in buckets.values() for n in (count, total - count)):
+            reason_unsafe = True
+        known = {}
+        for reason, n in buckets.items():
+            if reason in ('unknown', 'uninstrumented'): continue
+            outcome = 'success' if reason == 'completed' else reason if reason in ('timeout', 'cancelled') else 'error'
+            known[outcome] = known.get(outcome, 0) + n
+        outcomes = distributions.get((o, 'winrm_exec', 'outcomes'))
+        if outcomes is None:
+            reason_unsafe = True
+        elif any(n < 0 or 0 < n < 10 for n in
+                 (outcomes.get(b, 0) - known.get(b, 0) for b in set(outcomes) | set(known))):
+            reason_unsafe = True
+    small = policy_small and not exact
+    note('Weekly findings')
+    if small:
+        note('Usage and reliability findings withheld by default privacy policy; no zero activity or improvement is implied.')
+    else:
+        for o, observed, active, startup in sorted(data['adoption']):
+            note(f'{o}: {observed} observed, {active} active, {startup} startup-only installations, not people.')
+        evidence = [(o, t, b, sum(b.values())) for (o, t, a), b in distributions.items() if a == 'outcomes']
+        errors = [(o, t, b.get('error', 0), n) for o, t, b, n in evidence if b.get('error', 0)]
+        actions = []
+        if errors:
+            volume = sorted(errors, key=lambda r: (-r[2], r[0], r[1]))[0]
+            rate = sorted(errors, key=lambda r: (-r[2]/r[3], r[0], r[1]))[0]
+            for label, (o, t, n, total) in (('Largest error volume', volume), ('Highest error rate', rate)):
+                note(f'{label}: {t} ({o}), {n}/{total} recorded outcomes ({n/total:.1%}).')
+            actions.append(f'Action: review {volume[1]} ({volume[0]}) for its recorded error volume; these outcomes do not establish a product defect or cause.')
+            if rate[:2] != volume[:2]:
+                actions.append(f'Action: review {rate[1]} ({rate[0]}) separately for its recorded error proportion and workload.')
+        elif evidence:
+            note('No recorded errors in the available outcome marginals; this does not establish reliability for missing instrumentation.')
+        else:
+            note('Outcomes unavailable; reliability cannot be inferred from legacy counts or duration buckets.')
+        missing = sum((o, t, 'outcomes') not in distributions for o, t in metrics)
+        note(f'Outcome coverage: {len(evidence)}/{len(metrics)} metric tool/origin groups have a complete outcome marginal; coverage of all executed calls is unknown.')
+        if missing or not evidence:
+            actions.append('Action: review outcome instrumentation coverage before drawing a reliability conclusion.')
+        timeouts = sorted([(o, t, b['timeout'], n) for o, t, b, n in evidence if b.get('timeout')], key=lambda r: (-r[2], r[0], r[1]))
+        if timeouts:
+            o, t, n, total = timeouts[0]
+            actions.append(f'Action: review {t} ({o}) timeout observations: {n}/{total} recorded outcomes; remote termination is unproven.')
+        for action in actions[:3]: note(action)
+        if any(n < 100 for o, t, b, n in evidence):
+            note('Small sample: fewer than 100 recorded outcomes in at least one tool/origin group; rates are descriptive, not evidence of improvement.')
+    note('Comparison unavailable: no prior-week version/instrumentation cohorts were queried. Compare equivalent completed UTC weeks and compatible instrumentation before claiming change; late arrivals can revise event-time totals.')
+    note('Release/deployment status unavailable from these aggregates; no fix or rollout is inferred. Reporting health passed the checkpoint and hourly receipt gates; complete upstream delivery remains unproven.')
     if small:
         note('Detailed adoption, event, tool and axis counts withheld: small cells or complementary disclosure risk; no zero is implied.')
     else:
@@ -171,10 +246,13 @@ def report(data, start, end, now, config=None):
             failures = sum(outcomes.get(b,0) for b in ('nonzero','error','timeout')) if outcomes else None
             rate = f'{failures/total:.1%}' if total else 'unavailable'
             reliability.append((o,t, str(failures) + '/' + str(total) + ' ('+rate+')' if total else 'Outcomes unavailable',
+                                str(outcomes.get('error',0)) if outcomes else 'unavailable',
+                                str(outcomes.get('nonzero',0)) if outcomes else 'unavailable',
+                                str(outcomes.get('timeout',0)) if outcomes else 'unavailable',
                                 str(outcomes.get('cancelled',0)) if outcomes else 'unavailable',
                                 str(outcomes.get('unknown',0)) if outcomes else 'unavailable',
                                 str(durations.get('gte10000',0)) if durations else 'unavailable'))
-        table('Reliability: metric stream only', ['Origin','Tool','Failures / recorded outcomes','Cancelled','Unknown','10 seconds or more'], reliability)
+        table('Reliability: metric stream only', ['Origin','Tool','Failures / recorded outcomes','Error','Nonzero','Timeout','Cancelled','Unknown','10 seconds or more'], reliability)
         note('Failures include nonzero, error and timeout; cancelled and unknown are separate. Outcomes unavailable means reliability cannot be inferred, including weeks before instrumentation. Slow buckets are observations, not averages or a diagnosed root cause.')
         priorities = []
         for o,t in metrics:
@@ -202,6 +280,18 @@ def report(data, start, end, now, config=None):
         table('Recorded events', ['Origin','Event','Batches / events'], sorted(data['events']))
         axes = [(o,t,a,DURATION_LABELS[b] if a == 'durations' else b,n) for o,t,a,b,n in sorted(data['axes'])]
         table('Recorded metric distributions (separate marginals)', ['Origin','Tool','Axis','Bucket','Calls'], axes)
+    if reasons and not reason_unsafe and not small:
+        table('WinRM diagnostics (separate reason marginal)', ['Origin', 'Reason', 'Calls'],
+              [(o, r, n) for o, buckets in sorted(reasons.items()) for r, n in sorted(buckets.items())])
+        for o, buckets in sorted(reasons.items()):
+            total = metrics[o, 'winrm_exec']
+            covered = total - buckets.get('uninstrumented', 0)
+            note(f'Reason coverage: {o}: {covered}/{total} metric WinRM calls ({covered/total:.1%}); includes instrumented unknown.')
+        note('unknown is an instrumented reason without specific evidence; uninstrumented means no reason axis. Reasons describe observed boundaries, not a root cause. Reasons and outcomes are independent marginals; no error-specific reason rate is inferred.')
+    elif any(t == 'winrm_exec' for o, s, t, n in data['tools']):
+        note('WinRM diagnostics unavailable or withheld; no zero or cause is implied. Private small-count permission does not override diagnostic suppression.')
+    elif 'winrm_reasons' in data:
+        note('WinRM diagnostics unavailable; no reason coverage is inferred.')
     users = data.get('users', [])
     for origin, observed, covered, unknown, proxies in users:
         if origin not in ORIGINS or any(isinstance(n, bool) or not isinstance(n, int) or n < 0 for n in (observed,covered,unknown,proxies)) or covered + unknown != observed or proxies > covered:

@@ -1,10 +1,22 @@
 import json
 import unittest
+import shutil
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 HERE = Path(__file__).parent
 
 class OverviewPreviewContract(unittest.TestCase):
+    def test_builder_reproduces_reviewed_semantics_including_privacy_guards(self):
+        with tempfile.TemporaryDirectory() as temp:
+            for name in ('build_overview_preview.py', 'dashboard.json'):
+                shutil.copyfile(HERE / name, Path(temp) / name)
+            subprocess.run([sys.executable, '-B', str(Path(temp) / 'build_overview_preview.py')], check=True)
+            generated = json.loads((Path(temp) / 'overview-preview.json').read_text(encoding='utf8'))
+        self.assertEqual(generated, self.d)
+
     @classmethod
     def setUpClass(cls):
         cls.d = json.loads((HERE / 'overview-preview.json').read_text())
