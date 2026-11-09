@@ -282,6 +282,21 @@ setInterval(()=>{},1000);`);
     expect(failed.status('owner', second.id).stdoutBytes).toBe(0);
     expect(new ExecutionStore(failed.root).status('owner', second.id).state).toBe('unknown');
   }));
+  lifecycleIt('can cancel a still-owned execution after an output failure made its result unknown', async () => fixture(async root => {
+    const store = new ExecutionStore(root, () => { throw Error('synthetic output flush failure'); });
+    const run = store.start('owner', 'failed-live-output', process.execPath,
+      ['-e', 'process.stdout.write("x".repeat(262144));setTimeout(()=>{},20000)']);
+    const child = vi.mocked(owned.spawnOwned).mock.results[0].value as owned.OwnedChild;
+    const cancel = vi.spyOn(child, 'cancel');
+    await expect.poll(() => store.status('owner', run.id).state, { timeout: 15000 }).toBe('unknown');
+    store.cancel('owner', run.id); store.cancel('owner', run.id);
+    await expect.poll(() => child.treeTerminated, { timeout: 7500, interval: 25 }).toBe(true);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(store.status('owner', run.id)).toMatchObject({ state: 'unknown', exitCode: null, outputComplete: false });
+    expect(store.start('owner', 'failed-live-output', process.execPath,
+      ['-e', 'process.stdout.write("x".repeat(262144));setTimeout(()=>{},20000)']).id).toBe(run.id);
+    expect(owned.spawnOwned).toHaveBeenCalledTimes(1);
+  }), 35000);
   lifecycleIt('bounds key-only orphan reservations', async () => fixture(async root => {
     const store = new ExecutionStore(root);
     for (let i = 0; i < 64; i++) writeFileSync(join(root, `${i.toString(16).padStart(64, '0')}.key`), '0'.repeat(48));

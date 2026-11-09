@@ -129,7 +129,9 @@ try {
   $active=Active $job
   if ($active -eq 0) { break }
   if ($cancelled -and [DateTime]::UtcNow -gt $deadline) { throw 'Termination not confirmed' }
-  [void][NativeJob]::WaitForSingleObject($pi.hProcess,100)
+  # An exited root stays signalled while descendants can still be active. Keep
+  # the same 100 ms polling interval instead of spinning on that signalled handle.
+  if ([NativeJob]::WaitForSingleObject($pi.hProcess,100) -eq 0) { [Threading.Thread]::Sleep(100) }
  }
  if (-not $stdoutThread.Join(500) -or -not $stderrThread.Join(500)) { throw 'Output drain not confirmed' }
  $code=[uint32]0; if (-not [NativeJob]::GetExitCodeProcess($pi.hProcess,[ref]$code)) { throw 'Exit code unavailable' }

@@ -198,7 +198,9 @@ export class ExecutionStore {
   }
   cancel(owner: string, id: string) {
     const r = this.get(owner, id), child = this.children.get(id);
-    if (r.state !== 'running' || !child || child.exitCode !== null) return this.status(owner, id);
+    // Output/persistence failure makes the result unknown, but does not release
+    // this server's live ownership. Permit cleanup without upgrading that result.
+    if (!['running', 'unknown'].includes(r.state) || !child || child.exitCode !== null) return this.status(owner, id);
     if (this.cancellations.has(id)) return this.status(owner, id);
     const uncertain = () => { r.state = 'unknown'; r.outputComplete = false; try { this.save(r); } catch { /* retain unknown in memory */ } };
     this.cancellations.set(id, setTimeout(uncertain, CANCEL_BOUND_MS));

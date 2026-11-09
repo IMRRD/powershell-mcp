@@ -182,6 +182,17 @@ structured error output also avoids rendering source context.
 
 ## Experimental local execution lifecycle
 
+Choose `start_execution` **before launching** local work expected to outlast a
+synchronous `run_program` call. `run_program` defaults to 60 seconds, including
+supervisor startup, and accepts an explicit deadline up to 900,000 ms. Silence or
+slow startup does not extend that deadline. A timeout can reflect legitimate
+duration, input waiting, output backpressure, or a failed program; it is not a
+diagnosis by itself. Poll `execution_status`, page `read_execution_output`, and
+use `cancel_execution` for long-running work. The durable path accepts executable,
+arguments and cwd; it does not accept stdin or provide remote supervision.
+Timeouts never automatically rerun a command or migrate it to a durable execution.
+Reconcile any ambiguous side effects before submitting a new intent.
+
 `start_execution` accepts `owner` (a secret caller-chosen namespace token), `idempotencyKey`, `program`, `args` and optional `cwd`. It starts a **local executable directly**, without a shell. `execution_status`, `read_execution_output` (base64 byte pages, at most 65,536 bytes) and `cancel_execution` require the same owner token and opaque execution ID. A repeated owner/key/request returns the same ID; a different request with that key fails. Never retry with a new key after an ambiguous launch. The owner token is a bearer capability, **not** MCP transport authentication; callers sharing the token can read or cancel one another's executions.
 
 Metadata and output live under `POWERSHELL_MCP_EXEC_PARENT/powershell-mcp-executions` or the private temporary parent. The dedicated directory is restricted to the current Windows SID and SYSTEM (or POSIX mode 0700); records contain request hashes, not raw arguments or scripts. Output can contain secrets; quota is 8 MiB combined per execution and at most 64 retained executions. No encryption or automatic retention cleanup is provided: archive/delete the dedicated store **only when no execution is active**, and never clear idempotency history if duplicate side effects would be unsafe. Do not point the parent at a shared/untrusted location.

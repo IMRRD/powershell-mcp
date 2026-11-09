@@ -65,11 +65,11 @@ server.registerTool(
     outputSchema: resultShape,
     inputSchema: { filter: z.string().optional().describe("Wildcard name filter, e.g. 'Sql*' or '*backup*'.") },
   },
-  async ({ filter }) => {
+  async ({ filter }, extra) => {
 
     const f = filter ? `-Name '${filter.replace(/'/g, "''")}'` : "";
     const script = `Get-Service ${f} | Select-Object Name,DisplayName,Status | Sort-Object Name | Format-Table -AutoSize | Out-String -Width 200`;
-    const r = await runPowerShell(script, { timeoutMs: 30_000 });
+    const r = await runPowerShell(script, { timeoutMs: 30_000, signal: extra.signal });
     return toolResult(fromProcess(r, "powershell", "local"), formatResult(r));
   },
 );
@@ -81,11 +81,11 @@ server.registerTool(
     outputSchema: resultShape,
     inputSchema: { name: z.string().describe("Exact service name (not display name).") },
   },
-  async ({ name }) => {
+  async ({ name }, extra) => {
 
     const n = name.replace(/'/g, "''");
     const script = `Get-Service -Name '${n}' | Select-Object Name,DisplayName,Status,StartType,CanStop,CanPauseAndContinue | Format-List | Out-String -Width 200`;
-    const r = await runPowerShell(script, { timeoutMs: 30_000 });
+    const r = await runPowerShell(script, { timeoutMs: 30_000, signal: extra.signal });
     return toolResult(fromProcess(r, "powershell", "local"), formatResult(r));
   },
 );
@@ -96,12 +96,12 @@ server.registerTool(
     name: z.string().describe("Exact service name."),
     action: z.enum(["start", "stop", "restart", "status"]).describe("Action to perform."),
   } },
-  async ({ name, action }) => {
+  async ({ name, action }, extra) => {
 
     const n = name.replace(/'/g, "''");
     const verb = { start: "Start-Service", stop: "Stop-Service", restart: "Restart-Service", status: "Get-Service" }[action];
     const script = `${verb} -Name '${n}' -ErrorAction Stop; Get-Service -Name '${n}' | Select-Object Name,Status | Format-List | Out-String -Width 200`;
-    const r = await runPowerShell(script, { timeoutMs: 120_000 });
+    const r = await runPowerShell(script, { timeoutMs: 120_000, signal: extra.signal });
     return toolResult(fromProcess(r, "powershell", "local"), formatResult(r));
   },
 );
@@ -109,7 +109,7 @@ server.registerTool(
 server.registerTool(
   "system_info",
   { description: "Return OS, CPU, memory and disk summary for this Windows host.", outputSchema: resultShape, inputSchema: {} },
-  async () => {
+  async (_args, extra) => {
 
     const script = [
       "$os = Get-CimInstance Win32_OperatingSystem;",
@@ -122,7 +122,7 @@ server.registerTool(
       "} | Format-List | Out-String -Width 200;",
       "Get-PSDrive -PSProvider FileSystem | Select-Object Name,@{n='UsedGB';e={[math]::Round($_.Used/1GB,1)}},@{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}} | Format-Table -AutoSize | Out-String -Width 200",
     ].join("\n");
-    const r = await runPowerShell(script, { timeoutMs: 30_000 });
+    const r = await runPowerShell(script, { timeoutMs: 30_000, signal: extra.signal });
     return toolResult(fromProcess(r, "powershell", "local"), formatResult(r));
   },
 );
@@ -221,7 +221,7 @@ server.registerTool(
 
 server.registerTool(
   "run_program",
-  { description: "Run a native executable DIRECTLY (no shell) in a hidden process and capture clean stdout/stderr + exit code. Use this for console programs like gh, git, docker, node, python, etc. -- direct execution captures their stdout/stderr without PowerShell pipeline semantics. Historical hidden-shell native stdout loss is executable/environment-specific; it is not universal. Provide the program and an args array (no shell quoting needed).", outputSchema: resultShape, inputSchema: {
+  { description: "Run a native executable DIRECTLY (no shell) in a hidden process and capture clean stdout/stderr + exit code. Use this for console programs like gh, git, docker, node, python, etc. -- direct execution captures their stdout/stderr without PowerShell pipeline semantics. Historical hidden-shell native stdout loss is executable/environment-specific; it is not universal. Provide the program and an args array (no shell quoting needed). For work expected to outlast the synchronous deadline, choose start_execution before launching, then poll execution_status and read_execution_output. A timeout never automatically reruns or migrates work.", outputSchema: resultShape, inputSchema: {
     program: z.string().describe("Executable name on PATH or a full path, e.g. 'git' or 'C:\\Program Files\\GitHub CLI\\gh.exe'."),
     args: z.array(z.string()).optional().describe("Arguments as an array; each element is passed verbatim (no shell quoting)."),
     stdin: z.string().max(INPUT_LIMIT).optional().describe("UTF-8 stdin, max 1 MiB bytes. Empty string still opens stdin and sends EOF; no stdin in argv, environment or logs."),
@@ -229,9 +229,9 @@ server.registerTool(
     timeoutMs: z.number().int().positive().max(900_000).optional().describe("Hard timeout in ms (default 60000)."),
     ...outputOptions,
   } },
-  async ({ program, args, stdin, cwd, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }) => {
+  async ({ program, args, stdin, cwd, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes }, extra) => {
 
-    const r = await runProgram(program, args ?? [], { stdin, cwd, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes });
+    const r = await runProgram(program, args ?? [], { stdin, cwd, timeoutMs, maxOutputBytes, tail, logOutput, logQuotaBytes, signal: extra.signal });
     return toolResult(fromProcess(r, "program", program), formatResult(r));
   },
 );
