@@ -8,7 +8,9 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ExecutionStore } from '../src/execution-lifecycle.js';
 import * as owned from '../src/owned-process.js';
+import { waitForExecutionStdout } from './helpers/execution-readiness.js';
 
+const lifecycleTimeoutMs = 20_000;
 const fixture = async (fn: (root: string, drain: () => Promise<unknown>) => Promise<void>) => {
   const root = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), 'execution-test-'));
   // A recovered store's unknown state says nothing about the original owner's
@@ -38,7 +40,7 @@ const script = 'process.stdout.write("ready\\n")';
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 // Windows ACL probes, process startup, polling, and fixture removal can each consume
 // seconds; keep one bounded budget for every sibling rather than Vitest's 5s default.
-const lifecycleIt = (name: string, fn: () => void | Promise<void>, timeout = 20_000) => it(name, fn, timeout);
+const lifecycleIt = (name: string, fn: () => void | Promise<void>, timeout = lifecycleTimeoutMs) => it(name, fn, timeout);
 
 describe('durable local executions', () => {
   for (const recovery of ['ambiguous', 'completed'] as const) lifecycleIt(recovery === 'ambiguous'
@@ -95,18 +97,22 @@ else { const run = request(); writeFileSync(join(root, 'recovered'), JSON.string
     expect(() => store.status('owner-b', first.id)).toThrow(/unknown/i);
     for (let i = 0; i < 100 && store.status('owner-a', first.id).state === 'running'; i++) await pause(20);
   }));
-  lifecycleIt('marks live cancellation unknown rather than asserting descendant termination', async () => fixture(async root => {
-    const store = new ExecutionStore(root);
-    const run = store.start('owner', 'cancel', process.execPath, ['-e', 'process.stdout.write("before-cancel");setTimeout(()=>{},5000)']);
-    for (let i = 0; i < 100 && store.status('owner', run.id).stdoutBytes === 0; i++) await pause(20);
-    expect(Buffer.from(store.read('owner', run.id, 'stdout', 0, 64).data, 'base64').toString()).toBe('before-cancel');
-    expect(store.cancel('owner', run.id).state).toBe('running');
-    {
-      for (let i = 0; i < 150 && store.status('owner', run.id).state === 'running'; i++) await pause(20);
+  lifecycleIt('marks live cancellation unknown rather than asserting descendant termination', async () => {
+    const deadline = performance.now() + lifecycleTimeoutMs;
+    await fixture(async (root, drain) => {
+      const store = new ExecutionStore(root);
+      const run = store.start('owner', 'cancel', process.execPath, ['-e', 'process.stdout.write("before-cancel");setTimeout(()=>{},5000)']);
+      const child = vi.mocked(owned.spawnOwned).mock.results[0].value as owned.OwnedChild;
+      // Share the existing test deadline with cancellation (6s) and the fixture's
+      // existing removal allowance (30 x 100ms); startup has no polling-turn cap.
+      await waitForExecutionStdout(store, 'owner', run.id, child, Buffer.byteLength('before-cancel'),
+        deadline - owned.CANCEL_BOUND_MS - 3000);
+      expect(Buffer.from(store.read('owner', run.id, 'stdout', 0, 64).data, 'base64').toString()).toBe('before-cancel');
+      expect(store.cancel('owner', run.id).state).toBe('running');
+      await drain();
       expect(store.status('owner', run.id).state).toBe('cancelled');
-    }
-    await pause(200);
-  }));
+    });
+  });
   lifecycleIt('does not relaunch a persisted ambiguous intent after restart', async () => fixture(async (root, drain) => {
     const first = new ExecutionStore(root);
     const run = first.start('owner-a', 'slow', process.execPath, ['-e', 'setTimeout(() => {}, 3000)']);
