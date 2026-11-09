@@ -93,8 +93,10 @@ class ReportingConsumers(unittest.TestCase):
         roles = ['reporting_importer_' + os.urandom(8).hex(),
                  'reporting_reader_' + os.urandom(8).hex()]
         importer, reader = roles
+        passwords = {role: os.urandom(16).hex() for role in roles}
         for role in roles:
-            self.db.execute(f'CREATE ROLE {role} LOGIN')
+            self.db.execute(fixture.psycopg.sql.SQL('CREATE ROLE {} LOGIN PASSWORD {}').format(
+                fixture.psycopg.sql.Identifier(role), fixture.psycopg.sql.Literal(passwords[role])))
             self.db.execute(f'GRANT USAGE ON SCHEMA {self.schema} TO {role}')
         def cleanup():
             for role in reversed(roles):
@@ -109,7 +111,7 @@ class ReportingConsumers(unittest.TestCase):
                     'winrm_diagnostics_utc(timestamptz,timestamptz)'):
             self.db.execute(f'GRANT EXECUTE ON FUNCTION {sig} TO {reader}')
         def connect(role, autocommit=True):
-            return fixture.psycopg.connect(fixture.DSN, user=role, autocommit=autocommit,
+            return fixture.psycopg.connect(fixture.DSN, user=role, password=passwords[role], autocommit=autocommit,
                                           options=f'-c search_path={self.schema} -c timezone=UTC')
         start, end = digest.closed_week(dt.datetime.now(dt.timezone.utc))
         stamp = lambda at: at.strftime('%Y-%m-%dT%H:%M:%S.000Z')
@@ -327,6 +329,8 @@ class ReportingConsumers(unittest.TestCase):
             self.db.execute('DROP OWNED BY ' + role)
             self.db.execute('DROP ROLE ' + role)
         self.addCleanup(cleanup)
+        # Configure the reporting session even when the server defaults to Etc/UTC.
+        self.db.execute("SET timezone = 'UTC'")
         self.db.execute('SET ROLE ' + role)
 
     def reason_panels(self, start, end):
