@@ -14,3 +14,6 @@ GRANT EXECUTE ON FUNCTION user_proxy_utc(timestamptz,timestamptz), privacy_windo
 -- Analytics database must contain only this schema; manage other schemas separately.
 
 GRANT EXECUTE ON FUNCTION winrm_diagnostics_utc(timestamptz,timestamptz) TO telemetry_dashboard;
+
+-- Issue 75: execute only; no raw tables or identifiers.
+GRANT EXECUTE ON FUNCTION tool_version_outcomes_utc(timestamptz,timestamptz) TO telemetry_dashboard;

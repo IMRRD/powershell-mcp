@@ -9,8 +9,16 @@ both dashboard definitions. The reason table is a separate marginal, never a
 join to outcome rows or an extra call total. `unknown` means recorded without
 specific evidence; `uninstrumented` means metric calls without a reason axis.
 Empty results mean unavailable or withheld, never zero. Existing issue64 SQL and
-restricted function grants are prerequisites; no schema or grant changes are
-part of this candidate. The overview builder preserves half-open UTC windows and
+restricted function grants are prerequisites. Issue75 adds `migrate_issue75.sql`
+after issue64: `tool_version_outcomes_utc(start,end)` joins event versions to tool
+calls and outcomes for the weekly consumer. It grants execution only to the
+existing `telemetry_dashboard` role; prior tables, views, grants, migrations and
+history remain intact. Fresh installations include the same function in
+`schema.sql` and its execution grant in `roles.sql`. Parent reviews and applies
+the migration before upgrading the consumer; this source change activates no
+schema. An absent function retains the previous single-version comparison
+rules. A present but ungranted or withheld function forbids reconstructing its
+cohorts from marginals. The overview builder preserves half-open UTC windows and
 default privacy guards on regeneration. Existing dashboard UIDs and datasource
 bindings remain unchanged. These files are review candidates, not installed or
 frontend acceptance; the parent owns promotion in the established organization.
