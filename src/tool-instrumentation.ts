@@ -28,7 +28,7 @@ function outcome(result: unknown): Outcome {
     try {
       const body: unknown = JSON.parse(content[0].text);
       if (object(body)) {
-        if (body.state === 'running' || body.state === 'reserved' || body.state === 'unknown' || body.status === 'running' || body.status === 'unknown') return 'unknown';
+        if (body.state === 'running' || body.state === 'reserved' || body.state === 'unknown' || body.status === 'running' || body.status === 'unknown' || body.status === 'partial') return 'unknown';
         if (body.state === 'cancelled' || body.status === 'cancelled') return 'cancelled';
         if (body.state === 'failed' || body.status === 'failed') return 'error';
         if (body.state === 'completed' || body.status === 'completed') return typeof body.exitCode === 'number' && body.exitCode !== 0 ? 'nonzero' : 'success';
