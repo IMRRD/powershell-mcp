@@ -45,15 +45,28 @@ not freeze historical delivery or establish complete upstream collection.
 
 Before findings render, cells, partition complements, outcome-coverage
 complements and absolute cross-week differences are checked. Composite changes
-are checked for every union of cells within each guarded partition: version
-batches by origin/event, instrumentation by origin/version, event/version cells
-by origin, tools by origin/stream and by stream across origins, and each separate
-tool/origin metric axis. This includes `total - error - timeout`, failure totals
+are checked for every union of cells within six maximal disjoint partitions:
+all `(origin,version,event)` batch cells; `(origin,tool)` calls separately for
+each of the counts and metrics streams; and `(origin,tool,bucket)` metric calls
+separately for each outcome, duration and feature axis. Each metric axis spans
+all tools and origins, with a whole-tool cell for groups missing that axis.
+Thus local tool/origin totals, their remainders and cross-tool same-axis unions
+are covered without adding overlapping streams or independent axes.
+This includes `total - error - timeout`, failure totals
 (`nonzero + error + timeout`) and their remainders, rather than just one-cell
 complements. Source cells are nonnegative; once each endpoint cell is zero or at
 least ten, their unions and complements also meet that endpoint threshold. The
 cross-week guard checks signed sums of cell changes, including unions whose
 individual changes cancel to a positive absolute value below ten.
+
+The signed subset search is bounded per partition: at most 1,024 distinct cells
+across both windows, 128 bits per cell change, 8,192 retained partial sums and
+262,144 partial-sum expansions. Candidate sets contain at most twice the
+retained-state limit. Exceeding any bound withholds comparison and current
+numeric detail for both audiences; it never admits an unchecked partition.
+GCD, same-sign and remaining-sum pruning retain exact admission within budget.
+Large safe partitions may therefore be conservatively withheld. These are
+search bounds, not database query-result or end-to-end memory/time limits.
 
 A positive value below ten withholds both
 windows' numeric surfaces, including current findings/details that would reveal
@@ -76,6 +89,15 @@ a remainder of 120 versus 130 still publishes useful comparisons. Unit MIME
 regressions also cover zero and nine, three-cell failure complements, other
 metric axes, tool partitions and version batches. Independent review of the
 replacement exact tree remains required before any PR.
+
+The residual cross-tool regression uses actual non-superuser importer and reader
+LOGIN connections: two metric tools each record 1,000 calls per week, with
+errors 100 + 20 versus 79 + 42. All local changes pass ten, but the same-axis
+union is 120 versus 121. Both serialized MIME parts and both audiences withhold
+comparison endpoints and reconstructing current findings/detail. Zero and ten
+union changes remain useful. Sibling controls cover origins, other axes,
+missing instrumentation, the joint event-batch table, search exhaustion and
+separation of overlapping streams/independent axes.
 
 Mixed-version per-tool comparisons and per-version WinRM reasons remain an
 explicit parent SQL dependency described below. The implemented batch and

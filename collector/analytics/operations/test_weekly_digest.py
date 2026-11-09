@@ -253,6 +253,90 @@ class DigestTests(unittest.TestCase):
                     self.assertIn('Reliability: metric stream only', body)
                     self.assertNotIn('Comparison and numeric details withheld', body)
 
+    def joint_axis_fixture(self, axis, second=42, origins=False, missing=False):
+        f = trend_fixture()
+        groups = [('unknown_origin','ssh_exec'), ('internal' if origins else 'unknown_origin','sftp_upload')]
+        buckets = {'outcomes': ('error','success'), 'durations': ('gte10000','lt100'),
+                   'features': ('remote','execution')}[axis]
+        for period, counts in ((f['previous'], (100,20)), (f, (79,second))):
+            period['cohorts'] = [(o,'0.8.0','tool_metrics',20) for o in sorted({o for o,t in groups})]
+            period['tools'] = [(o,'metrics',t,1000) for o,t in groups]
+            period['axes'] = [(o,t,axis,b,n) for (o,t),count in zip(groups,counts)
+                              for b,n in zip(buckets,(count,1000-count)) if not (missing and t == 'sftp_upload')]
+        if missing:
+            # Error delta -21 + the uninstrumented tool's total delta +22 = 1.
+            f['tools'][1] = (*f['tools'][1][:3],1022)
+        return f
+
+    def test_joint_axis_partitions_span_tools_origins_and_missing_instrumentation(self):
+        audience = dict(sender='fixture@example.invalid', recipient=w.RECIPIENT, approved_recipients=[w.RECIPIENT])
+        private = audience | dict(enabled=True, host='mail.ialogics.co.uk', port=587,
+                                  username='fixture', private_small_counts=audience.copy())
+        for axis in ('outcomes','durations','features'):
+            for origins,missing in ((False,False),(True,False),(False,True)):
+                f = self.joint_axis_fixture(axis, origins=origins, missing=missing)
+                for cfg in (None,private):
+                    for mime,body in zip(('plain','html'),self.mime_bodies(f,cfg)):
+                        with self.subTest(axis=axis,origins=origins,missing=missing,private=bool(cfg),mime=mime):
+                            self.assertIn('Comparison and numeric details withheld', body)
+                            for forbidden in ('ssh_exec','sftp_upload','<table','Largest error','Outcome instrumentation coverage'):
+                                self.assertNotIn(forbidden, body)
+
+    def test_joint_event_batch_partition_spans_origins_versions_and_event_types(self):
+        f = trend_fixture()
+        for period,counts in ((f['previous'],(100,20)),(f,(79,42))):
+            period['cohorts'] = [('unknown_origin','0.8.0','tool_metrics',counts[0]),
+                                 ('internal','0.8.1','startup',counts[1])]
+        for mime,body in zip(('plain','html'),self.mime_bodies(f)):
+            with self.subTest(mime=mime):
+                self.assertIn('Comparison and numeric details withheld', body)
+                self.assertNotIn('<table',body)
+
+    def test_joint_axis_zero_and_ten_changes_keep_both_audiences_useful(self):
+        audience = dict(sender='fixture@example.invalid', recipient=w.RECIPIENT, approved_recipients=[w.RECIPIENT])
+        private = audience | dict(enabled=True, host='mail.ialogics.co.uk', port=587,
+                                  username='fixture', private_small_counts=audience.copy())
+        for second in (41,51):
+            for origins in (False,True):
+                for cfg in (None,private):
+                    for body in self.mime_bodies(self.joint_axis_fixture('outcomes',second,origins),cfg):
+                        with self.subTest(second=second,origins=origins,private=bool(cfg)):
+                            self.assertIn('Error and timeout comparison',body)
+                            self.assertIn('100/1000 (10.0%)',body)
+                            self.assertIn(f'{second}/1000',body)
+                            self.assertIn('Reliability: metric stream only',body)
+                            self.assertNotIn('Comparison and numeric details withheld',body)
+
+    def test_overlapping_streams_and_independent_axes_remain_separate(self):
+        f = self.joint_axis_fixture('outcomes',41)
+        # These safe partitions have deltas -21 and +22. Combining overlapping
+        # streams or independent axes would invent an unsafe delta of one.
+        for period,current in ((f['previous'],False),(f,True)):
+            period['tools'].append(('unknown_origin','counts','ssh_exec',1022 if current else 1000))
+            period['cohorts'].append(('unknown_origin','0.8.0','tool_counts',20))
+            period['axes'].extend(('unknown_origin','ssh_exec','durations',b,n) for b,n in
+                                  [('gte10000',122 if current else 100),('lt100',878 if current else 900)])
+        for body in self.mime_bodies(f):
+            self.assertIn('Error and timeout comparison',body)
+            self.assertIn('Legacy count stream: 1022 recorded calls',body)
+            self.assertNotIn('Comparison and numeric details withheld',body)
+
+    def test_composite_search_exhaustion_withholds_instead_of_admitting(self):
+        from unittest.mock import patch
+        before,after = dict(a=1000,b=1000),dict(a=1100,b=911)
+        self.assertFalse(w.small_composite_change(before,after))  # possible changes: 0, 100, -89, 11
+        for limit,value in (('COMPOSITE_MAX_CELLS',1),('COMPOSITE_MAX_STATES',1),
+                            ('COMPOSITE_MAX_WORK',1),('COMPOSITE_MAX_BITS',6)):
+            with self.subTest(limit=limit), patch.object(w,limit,value,create=True):
+                # Three mixed-sign cells retain multiple reachable sums after
+                # pruning; the two-cell example needs only one live state.
+                self.assertTrue(w.small_composite_change(before | dict(c=1000),after | dict(c=911)))
+        f = self.joint_axis_fixture('outcomes',41)
+        with patch.object(w,'COMPOSITE_MAX_CELLS',1,create=True):
+            for body in self.mime_bodies(f):
+                self.assertIn('Comparison and numeric details withheld',body)
+                self.assertNotIn('<table',body)
+
     def test_stable_version_streams_compare_calls_error_and_timeout_in_both_mime_parts(self):
         for body in self.mime_bodies(trend_fixture()):
             summary = body.split('Legacy count stream', 1)[0]

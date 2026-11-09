@@ -62,7 +62,7 @@ class ReportingConsumers(unittest.TestCase):
             self.db.execute('SELECT * FROM telemetry_event')
         return data, start, end
 
-    def composite_mime_bodies(self, private):
+    def composite_mime_bodies(self, private, connect=None):
         audience = dict(sender='composite@example.invalid', recipient=digest.RECIPIENT,
                         approved_recipients=[digest.RECIPIENT])
         config = dict(enabled=True, host='mail.ialogics.co.uk', port=587, username='synthetic', **audience)
@@ -80,7 +80,7 @@ class ReportingConsumers(unittest.TestCase):
             path = Path(tmp)/'config.json'
             path.write_text(json.dumps(config), encoding='utf8')
             digest.main(['--config',str(path),'--state-dir',str(Path(tmp)/'state')],
-                        dt.datetime.now(dt.timezone.utc), Reader,
+                        dt.datetime.now(dt.timezone.utc), connect or Reader,
                         lambda m,*args: messages.append(m.as_bytes()))
         self.assertEqual(len(messages), 1)
         message = BytesParser(policy=policy.default).parsebytes(messages[0])
@@ -88,6 +88,107 @@ class ReportingConsumers(unittest.TestCase):
         parts = list(message.iter_parts())
         self.assertEqual([p.get_content_type() for p in parts], ['text/plain','text/html'])
         return [(p.get_content_type(),p.get_content()) for p in parts]
+
+    def joint_partition_bodies(self, second_error, private):
+        roles = ['reporting_importer_' + os.urandom(8).hex(),
+                 'reporting_reader_' + os.urandom(8).hex()]
+        importer, reader = roles
+        for role in roles:
+            self.db.execute(f'CREATE ROLE {role} LOGIN')
+            self.db.execute(f'GRANT USAGE ON SCHEMA {self.schema} TO {role}')
+        def cleanup():
+            for role in reversed(roles):
+                self.db.execute(f'DROP OWNED BY {role}')
+                self.db.execute(f'DROP ROLE {role}')
+        self.addCleanup(cleanup)
+        self.db.execute(f'GRANT SELECT,INSERT,UPDATE ON telemetry_event,telemetry_tool,telemetry_metric_axis,telemetry_checkpoint TO {importer}')
+        self.db.execute(f'GRANT SELECT ON dashboard_events,dashboard_tools,dashboard_metric_axes TO {reader}')
+        for sig in ('adoption_utc(timestamptz,timestamptz)', 'user_proxy_utc(timestamptz,timestamptz)',
+                    'delivery_health_utc(timestamptz,timestamptz,interval)',
+                    'privacy_window_safe_utc(timestamptz,timestamptz)',
+                    'winrm_diagnostics_utc(timestamptz,timestamptz)'):
+            self.db.execute(f'GRANT EXECUTE ON FUNCTION {sig} TO {reader}')
+        def connect(role, autocommit=True):
+            return fixture.psycopg.connect(fixture.DSN, user=role, autocommit=autocommit,
+                                          options=f'-c search_path={self.schema} -c timezone=UTC')
+        start, end = digest.closed_week(dt.datetime.now(dt.timezone.utc))
+        stamp = lambda at: at.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        rows = []
+        for at, errors in ((start-dt.timedelta(days=7), (100,20)), (start, (79,second_error))):
+            base = dict(version='0.8.0', os='win32', ts=stamp(at), _receivedAt=stamp(at))
+            rows.extend(dict(base, hostId='joint-0', event='startup',
+                             ts=stamp(at+dt.timedelta(hours=i)), _receivedAt=stamp(at+dt.timedelta(hours=i)))
+                        for i in range(168))
+            for i in range(20):
+                metrics = {}
+                for tool, n in zip(('ssh_exec','sftp_upload'), errors):
+                    error = n//20 + (i < n%20)
+                    metrics[tool] = dict(outcomes=dict(error=error, success=50-error),
+                                         durations=dict(lt100=50), features=dict(remote=50))
+                rows.append(dict(base, hostId=f'joint-{i}', event='tool_metrics', schemaVersion=2, metrics=metrics))
+        self.append(rows)
+        with connect(importer) as db:
+            self.assertEqual(db.execute('SELECT current_user=session_user,rolsuper,rolcreatedb,rolcreaterole FROM pg_roles WHERE rolname=current_user').fetchone(),
+                             (True,False,False,False))
+            with self.assertRaises(fixture.psycopg.errors.InsufficientPrivilege):
+                db.execute('CREATE TABLE denied(i int)')
+            self.assertEqual(ingest(db, self.source, self.classes), 376)
+            self.assertEqual(ingest(db, self.source, self.classes), 0)
+        with connect(reader) as db:
+            self.assertEqual(db.execute('SELECT current_user=session_user,rolsuper FROM pg_roles WHERE rolname=current_user').fetchone(), (True,False))
+            for sql in ('SELECT * FROM telemetry_event', "INSERT INTO telemetry_event(event_key) VALUES ('denied')"):
+                with self.assertRaises(fixture.psycopg.errors.InsufficientPrivilege): db.execute(sql)
+            for a,b in ((start-dt.timedelta(days=7),start), (start,end)):
+                self.assertEqual(db.execute('SELECT privacy_window_safe_utc(%s,%s)', (a,b)).fetchone(), (True,))
+            with db.transaction():
+                data = digest.aggregates(db, start, end)
+                self.assertEqual(db.execute('SHOW transaction_read_only').fetchone(), ('on',))
+                self.assertEqual(db.execute('SHOW transaction_isolation').fetchone(), ('repeatable read',))
+        for period, errors in ((data['previous'], (100,20)), (data, (79,second_error))):
+            self.assertEqual(sorted(period['tools']), [('unknown_origin','metrics',t,1000) for t in ('sftp_upload','ssh_exec')])
+            self.assertEqual([r for r in period['cohorts'] if r[2] == 'tool_metrics'], [('unknown_origin','0.8.0','tool_metrics',20)])
+            self.assertEqual({t:int(n) for o,t,a,b,n in period['axes'] if a == 'outcomes' and b == 'error'},
+                             dict(zip(('ssh_exec','sftp_upload'), errors)))
+        self.assertEqual(data['adoption'], [('unknown_origin',20,20,0)])
+        # The local partitions are safe; their joint same-axis union is the gap.
+        for tool in ('ssh_exec','sftp_upload'):
+            cells = [{b:int(n) for o,t,a,b,n in p['axes'] if t == tool and a == 'outcomes'} for p in (data['previous'],data)]
+            self.assertTrue(all(n >= 10 for c in cells for n in c.values()))
+            self.assertTrue(all(abs(cells[1][b]-cells[0][b]) >= 10 for b in cells[0]))
+            self.assertFalse(digest.small_composite_change(*cells))
+        self.assertEqual((79+second_error)-(100+20), second_error-41)
+        return self.composite_mime_bodies(private, lambda: connect(reader, False))
+
+    def test_joint_tool_outcomes_restricted_importer_mime_suppression(self):
+        for mime, body in self.joint_partition_bodies(42, False):
+            with self.subTest(mime=mime):
+                self.assertIn('Comparison and numeric details withheld', body)
+                for forbidden in ('ssh_exec','sftp_upload','100/1000','79/1000','42/1000',
+                                  '<table','Largest error','Outcome instrumentation coverage','recorded calls'):
+                    self.assertNotIn(forbidden, body)
+
+    def test_joint_tool_outcomes_private_restricted_importer_mime_suppression(self):
+        for mime, body in self.joint_partition_bodies(42, True):
+            with self.subTest(mime=mime):
+                self.assertIn('Comparison and numeric details withheld', body)
+                for forbidden in ('ssh_exec','sftp_upload','<table','Largest error','Outcome instrumentation coverage'):
+                    self.assertNotIn(forbidden, body)
+
+    def test_joint_tool_outcomes_zero_restricted_importer_mime_control(self):
+        for mime, body in self.joint_partition_bodies(41, False):
+            with self.subTest(mime=mime):
+                for value in ('100/1000 (10.0%)','20/1000 (2.0%)','79/1000 (7.9%)','41/1000 (4.1%)',
+                              'Error and timeout comparison','Reliability: metric stream only'):
+                    self.assertIn(value, body)
+                self.assertNotIn('Comparison and numeric details withheld', body)
+
+    def test_joint_tool_outcomes_ten_private_restricted_importer_mime_control(self):
+        for mime, body in self.joint_partition_bodies(51, True):
+            with self.subTest(mime=mime):
+                for value in ('100/1000 (10.0%)','20/1000 (2.0%)','79/1000 (7.9%)','51/1000 (5.1%)',
+                              'Error and timeout comparison','Reliability: metric stream only'):
+                    self.assertIn(value, body)
+                self.assertNotIn('Comparison and numeric details withheld', body)
 
     def test_composite_outcome_remainder_restricted_importer_mime_suppression(self):
         current = dict(success=79, nonzero=42, error=140, timeout=139)

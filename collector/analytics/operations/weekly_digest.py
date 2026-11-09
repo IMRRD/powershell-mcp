@@ -23,6 +23,12 @@ AXES = {'outcomes': {'success', 'nonzero', 'error', 'timeout', 'cancelled', 'unk
 WINRM_REASONS = {'completed', 'remote_script_error', 'authentication_exception', 'access_exception', 'remoting_transport_exception', 'invoke_exception', 'wrapper_result_invalid', 'frame_invalid', 'frame_body_invalid', 'local_host_error', 'local_launch_error', 'timeout', 'cancelled', 'unknown', 'uninstrumented'}
 DURATION_LABELS = {'lt100': 'under 100 ms', 'lt1000': '100–999 ms', 'lt10000': '1–9.999 seconds', 'gte10000': '10 seconds or more'}
 ADDRESS = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\Z")
+# Hard limits on each of the six disjoint partitions below. Exhaustion is a
+# privacy refusal, including for an approved private audience.
+COMPOSITE_MAX_CELLS = 1024
+COMPOSITE_MAX_BITS = 128
+COMPOSITE_MAX_STATES = 8192
+COMPOSITE_MAX_WORK = 262144
 
 
 def private_counts(config):
@@ -95,9 +101,16 @@ def render_html(data, start, end, now, config=None):
 
 
 def small_composite_change(before, after):
-    """Detect a below-ten change in any union of disjoint partition cells."""
-    changes = [int(after.get(k, 0) - before.get(k, 0)) for k in before.keys() | after.keys()]
-    changes = sorted((n for n in changes if n), key=abs, reverse=True)
+    """Refuse unsafe unions or partitions whose safety exceeds the search budget."""
+    if max(len(before), len(after)) > COMPOSITE_MAX_CELLS:
+        return True
+    keys = before.keys() | after.keys()
+    if len(keys) > COMPOSITE_MAX_CELLS:
+        return True
+    changes = [int(after.get(k, 0) - before.get(k, 0)) for k in keys]
+    if any(abs(n).bit_length() > COMPOSITE_MAX_BITS for n in changes):
+        return True
+    changes = sorted((n for n in changes if n), key=lambda n: (abs(n), n), reverse=True)
     if any(0 < abs(n) < 10 for n in changes):
         return True
     if (not changes or min(changes) > 0 or max(changes) < 0 or math.gcd(*changes) >= 10):
@@ -109,13 +122,19 @@ def small_composite_change(before, after):
     lower = sum(n for n in changes if n < 0)
     upper = sum(n for n in changes if n > 0)
     reachable = {0}
+    work = 0
     for change in changes:
+        work += len(reachable)
+        if work > COMPOSITE_MAX_WORK:
+            return True
         lower -= min(change, 0)
         upper -= max(change, 0)
         candidates = reachable | {n + change for n in reachable}
         if any(0 < abs(n) < 10 for n in candidates):
             return True
         reachable = {n for n in candidates if n + lower <= 9 and n + upper >= -9}
+        if len(reachable) > COMPOSITE_MAX_STATES:
+            return True
     return False
 
 
@@ -171,16 +190,24 @@ def completed_week_trends(data, start, end, now):
     surfaces = []
     partition_windows = []
     for c, t, a in zip(cohorts, totals, axes):
-        partitions = {}
-        for (o,v,e),n in c.items():
-            for partition, cell in ((('version',o,e),v), (('instrumentation',o,v),e), (('events',o),(v,e))):
-                partitions.setdefault(partition,{})[cell] = n
+        # All rendered batch cells are disjoint, across origins, versions and
+        # event types. Local version/event tables are unions of these cells.
+        partitions = {('events',): c.copy()}
         for (o,s,tool),n in t.items():
-            partitions.setdefault(('tools',o,s),{})[tool] = n
-            # The current detail also publishes a stream total across origins.
             partitions.setdefault(('stream',s),{})[o,tool] = n
+        # Refine the metric stream by ONE axis at a time across all tools and
+        # origins. Tool totals and their complements are unions in each refined
+        # partition. Never add overlapping streams or independent axes.
         for (o,tool,axis,b),n in a.items():
-            partitions.setdefault(('axes',o,tool,axis),{})[b] = n
+            partitions.setdefault(('axis',axis),{})[o,tool,b] = n
+        instrumented = {k[:3] for k in a}
+        for (o,s,tool),n in t.items():
+            if s != 'metrics': continue
+            for axis in AXES:
+                if (o,tool,axis) not in instrumented:
+                    # Missing instrumentation is a whole tool-call cell, not
+                    # an observed zero bucket; its total is still published.
+                    partitions.setdefault(('axis',axis),{})[o,tool,None] = n
         surface = {}
         for partition, cells in partitions.items():
             total = sum(cells.values())
