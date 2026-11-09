@@ -2,6 +2,7 @@ import { selectIntegrationEngines } from "./integration-engine.js";
 import { describe, it, expect } from "vitest";
 import { runPowerShell } from "../src/powershell.js";
 import { fromProcess } from "../src/result.js";
+import { EOL } from "node:os";
 
 const nativeExe = `'${process.execPath.replace(/'/g, "''")}'`;
 const engines = selectIntegrationEngines().map(engine => engine.exe);
@@ -65,6 +66,50 @@ for (const exe of engines) describe(`error policy (${exe})`, () => {
     expect(result.stdout + result.stderr).toContain("123");
     expect(result.stdout).toContain("AFTER_NATIVE");
     expect(result.scriptError).toBe(false);
+  });
+  it("does not fail on successful multiline native stderr", async () => {
+    const result = await run(`& ${nativeExe} -e 'process.stderr.write([111,222,333].join(String.fromCharCode(10)))'; Write-Output AFTER_NATIVE`);
+    expect(result.protocolError).not.toBe(true);
+    expect(result.exitCode).toBe(0);
+    expect(result.treeTerminated).toBe(true);
+    expect(result.stdout + result.stderr).toContain("222");
+    expect(result.stdout).toContain("AFTER_NATIVE");
+    expect(result.scriptError).toBe(false);
+    expect(result.errorRecords).toEqual([]);
+  });
+  it("keeps a cmdlet error using the native continuation ErrorId as a script failure", async () => {
+    const result = await run("Write-Error deliberate -ErrorId NativeCommandErrorMessage -ErrorAction Continue; Write-Output AFTER_CONTINUE");
+    expect(result.protocolError).not.toBe(true);
+    expect(result.stdout).toContain("AFTER_CONTINUE");
+    expect(result.scriptError).toBe(true);
+    expect(result.errorRecords?.[0]).toMatchObject({
+      fullyQualifiedErrorId: "NativeCommandErrorMessage",
+      exceptionType: "Microsoft.PowerShell.Commands.WriteErrorException",
+    });
+  });
+  it("keeps a genuine job throw matching the native continuation ErrorId as a script failure", async () => {
+    const result = await run("Start-Job { throw 'NativeCommandErrorMessage' } | Receive-Job -Wait -AutoRemoveJob -ErrorAction Continue; 'AFTER'");
+    expect(result.protocolError).not.toBe(true);
+    expect(result.exitCode).toBe(0);
+    expect(result.treeTerminated).toBe(true);
+    expect(result.stdout).toBe(`NativeCommandErrorMessage${EOL}AFTER${EOL}`);
+    expect(result.scriptError).toBe(true);
+    expect(result.errorRecords).toEqual([{
+      category: "OperationStopped",
+      fullyQualifiedErrorId: "NativeCommandErrorMessage",
+      exceptionType: "System.Management.Automation.RemoteException",
+      message: "NativeCommandErrorMessage",
+    }]);
+    expect(fromProcess(result, "powershell", "local").terminationStatus).toBe("script_error");
+  }, 20_000);
+  it("still stops on an explicit native exit check after multiline stderr", async () => {
+    const result = await run(`& ${nativeExe} -e 'process.stderr.write([111,222,333].join(String.fromCharCode(10)));process.exitCode=7'; if ($LASTEXITCODE -ne 0) { throw 'NATIVE_EXIT_CHECK' }; Write-Output AFTER_ERROR`);
+    expect(result.protocolError).not.toBe(true);
+    expect(result.stdout).toContain("222");
+    expect(result.stdout).not.toContain("AFTER_ERROR");
+    expect(result.scriptError).toBe(true);
+    expect(result.errorRecords).toHaveLength(1);
+    expect(result.errorRecords?.[0].message).toBe("NATIVE_EXIT_CHECK");
   });
   it("bounds metadata and flags truncation", async () => {
     const result = await run("1..30 | ForEach-Object { Write-Error ('x' * 3000) }");

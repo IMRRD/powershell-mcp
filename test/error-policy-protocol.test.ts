@@ -8,6 +8,49 @@ import { EOL } from "node:os";
 
 const exe = selectIntegrationEngines()[0]?.exe;
 describe.skipIf(!exe)("built MCP strict and legacy execution", () => {
+  it("reports a genuine job throw matching the native continuation ErrorId as a script failure", async () => {
+    const client = new Client({ name: "job-error-smoke", version: "1" });
+    const transport = new StdioClientTransport({ command: process.execPath, args: [join(process.cwd(), "dist/index.js")], env: { ...process.env, POWERSHELL_MCP_NO_TELEMETRY: "1", PWSH_MCP_EXE: exe! }, stderr: "pipe" });
+    await client.connect(transport);
+    try {
+      const response = await client.callTool({ name: "run_powershell", arguments: {
+        script: "Start-Job { throw 'NativeCommandErrorMessage' } | Receive-Job -Wait -AutoRemoveJob -ErrorAction Continue; 'AFTER'",
+        engine: exe === "powershell.exe" ? "powershell" : "pwsh",
+        errorPolicy: "strict", timeoutMs: 15_000,
+      } });
+      const data = response.structuredContent as Record<string, any>;
+      expect(data.exitCode).toBe(0);
+      expect(data.stdout).toBe(`NativeCommandErrorMessage${EOL}AFTER${EOL}`);
+      expect(data.terminationStatus).toBe("script_error");
+      expect(response.isError).toBe(true);
+      expect(data.errorRecords).toEqual([{
+        category: "OperationStopped",
+        fullyQualifiedErrorId: "NativeCommandErrorMessage",
+        exceptionType: "System.Management.Automation.RemoteException",
+        message: "NativeCommandErrorMessage",
+      }]);
+    } finally { await client.close(); }
+  }, 20_000);
+  it("reports successful multiline native diagnostics through typed strict execution", async () => {
+    const client = new Client({ name: "native-stderr-smoke", version: "1" });
+    const transport = new StdioClientTransport({ command: process.execPath, args: [join(process.cwd(), "dist/index.js")], env: { ...process.env, POWERSHELL_MCP_NO_TELEMETRY: "1", PWSH_MCP_EXE: exe! }, stderr: "pipe" });
+    await client.connect(transport);
+    try {
+      const native = `'${process.execPath.replace(/'/g, "''")}'`;
+      const response = await client.callTool({ name: "run_powershell", arguments: {
+        script: `param($marker) & ${native} -e 'process.stderr.write([111,222,333].join(String.fromCharCode(10)))'; Write-Output $marker`,
+        parameters: { marker: "AFTER_NATIVE" }, errorPolicy: "strict", maxOutputBytes: 32,
+      } });
+      const data = response.structuredContent as Record<string, any>;
+      expect(response.isError).toBe(false);
+      expect(data).toMatchObject({ terminationStatus: "completed", exitCode: 0, errorRecords: [] });
+      expect(data.stdout).toContain("222");
+      expect(data.stdout).toContain("AFTER_NATIVE");
+      expect(data.stdout).not.toContain("PS-RESULT:");
+      expect(Buffer.byteLength(data.stdout, "utf8")).toBeLessThanOrEqual(32);
+      expect(data.truncation.stdout.capturedBytes).toBe(Buffer.byteLength(data.stdout, "utf8"));
+    } finally { await client.close(); }
+  }, 20_000);
   it("captures strict payload through built stdio without persisting a frame", async () => {
     const client = new Client({ name: "strict-log-smoke", version: "1" });
     const transport = new StdioClientTransport({ command: process.execPath, args: [join(process.cwd(), "dist/index.js")], env: { ...process.env, POWERSHELL_MCP_NO_TELEMETRY: "1", PWSH_MCP_EXE: exe! }, stderr: "pipe" });
