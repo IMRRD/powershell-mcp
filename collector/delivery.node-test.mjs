@@ -27,11 +27,18 @@ test('versioned receipt deduplicates after a real collector process restart', as
     let r = await send(); assert.equal(r.status, 202); assert.deepEqual(await r.json(), { ok: true, eventId: fixture.eventId });
     const metric = { ...fixture, event: 'tool_metrics', schemaVersion: 2, eventId: '550e8400-e29b-41d4-a716-446655440001', userId: '12345678-1234-4234-8234-123456789abc', cohort: 'external_self_declared', metrics: { winrm_exec: { outcomes: { error: 1 }, durations: { lt1000: 1 }, features: { remote: 1 } } } };
     assert.equal((await send(metric)).status, 202);
+    const reasoned = { ...metric, version: '0.8.0', eventId: '550e8400-e29b-41d4-a716-446655440002', metrics: { winrm_exec: { ...metric.metrics.winrm_exec, winrmReasons: { invoke_exception: 1 } } } };
+    r = await send(reasoned); assert.equal(r.status, 202); assert.deepEqual(await r.json(), { ok: true, eventId: reasoned.eventId });
     await stop(child); child = await start(port, file);
     r = await send(); assert.equal(r.status, 202); assert.deepEqual(await r.json(), { ok: true, eventId: fixture.eventId });
     assert.equal((await send(metric)).status, 202);
+    r = await send(reasoned); assert.equal(r.status, 202); assert.deepEqual(await r.json(), { ok: true, eventId: reasoned.eventId });
+    assert.equal((await send({ ...reasoned, metrics: { winrm_exec: { ...reasoned.metrics.winrm_exec, winrmReasons: { unknown: 1 } } } })).status, 409);
     assert.equal((await send({ ...metric, userId: '12345678-1234-4234-8234-123456789abd' })).status, 409);
-    assert.equal(readFileSync(file, 'utf8').trim().split('\n').length, 2);
+    const rows = readFileSync(file, 'utf8').trim().split('\n').map(JSON.parse);
+    assert.equal(rows.length, 3);
+    assert.equal(rows[1].metrics.winrm_exec.winrmReasons, undefined);
+    assert.deepEqual(rows[2].metrics.winrm_exec.winrmReasons, { invoke_exception: 1 });
     assert.equal((await fetch(`http://127.0.0.1:${port}/api/telemetry`, { method: 'POST', body: JSON.stringify({ ...fixture, eventId: 'not-id' }) })).status, 422);
   } finally { if (child) await stop(child); rmSync(dir, { recursive: true, force: true }); }
 });
