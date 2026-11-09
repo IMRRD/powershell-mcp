@@ -21,13 +21,96 @@ other totals. Diagnostic small-cell, missing-axis and outcome-minus-known-reason
 complement protection applies even with private small-count permission. The
 existing audience opt-in continues to govern other private aggregate counts.
 
-This slice does not query a prior week or version cohorts. It explicitly marks
-comparison and release/deployment status unavailable, instead of inventing trend
-data. Remaining issue75 work includes actual equivalent completed UTC weeks with
-compatible version/instrumentation cohorts and uncertainty, operator review of
-the real restricted preview, and installed dashboard/frontend acceptance. Late
-arrivals can revise a reconstructed event-time week. No timer, recipient,
-transport, config or original intent ledger is changed by these source repairs.
+The trend correction queries adjacent complete Monday-to-Monday UTC weeks and
+`(origin, version_bucket, event)` batch counts in the **same** read-only
+repeatable-read transaction, using half-open windows. Prior-week hourly receipts
+and valid timestamp quality are required for comparison. Prior-week health
+refusal preserves the current report's existing health admission. Both MIME
+alternatives compare actual version/instrumentation batch coverage and flag
+changed version shares, distinguishing batches from calls.
+
+Call changes and error/timeout percentage-point changes require positive
+same-stream tool/origin denominators and the **same single known client version
+within that origin/stream** in both weeks. This permits tool/version attribution
+without joining the versionless tool/axis views to event rows. Legacy and metric
+streams can qualify independently at different versions. Matching multi-version
+batch shares do **not** establish matching per-tool call shares; such call/rate
+comparisons refuse even with stable batch mix. `other`, missing cohorts,
+missing/zero denominators and missing outcome axes have explicit refusals.
+Complete outcome marginals supply error/timeout denominators; absent outcomes
+never become zero. Samples below 100 are flagged. Changes remain descriptive:
+batching, workload, selection and late arrivals preclude statistical or causal
+improvement claims. A later reconstruction may include late arrivals; this does
+not freeze historical delivery or establish complete upstream collection.
+
+Before findings render, new cells, partition complements, outcome-coverage
+complements and absolute cross-week differences of corresponding
+cells/totals/complements are checked. A positive value below ten withholds both
+windows' numeric surfaces, including current findings/details that would reveal
+a suppressed delta. The private small-count opt-in does not bypass new trend
+suppression. Existing audience validation and SQL diagnostic suppression retain
+their behavior. No installation linkage across weeks is inferred. This is
+conservative partition protection, not a general differential-privacy guarantee
+across unlimited independently retained reports.
+
+Mixed-version per-tool comparisons and per-version WinRM reasons remain an
+explicit parent SQL dependency described below. The implemented batch and
+eligible same-stream comparisons are substantive supported comparisons, not an
+unconditional unavailable claim. Release/deployment status remains unavailable.
+Remaining parent acceptance includes independent review, real restricted preview,
+installed dashboard/frontend acceptance and hosted CI/release gates. No timer,
+recipient, transport, configuration or original intent ledger is changed.
+
+### Minimal restricted SQL dependency (proposal only; not installed)
+
+For mixed-version tool comparisons, add exactly one restricted function after
+parent review: `tool_version_outcomes_utc(from_utc timestamptz, to_utc timestamptz)`
+returning `(origin text, version_bucket text, stream text, tool text, axis text,
+bucket text, calls numeric)`. Its aggregate core is:
+
+```sql
+WITH e AS (
+  SELECT event_key, origin, version_bucket FROM telemetry_event
+  WHERE event_at >= from_utc AND event_at < to_utc
+), cells AS (
+  SELECT e.origin, e.version_bucket, t.stream, t.tool,
+         'calls'::text AS axis, 'total'::text AS bucket, sum(t.calls)::numeric AS calls
+  FROM e JOIN telemetry_tool t USING (event_key)
+  GROUP BY e.origin, e.version_bucket, t.stream, t.tool
+  UNION ALL
+  SELECT e.origin, e.version_bucket, 'metrics', a.tool, 'outcomes', a.bucket,
+         sum(a.calls)::numeric
+  FROM e JOIN telemetry_metric_axis a USING (event_key)
+  WHERE a.axis = 'outcomes'
+  GROUP BY e.origin, e.version_bucket, a.tool, a.bucket
+)
+SELECT * FROM cells;
+```
+
+That core is **not** safe as a standalone grant. The parent-owned function must
+be `STABLE SECURITY DEFINER SET search_path = public, pg_temp`, revoke PUBLIC
+execution, and admit only `0 < to_utc-from_utc <= interval '31 days'` with the
+existing `privacy_window_safe_utc` gate. Before returning **any** row, suppress
+the entire result on a negative or positive-below-ten cell/complement in:
+`(origin,stream,tool,axis)` partitioned by `(version_bucket,bucket)`;
+`(origin,version_bucket,stream,axis,bucket)` partitioned by tool; and
+`(origin,version_bucket,tool)` call total minus summed outcome coverage. Retain
+all six finite outcome buckets as separate marginals and validate totals; emit
+no invented zero outcomes for absent instrumentation. Consumer admission must
+check version-specific complete outcome coverage and the two-window complement
+guard before publishing. Grant only function execution to the existing restricted
+reporting role after parent review; never grant raw tables, keys or payloads.
+
+This is the exact minimal new grouping required; extending the identifier-free
+views cannot safely recover the missing join. A version-specific reason marginal
+would separately require a sibling restricted function
+`winrm_diagnostics_version_utc(from_utc timestamptz, to_utc timestamptz)` returning
+`(origin text, version_bucket text, reason text, calls numeric)`, retaining the
+existing `winrm_diagnostics_utc` consumer contract and all its current
+reason/outcome complement checks at the new grain. Neither proposal creates a
+reason/outcome **joint** distribution: no conditional per-version error-reason
+rate is supported by these stored independent marginals. No migration, schema,
+grant or deployment change is included in this correction.
 
 This source is prepared for parent review. No deployment, timer activation, production authentication or mail submission is performed here. The operator confirmed receipt of the original 12–19 October 2026 UTC email. Preserve its intent permanently; presentation changes never authorize a resend. Issue 43 remains open until an actual timer-triggered delivery is confirmed separately from the manual one-shot.
 

@@ -68,7 +68,21 @@ def aggregates(connection, start, end):
         users = cur.fetchall()
         cur.execute('SELECT origin, reason, calls FROM winrm_diagnostics_utc(%s,%s)', (start, end))
         winrm_reasons = cur.fetchall()
-    return dict(adoption=adoption, users=users, events=events, tools=tools, axes=axes, winrm_reasons=winrm_reasons, quality=quality, unknown_receipt_count=unknown_receipt_count, receipts=receipts, imported=imported)
+        cohort_sql = 'SELECT origin,version_bucket,event,count(*) FROM dashboard_events WHERE event_at >= %s AND event_at < %s GROUP BY origin,version_bucket,event'
+        cur.execute(cohort_sql, (start, end))
+        cohorts = cur.fetchall()
+        prior_start = start - dt.timedelta(days=7)
+        cur.execute(cohort_sql, (prior_start, start))
+        previous = dict(start=prior_start, end=start, cohorts=cur.fetchall())
+        cur.execute('SELECT origin,stream,tool,sum(calls) FROM dashboard_tools WHERE event_at >= %s AND event_at < %s GROUP BY origin,stream,tool', (prior_start, start))
+        previous['tools'] = cur.fetchall()
+        cur.execute('SELECT origin,tool,axis,bucket,sum(calls) FROM dashboard_metric_axes WHERE event_at >= %s AND event_at < %s GROUP BY origin,tool,axis,bucket', (prior_start, start))
+        previous['axes'] = cur.fetchall()
+        cur.execute('SELECT event_time_quality,receipt_time_quality,count(*) FROM dashboard_events WHERE received_at >= %s AND received_at < %s GROUP BY event_time_quality,receipt_time_quality', (prior_start, start))
+        previous['quality'] = cur.fetchall()
+        cur.execute("SELECT date_trunc('hour',received_at,'UTC'),count(*) FROM dashboard_events WHERE received_at >= %s AND received_at < %s GROUP BY 1 ORDER BY 1", (prior_start, start))
+        previous['receipts'] = cur.fetchall()
+    return dict(adoption=adoption, users=users, events=events, tools=tools, axes=axes, winrm_reasons=winrm_reasons, quality=quality, unknown_receipt_count=unknown_receipt_count, receipts=receipts, imported=imported, cohorts=cohorts, previous=previous)
 
 
 def render(data, start, end, now, config=None):
@@ -77,6 +91,132 @@ def render(data, start, end, now, config=None):
 
 def render_html(data, start, end, now, config=None):
     return report(data, start, end, now, config)[1]
+
+
+def completed_week_trends(data, start, end, now):
+    """Compare observable streams only; event versions are not tool-version joins."""
+    result = dict(notes=[], coverage=[], calls=[], rates=[], unsafe=False)
+    notes = result['notes']
+    previous = data.get('previous')
+    if previous is None:
+        notes.append('Comparison unavailable: equivalent completed UTC weeks require prior-week version/instrumentation coverage.')
+        return result
+    prior_start = start - dt.timedelta(days=7)
+    if ((start, end) != closed_week(now) or previous.get('start') != prior_start or
+            previous.get('end') != start):
+        notes.append('Comparison refused: windows must be adjacent complete Monday-to-Monday UTC weeks.')
+        return result
+    notes.append(f'Completed-week comparison: {prior_start:%d %b %Y} to {start:%d %b %Y} versus {start:%d %b %Y} to {end:%d %b %Y} UTC; each window start inclusive and end exclusive; same repeatable-read snapshot.')
+    notes.append('Rates and changes are descriptive, not evidence of improvement or a deployed fix. Calls within batches may be dependent; workload and late arrivals can revise event-time totals. Receipt coverage does not prove complete upstream delivery.')
+    hours = {h for h, n in previous.get('receipts', []) if n > 0}
+    quality = previous.get('quality', [])
+    if (any(prior_start + dt.timedelta(hours=i) not in hours for i in range(168)) or
+            not quality or any(a != 'valid' or b != 'valid' for a, b, n in quality if n)):
+        notes.append('Comparison refused: prior-week receipt coverage or timestamp quality is incomplete.')
+        return result
+    cohorts, totals, axes = [], [], []
+    for period in (previous, data):
+        c, t, a = {}, {}, {}
+        for o, v, event, n in period.get('cohorts', []):
+            if (o not in ORIGINS or not isinstance(v, str) or
+                    not (v == 'other' or re.fullmatch(r'(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})', v)) or
+                    event not in ('startup', 'tool_counts', 'tool_metrics', 'historical_other') or (o,v,event) in c):
+                raise ValueError('invalid version/instrumentation cohort')
+            c[o,v,event] = n
+        for o, s, tool, n in period.get('tools', []):
+            if o not in ORIGINS or s not in ('counts', 'metrics') or tool not in TOOLS or (o,s,tool) in t:
+                raise ValueError('invalid comparison tool dimension')
+            t[o,s,tool] = n
+        for o, tool, axis, bucket, n in period.get('axes', []):
+            if o not in ORIGINS or tool not in TOOLS or axis not in AXES or bucket not in AXES[axis] or (o,tool,axis,bucket) in a:
+                raise ValueError('invalid comparison metric dimension')
+            a[o,tool,axis,bucket] = n
+        for n in (*c.values(), *t.values(), *a.values()):
+            if (isinstance(n, bool) or not isinstance(n, (int, Decimal)) or
+                    (isinstance(n, Decimal) and not n.is_finite()) or n < 0 or n != int(n)):
+                raise ValueError('invalid comparison count')
+        for o, tool, axis in {k[:3] for k in a}:
+            if (o,'metrics',tool) not in t or sum(n for (co,ct,ca,b),n in a.items() if (co,ct,ca) == (o,tool,axis)) != t[o,'metrics',tool]:
+                raise ValueError('incomplete comparison metric marginal')
+        cohorts.append(c); totals.append(t); axes.append(a)
+    # Guard each published partition, its complements, and differences of the
+    # same cells/complements between windows. Withhold current detail as well:
+    # suppressing a delta alone still releases it via the two endpoint counts.
+    surfaces = []
+    for c, t, a in zip(cohorts, totals, axes):
+        partitions = {}
+        for (o,v,e),n in c.items():
+            for partition, cell in ((('version',o,e),v), (('instrumentation',o,v),e), (('events',o),(v,e))):
+                partitions.setdefault(partition,{})[cell] = n
+        for (o,s,tool),n in t.items():
+            partitions.setdefault(('tools',o,s),{})[tool] = n
+        for (o,tool,axis,b),n in a.items():
+            partitions.setdefault(('axes',o,tool,axis),{})[b] = n
+        surface = {}
+        for partition, cells in partitions.items():
+            total = sum(cells.values())
+            surface[partition, 'total'] = total
+            for cell,n in cells.items():
+                surface[partition, 'cell', cell] = n
+                surface[partition, 'complement', cell] = total-n
+        for (o,s,tool),n in t.items():
+            if s == 'metrics':
+                covered = sum(v for (co,ct,ca,b),v in a.items() if (co,ct,ca) == (o,tool,'outcomes'))
+                surface[('coverage',o,tool), 'missing'] = n-covered
+        surfaces.append(surface)
+    if (any(0 < n < 10 for surface in surfaces for n in surface.values()) or
+            any(0 < abs(surfaces[1].get(k,0)-surfaces[0].get(k,0)) < 10
+                for k in surfaces[0].keys() | surfaces[1].keys())):
+        result['unsafe'] = True
+        notes.append('Comparison and numeric details withheld: small cells or cross-window complementary disclosure risk. Private small-count permission does not override trend suppression.')
+        return result
+    for o, event in sorted({(o,e) for c in cohorts for o,v,e in c if e in ('tool_counts','tool_metrics')}):
+        mixes = [{v:n for (co,v,e),n in c.items() if (co,e) == (o,event)} for c in cohorts]
+        denoms = [sum(m.values()) for m in mixes]
+        if not all(denoms):
+            notes.append(f'Version/instrumentation mix unavailable for {o} ({event}): batches missing in one week.')
+        else:
+            changed = any(mixes[0].get(v,0)*denoms[1] != mixes[1].get(v,0)*denoms[0] for v in mixes[0].keys() | mixes[1].keys())
+            notes.append(f'Version/instrumentation mix {"changed" if changed else "stable at event-batch level"} for {o} ({event}); batch shares do not establish per-tool call shares.')
+    for o, v, event in sorted(cohorts[0].keys() | cohorts[1].keys()):
+        cells = []
+        for c in cohorts:
+            count = c.get((o,v,event))
+            denominator = sum(n for (co,cv,ce),n in c.items() if (co,ce) == (o,event))
+            cells.append(f'{count}/{denominator} batches ({count/denominator:.1%})' if count is not None and denominator else 'not recorded')
+        result['coverage'].append((o,v,event,*cells))
+    for o,s,tool in sorted(totals[0].keys() | totals[1].keys()):
+        event = 'tool_metrics' if s == 'metrics' else 'tool_counts'
+        versions = [{v for (co,v,e),n in c.items() if co == o and e == event and n > 0} for c in cohorts]
+        label = f'{tool} ({o}, {s})'
+        if any(not vs or 'other' in vs for vs in versions):
+            notes.append(f'Call/rate comparison refused for {label}: missing or unknown version/instrumentation coverage.')
+            continue
+        if any(len(vs) != 1 for vs in versions) or versions[0] != versions[1]:
+            notes.append(f'Call/rate comparison refused for {label}: version mix or version changed; event-batch shares cannot establish per-tool call cohorts. A restricted version/tool/outcome aggregate is required.')
+            continue
+        counts = [t.get((o,s,tool)) for t in totals]
+        if any(n is None or n <= 0 for n in counts):
+            notes.append(f'Call/rate comparison refused for {label}: zero or missing same-stream denominator; absence is not zero activity.')
+            continue
+        version = next(iter(versions[0]))
+        old, new = counts
+        result['calls'].append((o,s,tool,version,old,new,f'{new-old:+} ({(new-old)/old:+.1%})'))
+        if s != 'metrics': continue
+        outcomes = [{b:n for (co,ct,ca,b),n in a.items() if (co,ct,ca) == (o,tool,'outcomes')} for a in axes]
+        notes.append(f'Outcome instrumentation coverage for {label}: {sum(outcomes[0].values())}/{old} previous and {sum(outcomes[1].values())}/{new} current metric calls; coverage of all executed calls is unknown.')
+        if any(not b for b in outcomes):
+            notes.append(f'Error/timeout comparison refused for {label}: missing outcome instrumentation; duration or legacy counts cannot supply outcomes.')
+            continue
+        if min(counts) < 100:
+            notes.append(f'Small sample for {label}: fewer than 100 recorded outcomes in at least one week; no statistical improvement claim.')
+        for bucket in ('error', 'timeout'):
+            a, b = [out.get(bucket, 0) for out in outcomes]
+            result['rates'].append((o,tool,version,bucket,f'{a}/{old} ({a/old:.1%})',f'{b}/{new} ({b/new:.1%})',f'{100*(b/new-a/old):+.1f} pp'))
+    if not result['coverage']:
+        notes.append('Comparison unavailable: version/instrumentation batches are missing in both weeks.')
+    notes.append('Per-version WinRM reason/outcome comparison is unavailable from the existing independent marginals; no joint data is inferred.')
+    return result
 
 
 def report(data, start, end, now, config=None):
@@ -196,7 +336,9 @@ def report(data, start, end, now, config=None):
         elif any(n < 0 or 0 < n < 10 for n in
                  (outcomes.get(b, 0) - known.get(b, 0) for b in set(outcomes) | set(known))):
             reason_unsafe = True
-    small = policy_small and not exact
+    trends = completed_week_trends(data, start, end, now)
+    small = (policy_small and not exact) or trends['unsafe']
+    reason_unsafe = reason_unsafe or trends['unsafe']
     note('Weekly findings')
     if small:
         note('Usage and reliability findings withheld by default privacy policy; no zero activity or improvement is implied.')
@@ -229,7 +371,17 @@ def report(data, start, end, now, config=None):
         for action in actions[:3]: note(action)
         if any(n < 100 for o, t, b, n in evidence):
             note('Small sample: fewer than 100 recorded outcomes in at least one tool/origin group; rates are descriptive, not evidence of improvement.')
-    note('Comparison unavailable: no prior-week version/instrumentation cohorts were queried. Compare equivalent completed UTC weeks and compatible instrumentation before claiming change; late arrivals can revise event-time totals.')
+    if small and not trends['unsafe']:
+        note('Comparison withheld by default privacy policy; no change is inferred.')
+    else:
+        for value in trends['notes']: note(value)
+    if not small:
+        if trends['coverage']:
+            table('Version/instrumentation coverage (event batches, not calls)', ['Origin','Version','Event','Previous week','Current week'], trends['coverage'])
+        if trends['calls']:
+            table('Same-stream call comparison', ['Origin','Stream','Tool','Version','Previous calls','Current calls','Change'], trends['calls'])
+        if trends['rates']:
+            table('Error and timeout comparison (complete outcome marginals only)', ['Origin','Tool','Version','Outcome','Previous week','Current week','Change'], trends['rates'])
     note('Release/deployment status unavailable from these aggregates; no fix or rollout is inferred. Reporting health passed the checkpoint and hourly receipt gates; complete upstream delivery remains unproven.')
     if small:
         note('Detailed adoption, event, tool and axis counts withheld: small cells or complementary disclosure risk; no zero is implied.')

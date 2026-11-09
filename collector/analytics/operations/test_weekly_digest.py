@@ -30,6 +30,22 @@ def reason_fixture():
         winrm_reasons=[('unknown_origin', b, 20) for b in ('invoke_exception', 'unknown', 'uninstrumented')])
 
 
+def trend_fixture():
+    def period(total, batches):
+        return dict(cohorts=[('unknown_origin', '0.8.0', 'tool_metrics', batches),
+                             ('unknown_origin', '0.7.9', 'tool_counts', 20)],
+                    tools=[('unknown_origin', 'metrics', 'ssh_exec', total),
+                           ('unknown_origin', 'counts', 'ssh_exec', 1000)],
+                    axes=[('unknown_origin', 'ssh_exec', 'outcomes', b, n) for b, n in
+                          [('success', total-40-total//10), ('error', 40), ('timeout', total//10)]],
+                    quality=[('valid', 'valid', 168)])
+    previous = period(200, 20) | dict(start=START-dt.timedelta(days=7), end=START,
+                                    receipts=[(START-dt.timedelta(days=7)+dt.timedelta(hours=i), 1) for i in range(168)])
+    return fixture() | period(400, 40) | dict(previous=previous,
+                    adoption=[('unknown_origin', 20, 20, 0)],
+                    events=[('unknown_origin', 'tool_metrics', 40), ('unknown_origin', 'tool_counts', 20)])
+
+
 class Cursor:
     def __init__(self, rows):
         self.rows = iter(rows)
@@ -56,9 +72,157 @@ class Conn:
 
 def result_rows(f):
     return [f['adoption'], f['events'], f['tools'], f['axes'], f['quality'],
-            [(f['unknown_receipt_count'],)], f['receipts'], [(f['imported'],)], f.get('users', []), f.get('winrm_reasons', [])]
+            [(f['unknown_receipt_count'],)], f['receipts'], [(f['imported'],)], f.get('users', []), f.get('winrm_reasons', [])] + [
+            f.get('cohorts', []), f.get('previous', {}).get('cohorts', []),
+            f.get('previous', {}).get('tools', []), f.get('previous', {}).get('axes', []),
+            f.get('previous', {}).get('quality', []), f.get('previous', {}).get('receipts', [])]
 
 class DigestTests(unittest.TestCase):
+    def test_non_equivalent_or_incomplete_previous_windows_refuse_trends_only(self):
+        import copy
+        for mode in ('wrong_start','wrong_end','missing_hour','invalid_quality','missing_quality','missing_cohorts'):
+            f = copy.deepcopy(trend_fixture())
+            if mode == 'wrong_start': f['previous']['start'] += dt.timedelta(hours=1)
+            elif mode == 'wrong_end': f['previous']['end'] -= dt.timedelta(hours=1)
+            elif mode == 'missing_hour': f['previous']['receipts'].pop(17)
+            elif mode == 'invalid_quality': f['previous']['quality'] = [('invalid','valid',20)]
+            elif mode == 'missing_quality': f['previous']['quality'] = []
+            else: f['previous']['cohorts'] = []
+            for body in w.report(f, START, END, NOW):
+                self.assertIn('refused', body)
+                self.assertNotIn('Error and timeout comparison', body)
+                self.assertIn('Metric stream: 400 recorded calls', body)
+        f = trend_fixture()
+        for start,end in ((START+dt.timedelta(hours=1),END), (END,START), (START,START)):
+            f['receipts'] = [(start+dt.timedelta(hours=i),1) for i in range(168)]
+            with self.assertRaises(ValueError): w.report(f,start,end,NOW)
+
+    def test_missing_axes_zero_denominators_and_low_samples_have_precise_refusals(self):
+        import copy
+        for mode in ('missing_outcomes', 'zero_denominator', 'missing_denominator', 'unknown_version', 'low_sample'):
+            f = copy.deepcopy(trend_fixture())
+            if mode == 'missing_outcomes':
+                f['previous']['axes'] = [('unknown_origin','ssh_exec','durations','lt100',200)]
+            elif mode == 'zero_denominator':
+                f['previous']['tools'][0] = ('unknown_origin','metrics','ssh_exec',0)
+                f['previous']['axes'] = []
+            elif mode == 'missing_denominator':
+                f['previous']['tools'] = f['previous']['tools'][1:]
+                f['previous']['axes'] = []
+            elif mode == 'unknown_version':
+                f['previous']['cohorts'][0] = ('unknown_origin','other','tool_metrics',20)
+            else:
+                f['previous']['tools'][0] = ('unknown_origin','metrics','ssh_exec',80)
+                f['previous']['axes'] = [('unknown_origin','ssh_exec','outcomes',b,n) for b,n in [('success',40),('error',20),('timeout',20)]]
+            for body in self.mime_bodies(f):
+                if mode == 'low_sample':
+                    self.assertIn('Small sample for ssh_exec', body)
+                    self.assertIn('20/80 (25.0%)', body)
+                else:
+                    self.assertNotIn('Error and timeout comparison', body)
+                    expected = ('missing outcome instrumentation' if mode == 'missing_outcomes' else
+                                'missing or unknown version/instrumentation coverage' if mode == 'unknown_version' else
+                                'zero or missing same-stream denominator')
+                    self.assertIn(expected, body)
+                    self.assertNotIn('0/0', body)
+
+    def test_incomplete_prior_instrumentation_marginal_refuses_without_submission(self):
+        f = trend_fixture()
+        f['previous']['axes'][0] = ('unknown_origin','ssh_exec','outcomes','success',100)
+        with self.assertRaisesRegex(ValueError, 'incomplete comparison metric marginal'):
+            self.mime_bodies(f)
+
+    def test_version_mix_changes_compare_batches_but_refuse_joint_call_claims(self):
+        import copy
+        for shifted in (False, True):
+            f = copy.deepcopy(trend_fixture())
+            f['previous']['cohorts'].append(('unknown_origin','0.8.1','tool_metrics',20))
+            f['cohorts'] = [('unknown_origin','0.8.0','tool_metrics',20 if shifted else 40),
+                            ('unknown_origin','0.8.1','tool_metrics',60 if shifted else 40),
+                            ('unknown_origin','0.7.9','tool_counts',20)]
+            f['events'][0] = ('unknown_origin','tool_metrics',80)
+            for body in self.mime_bodies(f):
+                self.assertIn('Version/instrumentation mix ' + ('changed' if shifted else 'stable at event-batch level'), body)
+                self.assertIn('20/40 batches (50.0%)', body)
+                self.assertIn('20/80 batches (25.0%)' if shifted else '40/80 batches (50.0%)', body)
+                self.assertIn('version mix or version changed', body)
+                self.assertIn('restricted version/tool/outcome aggregate is required', body)
+                self.assertNotIn('Error and timeout comparison', body)
+                # An independently compatible legacy stream still has a real comparison.
+                self.assertIn('Same-stream call comparison', body)
+
+    def test_trend_small_cells_and_cross_window_complements_hide_both_numeric_surfaces(self):
+        import copy
+        audience = dict(sender='fixture@example.invalid', recipient=w.RECIPIENT, approved_recipients=[w.RECIPIENT])
+        private = audience | dict(enabled=True, host='mail.ialogics.co.uk', port=587, username='fixture', private_small_counts=audience.copy())
+        for mode in ('previous_small_axis', 'version_complement', 'cross_window_total', 'cross_window_axis', 'cross_window_complement'):
+            f = copy.deepcopy(trend_fixture())
+            if mode == 'previous_small_axis':
+                f['previous']['axes'] = [('unknown_origin','ssh_exec','outcomes',b,n) for b,n in [('success',179),('error',1),('timeout',20)]]
+            elif mode == 'version_complement':
+                f['previous']['cohorts'].append(('unknown_origin','0.7.8','tool_metrics',1))
+            elif mode == 'cross_window_total':
+                f['tools'][0] = ('unknown_origin','metrics','ssh_exec',201)
+                f['axes'] = [('unknown_origin','ssh_exec','outcomes',b,n) for b,n in [('success',141),('error',40),('timeout',20)]]
+            elif mode == 'cross_window_axis':
+                f['axes'] = [('unknown_origin','ssh_exec','outcomes',b,n) for b,n in [('success',319),('error',41),('timeout',40)]]
+            else:
+                # Every supplied cell and cell delta is at least ten. The
+                # non-error complement moves from 160 to 161 and must withhold.
+                f['axes'] = [('unknown_origin','ssh_exec','outcomes',b,n) for b,n in [('success',120),('error',239),('timeout',41)]]
+            for cfg in (None, private):
+                with self.subTest(mode=mode, private=bool(cfg)):
+                    for body in self.mime_bodies(f, cfg):
+                        self.assertIn('Comparison and numeric details withheld: small cells or cross-window complementary disclosure risk', body)
+                        for forbidden in ('ssh_exec', '0.8.0', '0.7.9', '40/200', '40/400', 'Outcome instrumentation coverage', '<table', 'recorded calls', 'observed,'):
+                            self.assertNotIn(forbidden, body)
+
+    def mime_bodies(self, data, cfg=None):
+        from email import policy
+        from email.parser import BytesParser
+        messages = []
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp)/'config.json'
+            config.write_text(json.dumps(cfg or dict(enabled=True, sender='fixture@example.invalid',
+                recipient=w.RECIPIENT, approved_recipients=[w.RECIPIENT], host='mail.ialogics.co.uk', port=587, username='fixture')))
+            w.main(['--config', str(config), '--state-dir', str(Path(tmp)/'state')], NOW,
+                   lambda: Conn(result_rows(data)), lambda m, *a: messages.append(m.as_bytes()))
+        msg = BytesParser(policy=policy.default).parsebytes(messages[0])
+        self.assertEqual(msg.get_content_type(), 'multipart/alternative')
+        return [p.get_content() for p in msg.iter_parts()]
+
+    def test_stable_version_streams_compare_calls_error_and_timeout_in_both_mime_parts(self):
+        for body in self.mime_bodies(trend_fixture()):
+            summary = body.split('Legacy count stream', 1)[0]
+            for value in ('Completed-week comparison', '05 Oct 2026', '12 Oct 2026', '19 Oct 2026',
+                          'Version/instrumentation coverage', '0.8.0', '0.7.9',
+                          'Same-stream call comparison', 'Error and timeout comparison',
+                          '40/200 (20.0%)', '40/400 (10.0%)', '-10.0 pp',
+                          '20/200 (10.0%)', '+0.0 pp', '400/400', '200/200',
+                          'descriptive', 'late arrivals', 'same repeatable-read snapshot'):
+                self.assertIn(value, summary)
+            self.assertNotIn('Comparison unavailable:', summary)
+            self.assertNotIn('reason rate', summary)
+
+    def test_adjacent_complete_weeks_share_restricted_snapshot(self):
+        previous = dict(cohorts=[('unknown_origin', '0.8.0', 'tool_metrics', 20)],
+                        tools=[('unknown_origin', 'metrics', 'ssh_exec', 200)],
+                        axes=[('unknown_origin', 'ssh_exec', 'outcomes', 'success', 200)],
+                        quality=[('valid', 'valid', 168)],
+                        receipts=[(START-dt.timedelta(days=7)+dt.timedelta(hours=i), 1) for i in range(168)])
+        f = fixture() | {'cohorts': previous['cohorts'], 'previous': previous}
+        conn = Conn(result_rows(f))
+        data = w.aggregates(conn, START, END)
+        self.assertEqual(data.get('previous'), previous | {'start': START-dt.timedelta(days=7), 'end': START})
+        self.assertEqual(data.get('cohorts'), f['cohorts'])
+        self.assertEqual(sum('SET TRANSACTION' in s for s in conn.cur.sql), 1)
+        for sql, params in zip(conn.cur.sql[11:], conn.cur.params[11:]):
+            self.assertEqual(params, (START, END) if 'version_bucket' in sql and params == (START, END)
+                             else (START-dt.timedelta(days=7), START))
+            self.assertIn('>= %s', sql)
+            self.assertIn('< %s', sql)
+            self.assertNotIn('telemetry_', sql)
+
     def test_first_screen_summary_distinguishes_error_volume_from_rate(self):
         f = fixture() | dict(
             adoption=[('internal', 30, 20, 10), ('external_self_declared', 10, 10, 0)],
@@ -136,8 +300,8 @@ class DigestTests(unittest.TestCase):
         conn = Conn(result_rows(f))
         data = w.aggregates(conn, START, END)
         self.assertEqual(data.get('winrm_reasons'), f['winrm_reasons'])
-        self.assertEqual(conn.cur.sql[-1], 'SELECT origin, reason, calls FROM winrm_diagnostics_utc(%s,%s)')
-        self.assertEqual(conn.cur.params[-1], (START, END))
+        self.assertEqual(conn.cur.sql[10], 'SELECT origin, reason, calls FROM winrm_diagnostics_utc(%s,%s)')
+        self.assertEqual(conn.cur.params[10], (START, END))
 
     def test_reason_enum_matches_existing_importer_without_extending_general_axes(self):
         import ast
