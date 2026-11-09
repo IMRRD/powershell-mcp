@@ -20,7 +20,7 @@ test('gate requires exact count and single occurrence of every TAP summary field
   assert.equal(validTap({ status: 1, stdout: summary() }), false);
   const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
   try {
-    for (const [platform, count] of [['win32', 56], ['linux', 57]]) {
+    for (const [platform, count] of [['win32', 57], ['linux', 58]]) {
       Object.defineProperty(process, 'platform', { ...descriptor, value: platform });
       const gate = await import(`./check-collector-tests.mjs?admission=${platform}`);
       assert.equal(gate.expectedTests, count);

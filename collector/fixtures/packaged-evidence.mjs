@@ -4,7 +4,12 @@ import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 
-const phases = new Set(['acceptance', 'pack', 'install', 'proof', 'proxyClose', 'proxyConnectionsClose', 'proxyWaitClose', 'collectorClose', 'directoryRemove']);
+// Per-case phases retain which client was active; shared client phases record
+// the latest entry into each lifecycle boundary, not a history of every child.
+const phases = new Set(['acceptance', 'pack', 'install', 'proof', 'proxyClose', 'proxyConnectionsClose', 'proxyWaitClose', 'collectorClose', 'directoryRemove',
+  'collectorReady', 'proxyReady', 'wrongAckClient', 'replayClient', 'positiveClient', 'metricClient',
+  'clientReady', 'clientProof', 'clientRelease', 'clientClose', 'retainedClaim', 'durableReceipt', 'wrongAckResponse',
+  'replayDeletion', 'positiveDeletion', 'metricDeletion', 'metricReceipts']);
 const timers = new Set(['npm', 'command:install', 'idealTree', 'idealTree:init', 'idealTree:buildDeps', 'idealTree:fixDepFlags', 'reify', 'reify:loadTrees', 'reify:diffTrees', 'reify:retireShallow', 'reify:createSparse', 'reify:unpack', 'reify:unretire', 'reify:build', 'reify:trash', 'reify:save', 'build', 'build:deps', 'build:run:install', 'build:run:postinstall']);
 const duration = value => Number.isSafeInteger(value) && value >= 0 && value <= 86400000;
 
