@@ -23,7 +23,7 @@ AXES = {'outcomes': {'success', 'nonzero', 'error', 'timeout', 'cancelled', 'unk
 WINRM_REASONS = {'completed', 'remote_script_error', 'authentication_exception', 'access_exception', 'remoting_transport_exception', 'invoke_exception', 'wrapper_result_invalid', 'frame_invalid', 'frame_body_invalid', 'local_host_error', 'local_launch_error', 'timeout', 'cancelled', 'unknown', 'uninstrumented'}
 DURATION_LABELS = {'lt100': 'under 100 ms', 'lt1000': '100–999 ms', 'lt10000': '1–9.999 seconds', 'gte10000': '10 seconds or more'}
 ADDRESS = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\Z")
-# Hard limits on each of the six disjoint partitions below. Exhaustion is a
+# Hard limits on each disjoint partition below. Exhaustion is a
 # privacy refusal, including for an approved private audience.
 COMPOSITE_MAX_CELLS = 1024
 COMPOSITE_MAX_BITS = 128
@@ -89,7 +89,22 @@ def aggregates(connection, start, end):
         previous['quality'] = cur.fetchall()
         cur.execute("SELECT date_trunc('hour',received_at,'UTC'),count(*) FROM dashboard_events WHERE received_at >= %s AND received_at < %s GROUP BY 1 ORDER BY 1", (prior_start, start))
         previous['receipts'] = cur.fetchall()
-    return dict(adoption=adoption, users=users, events=events, tools=tools, axes=axes, winrm_reasons=winrm_reasons, quality=quality, unknown_receipt_count=unknown_receipt_count, receipts=receipts, imported=imported, cohorts=cohorts, previous=previous)
+        # Capability discovery keeps the old schema readable without aborting
+        # this snapshot on UndefinedFunction. A present but ungranted/withheld
+        # function never permits reconstructing its cohorts from marginals.
+        cur.execute("SELECT p IS NOT NULL, coalesce(has_function_privilege(p,'EXECUTE'),false) FROM (SELECT to_regprocedure('tool_version_outcomes_utc(timestamptz,timestamptz)') AS p) f")
+        installed, executable = cur.fetchone()
+        joint = {}
+        if installed:
+            joint['version_outcomes'] = []
+            previous['version_outcomes'] = []
+            if executable:
+                sql = 'SELECT origin,version_bucket,stream,tool,axis,bucket,calls FROM tool_version_outcomes_utc(%s,%s)'
+                cur.execute(sql, (start, end))
+                joint['version_outcomes'] = cur.fetchall()
+                cur.execute(sql, (prior_start, start))
+                previous['version_outcomes'] = cur.fetchall()
+    return dict(adoption=adoption, users=users, events=events, tools=tools, axes=axes, winrm_reasons=winrm_reasons, quality=quality, unknown_receipt_count=unknown_receipt_count, receipts=receipts, imported=imported, cohorts=cohorts, previous=previous, **joint)
 
 
 def render(data, start, end, now, config=None):
@@ -138,8 +153,45 @@ def small_composite_change(before, after):
     return False
 
 
+def version_outcome_cells(period):
+    """Validate the restricted joint, including its rollup to existing marginals."""
+    totals, outcomes, seen = {}, {}, set()
+    for row in period.get('version_outcomes', []):
+        if not isinstance(row, (tuple, list)) or len(row) != 7:
+            raise ValueError('invalid joint version/tool/outcome row')
+        o,v,s,t,a,b,n = row
+        if (not all(isinstance(x,str) for x in (o,v,s,t,a,b)) or
+                o not in ORIGINS or not (v == 'other' or re.fullmatch(r'(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})',v)) or
+                s not in ('counts','metrics') or t not in TOOLS or
+                not ((a,b) == ('calls','total') or (s == 'metrics' and a == 'outcomes' and b in AXES['outcomes']))):
+            raise ValueError('invalid joint version/tool/outcome dimension')
+        key = (o,v,s,t,a,b)
+        if key in seen:
+            raise ValueError('duplicate joint version/tool/outcome cell')
+        seen.add(key)
+        if (isinstance(n,bool) or not isinstance(n,(int,Decimal)) or
+                (isinstance(n,Decimal) and not n.is_finite()) or n < 0 or n != int(n)):
+            raise ValueError('invalid joint version/tool/outcome count')
+        if a == 'calls': totals[o,v,s,t] = n
+        else: outcomes[o,v,t,b] = n
+    for o,v,t in {k[:3] for k in outcomes}:
+        covered = sum(n for (co,cv,ct,b),n in outcomes.items() if (co,cv,ct) == (o,v,t))
+        if (o,v,'metrics',t) not in totals or covered > totals[o,v,'metrics',t]:
+            raise ValueError('inconsistent joint outcome coverage')
+    if seen:
+        calls, axes = {}, {}
+        for (o,v,s,t),n in totals.items(): calls[o,s,t] = calls.get((o,s,t),0)+n
+        for (o,v,t,b),n in outcomes.items(): axes[o,t,'outcomes',b] = axes.get((o,t,'outcomes',b),0)+n
+        expected_calls = {(o,s,t):n for o,s,t,n in period.get('tools',[]) if n}
+        expected_axes = {(o,t,a,b):n for o,t,a,b,n in period.get('axes',[]) if a=='outcomes' and n}
+        if ({k:n for k,n in calls.items() if n} != expected_calls or
+                {k:n for k,n in axes.items() if n} != expected_axes):
+            raise ValueError('inconsistent joint aggregate rollup')
+    return totals, outcomes
+
+
 def completed_week_trends(data, start, end, now):
-    """Compare observable streams only; event versions are not tool-version joins."""
+    """Compare actual joint cohorts when installed; retain old-schema admission."""
     result = dict(notes=[], coverage=[], calls=[], rates=[], unsafe=False)
     notes = result['notes']
     previous = data.get('previous')
@@ -181,7 +233,10 @@ def completed_week_trends(data, start, end, now):
                     (isinstance(n, Decimal) and not n.is_finite()) or n < 0 or n != int(n)):
                 raise ValueError('invalid comparison count')
         for o, tool, axis in {k[:3] for k in a}:
-            if (o,'metrics',tool) not in t or sum(n for (co,ct,ca,b),n in a.items() if (co,ct,ca) == (o,tool,axis)) != t[o,'metrics',tool]:
+            covered = sum(n for (co,ct,ca,b),n in a.items() if (co,ct,ca) == (o,tool,axis))
+            partial_joint = axis == 'outcomes' and 'version_outcomes' in period
+            if ((o,'metrics',tool) not in t or covered > t[o,'metrics',tool] or
+                    (covered != t[o,'metrics',tool] and not partial_joint)):
                 raise ValueError('incomplete comparison metric marginal')
         cohorts.append(c); totals.append(t); axes.append(a)
     # Guard each published partition, its composite cells/complements, and their
@@ -189,7 +244,7 @@ def completed_week_trends(data, start, end, now):
     # suppressing a delta alone still releases it via the two endpoint counts.
     surfaces = []
     partition_windows = []
-    for c, t, a in zip(cohorts, totals, axes):
+    for period, c, t, a in zip((previous, data), cohorts, totals, axes):
         # All rendered batch cells are disjoint, across origins, versions and
         # event types. Local version/event tables are unions of these cells.
         partitions = {('events',): c.copy()}
@@ -208,6 +263,20 @@ def completed_week_trends(data, start, end, now):
                     # Missing instrumentation is a whole tool-call cell, not
                     # an observed zero bucket; its total is still published.
                     partitions.setdefault(('axis',axis),{})[o,tool,None] = n
+                elif axis == 'outcomes':
+                    covered = sum(v for (co,ct,ca,b),v in a.items() if (co,ct,ca) == (o,tool,axis))
+                    partitions.setdefault(('axis',axis),{})[o,tool,None] = n-covered
+        # Refine only calls and outcomes by the actual event version. Other
+        # axes remain independent marginals; no duration/feature joint is made.
+        if 'version_outcomes' in period:
+            jt, ja = version_outcome_cells(period)
+            for (o,v,s,tool),n in jt.items():
+                partitions.setdefault(('joint-stream',s),{})[o,v,tool] = n
+                if s == 'metrics':
+                    covered = sum(x for (co,cv,ct,b),x in ja.items() if (co,cv,ct) == (o,v,tool))
+                    partitions.setdefault(('joint-outcomes',),{})[o,v,tool,None] = n-covered
+            for (o,v,tool,b),n in ja.items():
+                partitions.setdefault(('joint-outcomes',),{})[o,v,tool,b] = n
         surface = {}
         for partition, cells in partitions.items():
             total = sum(cells.values())
@@ -245,6 +314,10 @@ def completed_week_trends(data, start, end, now):
             denominator = sum(n for (co,cv,ce),n in c.items() if (co,ce) == (o,event))
             cells.append(f'{count}/{denominator} batches ({count/denominator:.1%})' if count is not None and denominator else 'not recorded')
         result['coverage'].append((o,v,event,*cells))
+    if 'version_outcomes' in data or 'version_outcomes' in previous:
+        joint_week_comparisons(previous, data, result)
+        return result
+    notes.append('Joint version/tool/outcome function not installed; only the established single-version same-stream comparison is available.')
     for o,s,tool in sorted(totals[0].keys() | totals[1].keys()):
         event = 'tool_metrics' if s == 'metrics' else 'tool_counts'
         versions = [{v for (co,v,e),n in c.items() if co == o and e == event and n > 0} for c in cohorts]
@@ -277,6 +350,40 @@ def completed_week_trends(data, start, end, now):
         notes.append('Comparison unavailable: version/instrumentation batches are missing in both weeks.')
     notes.append('Per-version WinRM reason/outcome comparison is unavailable from the existing independent marginals; no joint data is inferred.')
     return result
+
+
+def joint_week_comparisons(previous, data, result):
+    notes = result['notes']
+    periods = (previous, data)
+    if any(not p.get('version_outcomes') and p.get('tools') for p in periods):
+        notes.append('Call/rate comparison refused: joint version/tool/outcome aggregate unavailable or withheld; no marginal reconstruction is permitted.')
+        return
+    joints = [version_outcome_cells(p) for p in periods]
+    notes.append('Call cohorts use the same event-version/tool join in each week, with separate counts and metrics streams. Changed fleet batch shares do not change these version-specific denominators.')
+    for o,v,s,tool in sorted(joints[0][0].keys() | joints[1][0].keys()):
+        label = f'{tool} ({o}, {s}, version {v})'
+        if v == 'other':
+            notes.append(f'Call/rate comparison refused for {label}: unknown version bucket.')
+            continue
+        counts = [t.get((o,v,s,tool)) for t,a in joints]
+        if any(n is None or n <= 0 for n in counts):
+            notes.append(f'Call/rate comparison refused for {label}: zero or missing same-stream version-specific denominator; absence is not zero activity.')
+            continue
+        old, new = counts
+        result['calls'].append((o,s,tool,v,old,new,f'{new-old:+} ({(new-old)/old:+.1%})'))
+        if s != 'metrics': continue
+        outcomes = [{b:n for (co,cv,ct,b),n in a.items() if (co,cv,ct) == (o,v,tool)} for t,a in joints]
+        coverage = [sum(b.values()) for b in outcomes]
+        notes.append(f'Outcome instrumentation coverage for {label}: {coverage[0]}/{old} previous and {coverage[1]}/{new} current metric calls; coverage of all executed calls is unknown.')
+        if coverage != counts or any(not b for b in outcomes):
+            notes.append(f'Error/timeout comparison refused for {label}: partial or missing outcome instrumentation; a complete version-specific denominator is required.')
+            continue
+        if min(counts) < 100:
+            notes.append(f'Small sample for {label}: fewer than 100 recorded outcomes in at least one week; no statistical improvement claim.')
+        for bucket in ('error','timeout'):
+            a,b = [out.get(bucket,0) for out in outcomes]
+            result['rates'].append((o,tool,v,bucket,f'{a}/{old} ({a/old:.1%})',f'{b}/{new} ({b/new:.1%})',f'{100*(b/new-a/old):+.1f} pp'))
+    notes.append('Per-version WinRM reason/outcome comparison remains unavailable; independent reason marginals do not supply joint error-reason rates.')
 
 
 def report(data, start, end, now, config=None):
@@ -357,8 +464,13 @@ def report(data, start, end, now, config=None):
         if b in buckets: raise ValueError('duplicate metric bucket')
         buckets[b] = n
     for (o,t,a), buckets in distributions.items():
-        if (o,t) not in metrics or sum(buckets.values()) != metrics[o,t]:
+        covered = sum(buckets.values())
+        partial_joint = a == 'outcomes' and 'version_outcomes' in data
+        if ((o,t) not in metrics or covered > metrics[o,t] or
+                (covered != metrics[o,t] and not partial_joint)):
             raise ValueError('incomplete metric marginal')
+        if partial_joint and covered != metrics[o,t]:
+            if 0 < metrics[o,t]-covered < 10: policy_small = True
     reasons = {}
     for row in data.get('winrm_reasons', []):
         if not isinstance(row, (tuple, list)) or len(row) != 3:
@@ -397,6 +509,10 @@ def report(data, start, end, now, config=None):
                  (outcomes.get(b, 0) - known.get(b, 0) for b in set(outcomes) | set(known))):
             reason_unsafe = True
     trends = completed_week_trends(data, start, end, now)
+    # Retain observed partial cells in the detail distribution, but never rank
+    # them or supply reliability rates as though instrumentation were complete.
+    distributions = {k:b for k,b in distributions.items()
+                     if k[2] != 'outcomes' or sum(b.values()) == metrics[k[:2]]}
     small = (policy_small and not exact) or trends['unsafe']
     reason_unsafe = reason_unsafe or trends['unsafe']
     note('Weekly findings')

@@ -1,11 +1,13 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { runProgram } from '../src/program.js';
 import { runPowerShell } from '../src/powershell.js';
 import { ExecutionStore } from '../src/execution-lifecycle.js';
 import { spawnOwned } from '../src/owned-process.js';
+import { parseFixturePids, witnessFixturePid } from './fixture-pids.mjs';
 
 const exe = process.env.MCP_REQUIRED_ENGINE === 'powershell' ? 'powershell.exe' : 'pwsh';
 const callers = ['program', 'powershell', 'durable'] as const;
@@ -96,4 +98,38 @@ describe('owned process actual adapters', () => {
       });
     })));
   });
+
+  it.skipIf(process.platform !== 'win32')('does not spin on an exited root while an owned child is sleeping', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'owned-root-cpu-'));
+    const entry = join(base, 'tree.cjs'), marker = join(base, 'pids');
+    writeFileSync(entry, `const fs=require('node:fs');fs.appendFileSync(process.argv[2],process.pid+'\\n');
+if(!process.argv[3])require('node:child_process').spawn(process.execPath,[__filename,process.argv[2],'child'],{stdio:'ignore',detached:true,windowsHide:true}).unref();
+else setTimeout(()=>{},20000);`);
+    const child = spawnOwned(process.execPath, [entry, marker]);
+    child.stdout!.resume(); child.stderr!.resume();
+    const closed = new Promise(resolve => { child.once('close', resolve); child.once('error', resolve); });
+    const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    const cpu = () => {
+      const raw = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+        `[Console]::Write(([Diagnostics.Process]::GetProcessById(${child.pid}).TotalProcessorTime.TotalMilliseconds).ToString([Globalization.CultureInfo]::InvariantCulture))`], { windowsHide: true, encoding: 'utf8' }).trim();
+      const value = Number(raw);
+      expect(Number.isFinite(value), raw).toBe(true);
+      return value;
+    };
+    let pids: number[] = [];
+    try {
+      await expect.poll(() => {
+        try { pids = parseFixturePids(readFileSync(marker, 'utf8'), ['', '']) ?? []; return pids.length === 2 && !alive(pids[0]) && alive(pids[1]); }
+        catch { return false; }
+      }, { timeout: 15000, interval: 25 }).toBe(true);
+      witnessFixturePid(pids[1], marker);
+      // Exclude helper compilation/launch and measure only the orphan-wait phase.
+      const before = cpu(), started = Date.now();
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      const consumed = cpu() - before, elapsed = Date.now() - started;
+      console.log(`NATIVE_ORPHAN_WAIT cpuMs=${consumed} wallMs=${elapsed}`);
+      expect(consumed).toBeLessThan(300);
+    } finally { child.cancel(); await closed; rmSync(base, { recursive: true, force: true }); }
+    expect(child.treeTerminated).toBe(true);
+  }, 30000);
 });

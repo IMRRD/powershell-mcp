@@ -8,6 +8,7 @@ import { runProgram } from '../src/program.js';
 import { runPowerShell } from '../src/powershell.js';
 import { ExecutionStore } from '../src/execution-lifecycle.js';
 import { fromProcess } from '../src/result.js';
+import { parseFixturePids, witnessFixturePid } from './fixture-pids.mjs';
 
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -29,13 +30,13 @@ describe('lifecycle acceptance', () => {
       else pending = runPowerShell(`& '${process.execPath.replaceAll("'", "''")}' '${entry.replaceAll("'", "''")}' parent '${marker.replaceAll("'", "''")}'`, { signal: controller.signal, exe: process.env.MCP_REQUIRED_ENGINE === 'powershell' ? 'powershell.exe' : 'pwsh' });
       await expect.poll(() => {
         try {
-          const lines = readFileSync(marker, 'utf8').trim().split('\n');
-          pids = lines.map(s => Number(s.split(':')[1]));
-          return lines.map(s => s.split(':')[0]).sort();
-        } catch { return []; }
-      }, { timeout: 15000, interval: 25 }).toEqual(['child', 'grandchild', 'parent']);
+          pids = parseFixturePids(readFileSync(marker, 'utf8'), ['parent', 'child', 'grandchild']) ?? [];
+          return pids.length === 3;
+        } catch { return false; }
+      }, { timeout: 15000, interval: 25 }).toBe(true);
       expect(pids).toHaveLength(3);
       expect(pids.every(pid => Number.isInteger(pid) && pid > 0 && alive(pid))).toBe(true);
+      for (const pid of pids) witnessFixturePid(pid, marker);
       const started = Date.now();
       if (store && id) {
         store.cancel('owner', id);

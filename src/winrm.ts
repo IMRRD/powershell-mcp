@@ -6,6 +6,8 @@ import { captureDiagnostic, combineCaptures, OutputCollector } from "./output-co
 import { logStore } from "./full-logs.js";
 import { PARAMETER_BOOTSTRAP, validateParameters, INPUT_LIMIT } from "./typed-input.js";
 import { WINRM_TRANSPORT_REASONS, type WinRmReason } from './winrm-reason.js';
+import { validProtectedCredential, type ProtectedWinRmCredential } from './credentials.js';
+import { LOAD_PROTECTED_WINRM_CREDENTIAL, CLEANUP_PROTECTED_WINRM_CREDENTIAL } from './winrm-credential.js';
 
 export interface WinRmOptions {
   computerName: string;
@@ -13,6 +15,8 @@ export interface WinRmOptions {
   parameters?: Record<string, unknown>;
   username?: string;
   password?: string;
+  /** Internal, operator-resolved descriptor; never accepted as an MCP argument. */
+  protectedCredential?: ProtectedWinRmCredential;
   useSsl?: boolean;
   /** Negotiate (default) | Kerberos | Basic | CredSSP | Default */
   authentication?: "Default" | "Negotiate" | "Kerberos" | "Basic" | "CredSSP";
@@ -34,6 +38,8 @@ interface WinRmInput {
   parameters?: Record<string, unknown>;
   username?: string;
   password?: string;
+  protectedCredential?: ProtectedWinRmCredential;
+  deadlineAt?: number;
   useSsl?: boolean;
   authentication?: WinRmOptions["authentication"];
   outputLimit?: number;
@@ -72,16 +78,19 @@ $bounded = $producer.Snapshot()
   "if ($null -ne $payload.authentication -and [string]$payload.authentication -ne '') {",
   "  $invoke.Authentication = [string]$payload.authentication;",
   "}",
-  "if ($null -ne $payload.username -and [string]$payload.username -ne '') {",
+  "$reason = 'invoke_exception';",
+  "$credential = $null; $loadedCredentials = @(); $protectedReady = $false;",
+  "try {",
+  LOAD_PROTECTED_WINRM_CREDENTIAL,
+  "if ($null -eq $payload.protectedCredential -and $null -ne $payload.username -and [string]$payload.username -ne '') {",
   "  $plain = if ($null -eq $payload.password) { '' } else { [string]$payload.password };",
   "  $secure = ConvertTo-SecureString $plain -AsPlainText -Force;",
   "  $invoke.Credential = [System.Management.Automation.PSCredential]::new([string]$payload.username, $secure);",
   "  $payload.password = $null;",
   "  $plain = $null;",
   "}",
-  "$reason = 'invoke_exception';",
-  "try {",
-  "  $results = @(Invoke-Command @invoke -ErrorAction Stop);",
+  "  if ($null -ne $payload.deadlineAt -and [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -ge [double]$payload.deadlineAt) { throw 'Invocation deadline elapsed before dispatch; remote execution unverified' }",
+  "  $results = @(if ($null -ne $payload.protectedCredential) { Microsoft.PowerShell.Core\\Invoke-Command @invoke -ErrorAction Stop } else { Invoke-Command @invoke -ErrorAction Stop });",
   "  $reason = 'wrapper_result_invalid';",
   "  if ($results.Count -ne 1 -or $null -eq $results[0] -or $null -eq $results[0].PSObject.Properties['Output'] -or $null -eq $results[0].PSObject.Properties['RemoteError'] -or $null -eq $results[0].PSObject.Properties['ErrorRecords'] -or $null -eq $results[0].PSObject.Properties['ErrorRecordsTruncated'] -or $results[0].Output -isnot [string] -or $results[0].RemoteError -isnot [bool] -or $results[0].ErrorRecordsTruncated -isnot [bool]) { throw 'Invalid WinRM wrapper result' };",
   "  $result = $results[0];",
@@ -98,20 +107,25 @@ $bounded = $producer.Snapshot()
     }
   }
   $body = @{ status = 'transport_error'; reason = $reason; output = ([string]$_).Substring(0, [Math]::Min(512, ([string]$_).Length)) }
+} finally {
+${CLEANUP_PROTECTED_WINRM_CREDENTIAL}
 }`,
   "[Console]::Out.WriteLine('WINRM-RESULT:' + $payload.frame + ':' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Depth 6 -Compress))));",
 ].join("\n");
 
 export function buildWinRmInput(opts: WinRmOptions): string {
+  if (opts.protectedCredential !== undefined && (opts.password !== undefined || !validProtectedCredential(opts.protectedCredential) ||
+      opts.protectedCredential.host !== opts.computerName || opts.protectedCredential.port !== (opts.useSsl ? 5986 : 5985) || opts.protectedCredential.principal !== opts.username)) throw Error('Invalid protected credential scope or mixed authentication');
   const input: WinRmInput = {
     computerName: opts.computerName,
     command: opts.command,
     ...(opts.parameters !== undefined ? { parameters: opts.parameters } : {}),
   };
 
+  if (opts.protectedCredential !== undefined) input.protectedCredential = opts.protectedCredential;
   if (opts.username !== undefined) {
     input.username = opts.username;
-    input.password = opts.password ?? "";
+    if (opts.protectedCredential === undefined) input.password = opts.password ?? "";
   }
   if (opts.useSsl !== undefined) input.useSsl = opts.useSsl;
   if (opts.authentication !== undefined) input.authentication = opts.authentication;
@@ -128,12 +142,15 @@ export function buildWinRmInput(opts: WinRmOptions): string {
  * captured by the local hidden PowerShell host (no console window).
  */
 export function runWinRm(opts: WinRmOptions): Promise<PsResult> {
+  // Protected calls must not allocate a full-output log, even via internal callers.
+  if (opts.protectedCredential !== undefined) opts = { ...opts, logOutput: false };
   if (opts.parameters !== undefined) validateParameters(opts.parameters);
   if (Buffer.byteLength(JSON.stringify({ command: opts.command, parameters: opts.parameters }), "utf8") > INPUT_LIMIT) throw Error("input limit exceeded");
   const reservedLog = opts.logOutput ? logStore.create(opts.logQuotaBytes) : undefined;
   const frame = randomBytes(24).toString("hex");
   const input = JSON.parse(Buffer.from(buildWinRmInput(opts), "base64").toString("utf8"));
   input.frame = frame;
+  if (opts.protectedCredential !== undefined) input.deadlineAt = opts.dispatchDeadlineAt ?? Date.now() + (opts.timeoutMs ?? 120_000);
   const stdin = Buffer.from(JSON.stringify(input), "utf8").toString("base64");
   const maxOutputBytes = frameLimit(2 * payloadLimit(opts.maxOutputBytes ?? 1_048_576, opts.logOutput, opts.logQuotaBytes));
   const remaining = opts.dispatchDeadlineAt === undefined ? opts.timeoutMs ?? 120_000 : Math.ceil(opts.dispatchDeadlineAt - Date.now());

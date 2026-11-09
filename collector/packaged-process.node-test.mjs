@@ -1,12 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import cp from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 import * as fixture from './fixtures/packaged-process.mjs';
 import { runCommand, runClient, startProcess, stopProcess } from './fixtures/packaged-process.mjs';
+import { npm as artifactNpm } from '../test/artifact-npm.mjs';
+import { installEvidence } from './fixtures/packaged-evidence.mjs';
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(predicate, label, timeout = 3000) {
@@ -19,11 +21,77 @@ async function until(predicate, label, timeout = 3000) {
 function dead(pid) {
   try { process.kill(pid, 0); return false; } catch (e) { if (e.code === 'ESRCH') return true; throw e; }
 }
+async function terminated(pid) {
+  return dead(pid) || (process.platform === 'linux' && /\) Z /.test(await readFile(`/proc/${pid}/stat`, 'utf8').catch(() => '')));
+}
 async function deadTree(file) {
   const pids = (await readFile(file, 'utf8')).trim().split('\n').map(Number);
   assert.equal(pids.length, 2, 'both lifecycle process and descendant actually started');
   await until(() => pids.every(dead), 'descendant exit');
 }
+
+test('protected artifact npm abort stops the ready installer heartbeat before returning and preserves a sentinel', { timeout: 30000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'artifact-npm-abort-'));
+  const source = join(dir, 'source'), consumer = join(dir, 'consumer');
+  const ready = join(dir, 'ready'), heartbeat = join(dir, 'heartbeat'), sentinel = join(dir, 'sentinel');
+  const control = startProcess(process.execPath, ['-e', `setInterval(()=>require('node:fs').appendFileSync(${JSON.stringify(sentinel)},'1'),25)`], { stdio: 'ignore' });
+  const controller = new AbortController();
+  const signal = AbortSignal.any([t.signal, controller.signal]);
+  const evidenceFile = join(dir, 'safe.json'), evidence = installEvidence(evidenceFile);
+  let result, pid;
+  try {
+    await mkdir(source); await mkdir(consumer);
+    await writeFile(join(source, 'package.json'), JSON.stringify({ name: 'artifact-ownership-fixture', version: '1.0.0', scripts: { install: 'node installer.cjs' } }));
+    await writeFile(join(source, 'installer.cjs'), `require('node:child_process').spawn(process.execPath,[require('node:path').join(__dirname,'writer.cjs')],{stdio:'inherit'});`);
+    // Finite even on RED: wait for its natural exit in finally, never abandon it.
+    await writeFile(join(source, 'writer.cjs'), `const fs=require('node:fs');fs.appendFileSync(${JSON.stringify(heartbeat)},'1');fs.writeFileSync(${JSON.stringify(ready)},String(process.pid));const timer=setInterval(()=>fs.appendFileSync(${JSON.stringify(heartbeat)},'1'),25);setTimeout(()=>{clearInterval(timer);process.exit(0)},8000);`);
+    await writeFile(join(consumer, 'package.json'), '{"private":true}');
+    const packed = JSON.parse(await artifactNpm(['pack', source, '--json', '--pack-destination', dir], dir, signal))[0];
+    result = evidence.measure('install', () => artifactNpm(['install', '--offline', '--no-audit', '--no-fund', '--cache', join(dir, 'cache'), join(dir, packed.filename)], consumer, signal, evidence)).then(() => null, e => e);
+    await until(async () => {
+      try { pid = Number(await readFile(ready, 'utf8')); return pid > 0 && !dead(pid) && (await readFile(heartbeat)).length > 0 && (await readFile(sentinel)).length > 0; } catch { return false; }
+    }, 'installer ready marker and both heartbeats', 15000);
+    controller.abort(Error('controlled artifact cancellation'));
+    const error = await result;
+    assert.equal(error, controller.signal.reason, 'cancellation identity survives owned cleanup');
+    const before = (await readFile(heartbeat)).length, sentinelBefore = (await readFile(sentinel)).length;
+    await delay(300);
+    assert.equal((await readFile(heartbeat)).length, before, 'owned installer heartbeat stops before npm returns');
+    assert.ok((await readFile(sentinel)).length > sentinelBefore, 'unrelated sentinel keeps writing');
+    assert.equal(dead(control.child.pid), false, 'unrelated sentinel stays live');
+    assert.equal(await terminated(pid), true, 'owned installer exits before return');
+    await evidence.measure('directoryRemove', () => rm(consumer, { recursive: true, force: true }));
+    const snapshot = JSON.parse(await readFile(evidenceFile, 'utf8'));
+    for (const phase of ['install', 'commandWait']) assert.equal(snapshot.phases[phase].status, 'failed');
+    for (const phase of ['commandAbort', 'commandClose', 'directoryRemove']) assert.equal(snapshot.phases[phase].status, 'completed');
+    assert.ok((await readFile(evidenceFile)).length <= 8192);
+    assert.equal(JSON.stringify(snapshot).includes(error.message), false);
+  } finally {
+    controller.abort(Error('artifact regression scope closed'));
+    await result;
+    await stopProcess(control);
+    pid ??= Number(await readFile(ready, 'utf8').catch(() => '0'));
+    if (pid) await until(() => terminated(pid), 'finite RED installer exit', 10000);
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('protected artifact npm failure exposes no raw npm output in errors or public diagnostics', { timeout: 10000 }, async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'artifact-npm-private-'));
+  const secret = 'PRIVATE-npm-token-user-host-path';
+  const marker = join(dir, 'lifecycle-ran');
+  const originalError = console.error, output = [];
+  try {
+    await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'artifact-private-fixture', version: '1.0.0', scripts: { install: 'node install.cjs' } }));
+    await writeFile(join(dir, 'install.cjs'), `require('node:fs').writeFileSync(${JSON.stringify(marker)},'ran');console.error('${secret}');process.exit(7);`);
+    console.error = (...args) => output.push(args.join(' '));
+    const error = await artifactNpm(['install', '--offline', '--no-audit', '--no-fund'], dir, t.signal).then(() => null, e => e);
+    assert.match(error?.message ?? '', /artifact npm failed/);
+    assert.equal(await readFile(marker, 'utf8'), 'ran', 'failure must come from the real npm lifecycle');
+    assert.equal(error.message.includes(secret), false);
+    assert.equal(output.join('\n').includes(secret), false);
+  } finally { console.error = originalError; await rm(dir, { recursive: true, force: true }); }
+});
 
 // Real npm lifecycle scripts remain enabled, with no registry dependencies.
 test('blocked npm lifecycle is asynchronous, cancellable and kills its owned tree only', { timeout: 30000 }, async () => {
@@ -152,10 +220,10 @@ test('late proof rejection after cancellation is consumed', { timeout: 10000 }, 
 for (const code of [0, 7]) for (const inherit of [false, true]) {
   test(`root-first group cleanup on ${code === 0 ? 'natural close' : 'failure'} (inherited pipes=${inherit})`, { timeout: 15000 }, async t => {
     const dir = await mkdtemp(join(tmpdir(), 'packaged-root-first-'));
-    const file = join(dir, 'pid'), ready = join(dir, 'ready'), release = join(dir, 'release'); let pid, result;
+    const file = join(dir, 'pid'), ready = join(dir, 'ready'), release = join(dir, 'release'), heartbeat = join(dir, 'heartbeat'); let pid, result;
     const controller = new AbortController();
     const control = startProcess(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
-    const descendant = `require('node:fs').writeFileSync(${JSON.stringify(file)},String(process.pid));setInterval(()=>{},1000);`;
+    const descendant = `const fs=require('node:fs');fs.writeFileSync(${JSON.stringify(file)},String(process.pid));fs.appendFileSync(${JSON.stringify(heartbeat)},'1');setInterval(()=>fs.appendFileSync(${JSON.stringify(heartbeat)},'1'),25);`;
     // One existing case deliberately starts its descendant after the old 1s cutoff.
     const startupDelay = code === 7 && inherit ? 1200 : 0;
     const root = `const fs=require('node:fs');setTimeout(()=>{const c=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(descendant)}],{stdio:${inherit ? "'inherit'" : "'ignore'"}});c.unref();const t=setInterval(()=>{if(fs.existsSync(${JSON.stringify(file)})){fs.writeFileSync(${JSON.stringify(ready)},String(process.pid));clearInterval(t);const r=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)})){clearInterval(r);process.exit(${code})}},10)}},10)},${startupDelay});`;
@@ -168,7 +236,7 @@ for (const code of [0, 7]) for (const inherit of [false, true]) {
         try {
           pid = Number(await readFile(file, 'utf8'));
           const rootPid = Number(await readFile(ready, 'utf8'));
-          return pid > 0 && rootPid > 0 && !dead(pid) && !dead(rootPid);
+          return pid > 0 && rootPid > 0 && !dead(pid) && !dead(rootPid) && (await readFile(heartbeat)).length > 0;
         } catch { return false; }
       }, 'root and descendant ready', 5000);
       // Startup has its own bound. Exit and group cleanup share the original 1s proof.
@@ -178,7 +246,10 @@ for (const code of [0, 7]) for (const inherit of [false, true]) {
       if (code) assert.match(error?.message ?? '', /failed \(7\)/);
       else assert.equal(error, null);
       // Linux may retain an already killed orphan zombie until init reaps it.
-      await until(async () => dead(pid) || (process.platform === 'linux' && /\) Z /.test(await readFile(`/proc/${pid}/stat`, 'utf8').catch(() => ''))), 'ordinary descendant terminated', Math.max(1, deadline - Date.now()));
+      await until(() => terminated(pid), 'ordinary descendant terminated', Math.max(1, deadline - Date.now()));
+      const before = (await readFile(heartbeat)).length;
+      await delay(100);
+      assert.equal((await readFile(heartbeat)).length, before, 'root-first descendant heartbeat stops before return');
       assert.ok(Date.now() <= deadline, 'exit and descendant cleanup complete within 1000ms after readiness');
       assert.equal(dead(control.child.pid), false, 'unrelated owned group survives');
     } finally {
@@ -229,13 +300,13 @@ test('POSIX ownership remains live through command exit and is retired before re
   }
 });
 
-for (const kind of ['client', 'command']) {
+for (const kind of ['client', 'command', 'artifact npm']) {
   test(`${kind} primary failure survives termination-command rejection`, { timeout: 15000 }, async () => {
     // Real Windows failure path; POSIX group-kill injection exercises the same precedence.
     const originalExec = cp.execFile, originalKill = process.kill;
     const primary = Error(`original ${kind} failure`); let child, controller, commandResult;
     const dir = await mkdtemp(join(tmpdir(), 'packaged-cleanup-error-'));
-    const file = join(dir, 'pid');
+    const file = join(dir, 'pid'), parentFile = join(dir, 'parent');
     const inject = () => {
       if (process.platform === 'win32') {
         cp.execFile = (...args) => queueMicrotask(() => args.at(-1)(Error('injected taskkill failure')));
@@ -250,7 +321,14 @@ for (const kind of ['client', 'command']) {
         controller = new AbortController();
         // Deliberately publish readiness after the former 300 ms abort deadline.
         // Own the rejection immediately, including when bounded readiness fails.
-        commandResult = runCommand(process.execPath, ['-e', `setTimeout(()=>require('node:fs').writeFileSync(${JSON.stringify(file)},String(process.pid)),600);setInterval(()=>{},1000)`], { signal: controller.signal }).then(() => undefined, e => e);
+        const script = `setTimeout(()=>require('node:fs').writeFileSync(${JSON.stringify(file)},String(process.pid)),600);setInterval(()=>{},1000)`;
+        let running;
+        if (kind === 'artifact npm') {
+          await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'artifact-cleanup-fixture', version: '1.0.0', scripts: { install: 'node install.cjs' } }));
+          await writeFile(join(dir, 'install.cjs'), `require('node:fs').writeFileSync(${JSON.stringify(parentFile)},String(process.ppid));${script}`);
+          running = artifactNpm(['install', '--offline', '--no-audit', '--no-fund'], dir, controller.signal);
+        } else running = runCommand(process.execPath, ['-e', script], { signal: controller.signal });
+        commandResult = running.then(() => undefined, e => e);
         await until(async () => { try { return Number(await readFile(file, 'utf8')) > 0; } catch { return false; } }, 'delayed command started', 5000);
         inject();
         controller.abort(primary);
@@ -271,6 +349,13 @@ for (const kind of ['client', 'command']) {
       if (child && !dead(child.pid)) child.kill('SIGKILL');
       const pid = Number(await readFile(file, 'utf8').catch(() => '0'));
       if (pid && !dead(pid)) process.kill(pid, 'SIGKILL');
+      if (pid) await until(() => terminated(pid), 'fault-injection command exit');
+      if (kind === 'artifact npm') {
+        // The injected taskkill failure deliberately leaves the lifecycle shell.
+        // Drain its natural exit after stopping the installer before removing cwd.
+        const parent = Number(await readFile(parentFile, 'utf8').catch(() => '0'));
+        if (parent) await until(() => terminated(parent), 'fault-injection lifecycle shell exit');
+      }
       await rm(dir, { recursive: true, force: true });
     }
   });

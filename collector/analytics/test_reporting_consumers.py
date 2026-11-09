@@ -108,7 +108,8 @@ class ReportingConsumers(unittest.TestCase):
         for sig in ('adoption_utc(timestamptz,timestamptz)', 'user_proxy_utc(timestamptz,timestamptz)',
                     'delivery_health_utc(timestamptz,timestamptz,interval)',
                     'privacy_window_safe_utc(timestamptz,timestamptz)',
-                    'winrm_diagnostics_utc(timestamptz,timestamptz)'):
+                    'winrm_diagnostics_utc(timestamptz,timestamptz)',
+                    'tool_version_outcomes_utc(timestamptz,timestamptz)'):
             self.db.execute(f'GRANT EXECUTE ON FUNCTION {sig} TO {reader}')
         def connect(role, autocommit=True):
             return fixture.psycopg.connect(fixture.DSN, user=role, password=passwords[role], autocommit=autocommit,
@@ -322,7 +323,8 @@ class ReportingConsumers(unittest.TestCase):
         self.db.execute(f'GRANT SELECT ON dashboard_events,dashboard_tools,dashboard_metric_axes TO {role}')
         for sig in ('adoption_utc(timestamptz,timestamptz)', 'user_proxy_utc(timestamptz,timestamptz)',
                     'delivery_health_utc(timestamptz,timestamptz,interval)', 'privacy_window_safe_utc(timestamptz,timestamptz)',
-                    'winrm_diagnostics_utc(timestamptz,timestamptz)'):
+                    'winrm_diagnostics_utc(timestamptz,timestamptz)',
+                    'tool_version_outcomes_utc(timestamptz,timestamptz)'):
             self.db.execute(f'GRANT EXECUTE ON FUNCTION {sig} TO {role}')
         def cleanup():
             self.db.execute('RESET ROLE')

@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, utimesSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
@@ -28,15 +28,18 @@ async function childRun(script, install, home, url, observe, signal, evidence) {
     cwd: install, env: { ...process.env, USERPROFILE: home, HOME: home, POWERSHELL_MCP_NO_TELEMETRY: '0', POWERSHELL_MCP_TELEMETRY_URL: url },
   }, observe, { signal, measure: evidence.measure });
 }
-test('installed tarball persists through real collector ACK; wrong/lost ACK retains and replays', { timeout: 120000 }, async t => {
+let dir, home, install, file, evidence, acceptanceFinished;
+// Cold pack/install is a prerequisite, with its own original 120s command bound.
+// A failed or timed-out hook cancels the registered proof and fails the exact
+// discovery gate. Never let prerequisite work consume the product proof clock.
+before(async t => {
   const { signal } = t;
-  const dir = mkdtempSync(join(tmpdir(), 'packaged-telemetry-'));
-  const home = join(dir, 'home'), install = join(dir, 'install'), file = join(dir, 'records.jsonl');
+  dir = mkdtempSync(join(tmpdir(), 'packaged-telemetry-'));
+  home = join(dir, 'home'); install = join(dir, 'install'); file = join(dir, 'records.jsonl');
   const evidenceDirectory = join(repo, 'test-evidence');
   try { mkdirSync(evidenceDirectory, { recursive: true }); } catch {}
-  const evidence = installEvidence(join(evidenceDirectory, 'packaged-client.json'));
-  const acceptanceFinished = evidence.start('acceptance');
-  let collector, proxy, primary, proofFinished;
+  evidence = installEvidence(join(evidenceDirectory, 'packaged-client.json'));
+  acceptanceFinished = evidence.start('acceptance');
   try {
     mkdirSync(home); mkdirSync(install);
     const npm = process.platform === 'win32' ? resolve(process.execPath, '../node_modules/npm/bin/npm-cli.js') : 'npm';
@@ -48,6 +51,17 @@ test('installed tarball persists through real collector ACK; wrong/lost ACK reta
     try {
       await evidence.measure('install', () => runCommand(command, [...args, 'install', '--no-audit', '--no-fund', '--timing', '--logs-max=2', '--logs-dir', npmLogs, '--prefix', install, tar], { signal, label: 'npm install' }));
     } finally { evidence.npm(npmLogs); }
+  } catch (primary) {
+    // Hook cancellation still owns npm close and removal before setup settles.
+    try { await cleanup(primary, [() => evidence.measure('directoryRemove', () => rm(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }))]); }
+    finally { acceptanceFinished(true); }
+  }
+}, { timeout: 120000 });
+
+test('installed tarball persists through real collector ACK; wrong/lost ACK retains and replays', { timeout: 120000 }, async t => {
+  const { signal } = t;
+  let collector, proxy, primary, proofFinished;
+  try {
     proofFinished = evidence.start('proof');
     const module = pathToFileURL(resolve(install, 'node_modules/@imrrd/powershell-mcp/dist/telemetry.js')).href;
     const metric = `import {recordTool,flushCounters,telemetryStatus} from ${JSON.stringify(module)}; import {readdirSync} from 'node:fs'; import {join} from 'node:path'; import {homedir} from 'node:os'; recordTool('runtime_capabilities','success','lt100','inspection'); flushCounters('0.6.0'); const root=join(homedir(),'.powershell-mcp-telemetry'); const end=Date.now()+10000; do { if(Date.now()>end) throw Error('metric ACK deadline'); await new Promise(r=>setTimeout(r,20)); } while(telemetryStatus().outstanding || readdirSync(root).some(n=>/^slot-\\d{3}$/.test(n)));`;

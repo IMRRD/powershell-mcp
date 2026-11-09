@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, symlinkSync, renameSync, readdirSync, statSync, unlinkSync, truncateSync } from 'node:fs';
+import { parseFixturePids, witnessFixturePid } from './fixture-pids.mjs';
 import * as fs from 'node:fs';
 import { spawnSync, spawn } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -7,7 +8,9 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ExecutionStore } from '../src/execution-lifecycle.js';
 import * as owned from '../src/owned-process.js';
+import { waitForExecutionStdout } from './helpers/execution-readiness.js';
 
+const lifecycleTimeoutMs = 20_000;
 const fixture = async (fn: (root: string, drain: () => Promise<unknown>) => Promise<void>) => {
   const root = mkdtempSync(join(process.env.TMPDIR ?? tmpdir(), 'execution-test-'));
   // A recovered store's unknown state says nothing about the original owner's
@@ -37,7 +40,7 @@ const script = 'process.stdout.write("ready\\n")';
 const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
 // Windows ACL probes, process startup, polling, and fixture removal can each consume
 // seconds; keep one bounded budget for every sibling rather than Vitest's 5s default.
-const lifecycleIt = (name: string, fn: () => void | Promise<void>, timeout = 20_000) => it(name, fn, timeout);
+const lifecycleIt = (name: string, fn: () => void | Promise<void>, timeout = lifecycleTimeoutMs) => it(name, fn, timeout);
 
 describe('durable local executions', () => {
   for (const recovery of ['ambiguous', 'completed'] as const) lifecycleIt(recovery === 'ambiguous'
@@ -94,18 +97,22 @@ else { const run = request(); writeFileSync(join(root, 'recovered'), JSON.string
     expect(() => store.status('owner-b', first.id)).toThrow(/unknown/i);
     for (let i = 0; i < 100 && store.status('owner-a', first.id).state === 'running'; i++) await pause(20);
   }));
-  lifecycleIt('marks live cancellation unknown rather than asserting descendant termination', async () => fixture(async root => {
-    const store = new ExecutionStore(root);
-    const run = store.start('owner', 'cancel', process.execPath, ['-e', 'process.stdout.write("before-cancel");setTimeout(()=>{},5000)']);
-    for (let i = 0; i < 100 && store.status('owner', run.id).stdoutBytes === 0; i++) await pause(20);
-    expect(Buffer.from(store.read('owner', run.id, 'stdout', 0, 64).data, 'base64').toString()).toBe('before-cancel');
-    expect(store.cancel('owner', run.id).state).toBe('running');
-    {
-      for (let i = 0; i < 150 && store.status('owner', run.id).state === 'running'; i++) await pause(20);
+  lifecycleIt('marks live cancellation unknown rather than asserting descendant termination', async () => {
+    const deadline = performance.now() + lifecycleTimeoutMs;
+    await fixture(async (root, drain) => {
+      const store = new ExecutionStore(root);
+      const run = store.start('owner', 'cancel', process.execPath, ['-e', 'process.stdout.write("before-cancel");setTimeout(()=>{},5000)']);
+      const child = vi.mocked(owned.spawnOwned).mock.results[0].value as owned.OwnedChild;
+      // Share the existing test deadline with cancellation (6s) and the fixture's
+      // existing removal allowance (30 x 100ms); startup has no polling-turn cap.
+      await waitForExecutionStdout(store, 'owner', run.id, child, Buffer.byteLength('before-cancel'),
+        deadline - owned.CANCEL_BOUND_MS - 3000);
+      expect(Buffer.from(store.read('owner', run.id, 'stdout', 0, 64).data, 'base64').toString()).toBe('before-cancel');
+      expect(store.cancel('owner', run.id).state).toBe('running');
+      await drain();
       expect(store.status('owner', run.id).state).toBe('cancelled');
-    }
-    await pause(200);
-  }));
+    });
+  });
   lifecycleIt('does not relaunch a persisted ambiguous intent after restart', async () => fixture(async (root, drain) => {
     const first = new ExecutionStore(root);
     const run = first.start('owner-a', 'slow', process.execPath, ['-e', 'setTimeout(() => {}, 3000)']);
@@ -204,17 +211,18 @@ setInterval(()=>{},1000);`);
     try {
       const store = new ExecutionStore(root);
       const run = store.start('owner', 'tree', process.execPath, [tree, 'parent', marker]);
-      let lines: string[] = [];
+      let pids: number[] = [];
       for (let i = 0; i < 200; i++) {
-        try { lines = readFileSync(marker, 'utf8').trim().split('\n'); } catch { /* not launched */ }
-        if (lines.length === 3) break;
+        try { pids = parseFixturePids(readFileSync(marker, 'utf8'), ['parent', 'child', 'grandchild']) ?? []; } catch { /* not launched */ }
+        if (pids.length === 3) break;
         await pause(25);
       }
-      expect(lines.map(x => x.split(':')[0])).toEqual(['parent', 'child', 'grandchild']);
+      expect(pids).toHaveLength(3);
+      for (const pid of pids) witnessFixturePid(pid, marker);
       store.cancel('owner', run.id);
       for (let i = 0; i < 200 && store.status('owner', run.id).state === 'running'; i++) await pause(25);
       expect(store.status('owner', run.id).state).toBe('cancelled');
-      for (const line of lines) expect(() => process.kill(Number(line.split(':')[1]), 0)).toThrow();
+      for (const pid of pids) expect(() => process.kill(pid, 0)).toThrow();
       expect(() => process.kill(control.pid!, 0)).not.toThrow();
     } finally { control.kill(); }
   }), 20000);
@@ -282,6 +290,21 @@ setInterval(()=>{},1000);`);
     expect(failed.status('owner', second.id).stdoutBytes).toBe(0);
     expect(new ExecutionStore(failed.root).status('owner', second.id).state).toBe('unknown');
   }));
+  lifecycleIt('can cancel a still-owned execution after an output failure made its result unknown', async () => fixture(async root => {
+    const store = new ExecutionStore(root, () => { throw Error('synthetic output flush failure'); });
+    const run = store.start('owner', 'failed-live-output', process.execPath,
+      ['-e', 'process.stdout.write("x".repeat(262144));setTimeout(()=>{},20000)']);
+    const child = vi.mocked(owned.spawnOwned).mock.results[0].value as owned.OwnedChild;
+    const cancel = vi.spyOn(child, 'cancel');
+    await expect.poll(() => store.status('owner', run.id).state, { timeout: 15000 }).toBe('unknown');
+    store.cancel('owner', run.id); store.cancel('owner', run.id);
+    await expect.poll(() => child.treeTerminated, { timeout: 7500, interval: 25 }).toBe(true);
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(store.status('owner', run.id)).toMatchObject({ state: 'unknown', exitCode: null, outputComplete: false });
+    expect(store.start('owner', 'failed-live-output', process.execPath,
+      ['-e', 'process.stdout.write("x".repeat(262144));setTimeout(()=>{},20000)']).id).toBe(run.id);
+    expect(owned.spawnOwned).toHaveBeenCalledTimes(1);
+  }), 35000);
   lifecycleIt('bounds key-only orphan reservations', async () => fixture(async root => {
     const store = new ExecutionStore(root);
     for (let i = 0; i < 64; i++) writeFileSync(join(root, `${i.toString(16).padStart(64, '0')}.key`), '0'.repeat(48));

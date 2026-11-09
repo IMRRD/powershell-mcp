@@ -129,25 +129,25 @@ export async function stopProcess(proc) {
   ]);
 }
 
-function checked(result, label) {
-  if (result.error || result.code !== 0) throw Error(`${label} failed (${result.code ?? result.signal}): ${result.error?.message ?? result.stderr}`);
+function checked(result, label, reportOutput = true) {
+  if (result.error || result.code !== 0) throw Error(`${label} failed (${result.code ?? result.signal})${reportOutput ? `: ${result.error?.message ?? result.stderr}` : ''}`);
   return result.stdout;
 }
 
-export async function runCommand(command, args, { signal, timeout = 120000, label = 'setup', ...options } = {}) {
+export async function runCommand(command, args, { signal, timeout = 120000, label = 'setup', reportOutput = true, measure = (_, task) => task(), ...options } = {}) {
   signal?.throwIfAborted();
   const started = Date.now();
   console.log(`packaged fixture: ${label} started`);
   const proc = startProcess(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
   let primary;
   try {
-    return checked(await waitFor(proc.closed, { signal, timeout, label }), label);
+    return checked(await measure('commandWait', () => waitFor(proc.closed, { signal, timeout, label })), label, reportOutput);
   } catch (e) {
     primary = e;
-    console.error(`${label}: ${proc.output()}`);
+    if (reportOutput) console.error(`${label}: ${proc.output()}`);
   } finally {
     await cleanup(primary, [
-      () => stopProcess(proc),
+      () => measure('commandClose', () => stopProcess(proc)),
       () => console.log(`packaged fixture: ${label} cleanup finished after ${Date.now() - started}ms`),
     ]);
   }

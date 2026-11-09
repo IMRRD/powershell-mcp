@@ -3,7 +3,7 @@ import { pathToFileURL } from 'node:url';
 
 export const files = ['collector/ingest.node-test.mjs', 'collector/delivery.node-test.mjs', 'collector/report.node-test.mjs', 'collector/optout.node-test.mjs', 'collector/snapshot.node-test.mjs', 'collector/graceful-exit.node-test.mjs', 'collector/packaged-client.node-test.mjs', 'collector/packaged-evidence.node-test.mjs', 'collector/packaged-process.node-test.mjs', 'collector/instrumentation.node-test.mjs', 'scripts/check-collector-tests.node-test.mjs'];
 // The POSIX signal regression is registered only on platforms which deliver SIGTERM.
-export const expectedTests = process.platform === 'win32' ? 57 : 58;
+export const expectedTests = process.platform === 'win32' ? 60 : 61;
 export function validTap(result) {
   if (result.error || result.status !== 0) return false;
   const text = result.stdout ?? '';

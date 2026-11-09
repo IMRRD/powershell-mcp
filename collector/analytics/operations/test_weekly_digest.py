@@ -75,7 +75,9 @@ def result_rows(f):
             [(f['unknown_receipt_count'],)], f['receipts'], [(f['imported'],)], f.get('users', []), f.get('winrm_reasons', [])] + [
             f.get('cohorts', []), f.get('previous', {}).get('cohorts', []),
             f.get('previous', {}).get('tools', []), f.get('previous', {}).get('axes', []),
-            f.get('previous', {}).get('quality', []), f.get('previous', {}).get('receipts', [])]
+            f.get('previous', {}).get('quality', []), f.get('previous', {}).get('receipts', []),
+            [(True,True) if 'version_outcomes' in f else (False,False)]] + ([
+            f['version_outcomes'], f.get('previous',{}).get('version_outcomes',[])] if 'version_outcomes' in f else [])
 
 class DigestTests(unittest.TestCase):
     def test_non_equivalent_or_incomplete_previous_windows_refuse_trends_only(self):
@@ -362,12 +364,13 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(data.get('previous'), previous | {'start': START-dt.timedelta(days=7), 'end': START})
         self.assertEqual(data.get('cohorts'), f['cohorts'])
         self.assertEqual(sum('SET TRANSACTION' in s for s in conn.cur.sql), 1)
-        for sql, params in zip(conn.cur.sql[11:], conn.cur.params[11:]):
+        for sql, params in zip(conn.cur.sql[11:-1], conn.cur.params[11:-1]):
             self.assertEqual(params, (START, END) if 'version_bucket' in sql and params == (START, END)
                              else (START-dt.timedelta(days=7), START))
             self.assertIn('>= %s', sql)
             self.assertIn('< %s', sql)
             self.assertNotIn('telemetry_', sql)
+        self.assertIn('to_regprocedure', conn.cur.sql[-1])
 
     def test_first_screen_summary_distinguishes_error_volume_from_rate(self):
         f = fixture() | dict(

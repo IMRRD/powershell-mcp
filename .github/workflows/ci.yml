@@ -129,5 +129,6 @@ jobs:
           path: |
             vitest-report.json
             test-evidence/packaged-client.json
+            test-evidence/protected-artifact.json
           if-no-files-found: warn
           retention-days: 7
