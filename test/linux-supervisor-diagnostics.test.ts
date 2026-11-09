@@ -1,7 +1,9 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { expect, it } from 'vitest';
+import { supervisorSpawnDiagnostics } from './helpers/supervisor-spawn-diagnostics.js';
 
 const assembly = fileURLToPath(new URL('../dist/linux-supervisor.dll', import.meta.url));
 it('treats only ESRCH proc read races as disappeared processes and keeps other inspection failures closed', () => {
@@ -32,6 +34,7 @@ it('treats only ESRCH proc read races as disappeared processes and keeps other i
 // Exercise the shipped assembly on Windows too. Only synthetic failures; no
 // Linux emulation or changes to supervisor admission/termination behavior.
 for (const stream of ['stdout', 'stderr']) it(`emits a fixed ${stream} drain reason without exception details`, () => {
+  const started = performance.now();
   const result = spawnSync('pwsh', ['-NoProfile', '-NonInteractive', '-Command', `
     Add-Type -Path $env:MCP_TEST_SUPERVISOR
     Add-Type -TypeDefinition 'public class SecretStream : System.IO.MemoryStream { public override int Read(byte[] b,int o,int n) { throw new System.Exception("SECRET /private/path command credentials"); } }'
@@ -40,10 +43,14 @@ for (const stream of ['stdout', 'stderr']) it(`emits a fixed ${stream} drain rea
     $thread = [LinuxJob].GetMethod('Drain',$flags).Invoke($null,@([SecretStream]::new(),'${stream}'))
     if (!$thread.Join(5000)) { throw 'Test drain thread did not finish' }
   `], { env: { ...process.env, MCP_TEST_SUPERVISOR: assembly }, encoding: 'utf8', windowsHide: true, timeout: 15000 });
-  expect(result.status, result.stderr).toBe(0);
-  expect(result.stderr).toBe('');
+  const diagnostic = supervisorSpawnDiagnostics(result, performance.now() - started);
+  expect(result.status, diagnostic).toBe(0);
+  expect(result.stderr === '', diagnostic).toBe(true);
+  // Guard raw matchers with a fixed, exact-record classification so a failed
+  // probe cannot put its synthetic exception or script into the CI report.
+  expect(JSON.parse(diagnostic).stdoutRecord, diagnostic).toBe(`${stream}_drain_failed`);
+  expect(result.stdout.includes('SECRET'), diagnostic).toBe(false);
   expect(JSON.parse(result.stdout)).toEqual({ event: 'unknown', nonce: 'a'.repeat(48), reason: `${stream}_drain_failed` });
-  expect(result.stdout).not.toContain('SECRET');
 });
 
 it.skipIf(process.platform !== 'win32')('keeps unexpected supervisor exceptions unknown without leaking the command', () => {

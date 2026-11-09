@@ -153,7 +153,7 @@ export async function runCommand(command, args, { signal, timeout = 120000, labe
   }
 }
 
-export async function runClient(script, options, observe, { signal, releaseTimeout = 2000 } = {}) {
+export async function runClient(script, options, observe, { signal, releaseTimeout = 2000, measure = (_, task) => task() } = {}) {
   signal?.throwIfAborted();
   const held = `const released = new Promise(resolve => process.once('message', resolve));\n${script}\nprocess.send('ready'); await released; process.disconnect();`;
   const proc = startProcess(process.execPath, ['--input-type=module', '-e', held], { ...options, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
@@ -162,12 +162,12 @@ export async function runClient(script, options, observe, { signal, releaseTimeo
   const prematureExit = proc.closed.then(r => { throw Error(`fixture exited before proof (${r.code}): ${r.error?.message ?? r.stderr}`); });
   let primary;
   try {
-    await waitFor(Promise.race([once(proc.child, 'message'), prematureExit]), { signal: observing, label: 'client ready' });
-    await waitFor(Promise.race([Promise.resolve().then(() => observe(proc.child, observing)), prematureExit]), { signal: observing, label: 'client proof' });
+    await measure('clientReady', () => waitFor(Promise.race([once(proc.child, 'message'), prematureExit]), { signal: observing, label: 'client ready' }));
+    await measure('clientProof', () => waitFor(Promise.race([Promise.resolve().then(() => observe(proc.child, observing)), prematureExit]), { signal: observing, label: 'client proof' }));
     if (proc.child.connected) proc.child.send('release', () => {});
-    checked(await waitFor(proc.closed, { signal: observing, timeout: releaseTimeout, label: 'client release' }), 'client');
+    await measure('clientRelease', async () => checked(await waitFor(proc.closed, { signal: observing, timeout: releaseTimeout, label: 'client release' }), 'client'));
   } catch (e) { primary = e; } finally {
     local.abort(Error('client scope closed'));
-    await cleanup(primary, [() => stopProcess(proc)]);
+    await cleanup(primary, [() => measure('clientClose', () => stopProcess(proc))]);
   }
 }
