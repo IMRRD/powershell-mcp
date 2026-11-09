@@ -11,7 +11,11 @@ export async function npm(args, cwd, signal, evidence) {
     // Cancellation belongs to the waiter, never spawn: stopProcess must terminate
     // the still-owned tree before npm close or directory removal can win the race.
     // The caller's original shared 150s pack/install signal remains authoritative.
-    return await runCommand(process.execPath, [npmCli, ...args], {
+    // POSIX installations commonly keep npm under ../lib/node_modules, rather
+    // than beside node. Direct node test entrypoints also omit npm_execpath.
+    // Use PATH in that layout; never pass an absent CLI as Node's script argv.
+    if (!npmCli && process.platform === 'win32') throw Error('artifact npm CLI unavailable');
+    return await runCommand(npmCli ? process.execPath : 'npm', npmCli ? [npmCli, ...args] : args, {
       cwd, signal, timeout: 150000, label: 'artifact npm', reportOutput: false, measure: evidence?.measure,
     });
   } finally { signal?.removeEventListener('abort', aborted); }

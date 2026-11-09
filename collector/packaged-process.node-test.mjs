@@ -79,12 +79,15 @@ test('protected artifact npm abort stops the ready installer heartbeat before re
 test('protected artifact npm failure exposes no raw npm output in errors or public diagnostics', { timeout: 10000 }, async t => {
   const dir = await mkdtemp(join(tmpdir(), 'artifact-npm-private-'));
   const secret = 'PRIVATE-npm-token-user-host-path';
+  const marker = join(dir, 'lifecycle-ran');
   const originalError = console.error, output = [];
   try {
-    await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'artifact-private-fixture', version: '1.0.0', scripts: { install: `node -e "console.error('${secret}');process.exit(7)"` } }));
+    await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'artifact-private-fixture', version: '1.0.0', scripts: { install: 'node install.cjs' } }));
+    await writeFile(join(dir, 'install.cjs'), `require('node:fs').writeFileSync(${JSON.stringify(marker)},'ran');console.error('${secret}');process.exit(7);`);
     console.error = (...args) => output.push(args.join(' '));
     const error = await artifactNpm(['install', '--offline', '--no-audit', '--no-fund'], dir, t.signal).then(() => null, e => e);
     assert.match(error?.message ?? '', /artifact npm failed/);
+    assert.equal(await readFile(marker, 'utf8'), 'ran', 'failure must come from the real npm lifecycle');
     assert.equal(error.message.includes(secret), false);
     assert.equal(output.join('\n').includes(secret), false);
   } finally { console.error = originalError; await rm(dir, { recursive: true, force: true }); }
