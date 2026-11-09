@@ -6,6 +6,20 @@ suppression for cells below 10 and derivable complements. A suppressed result ha
 `withheld: true` and no numeric groups; this is not zero activity. There is no
 offline small-count override. See [the privacy/enrollment/migration contract](analytics/PRIVACY-ADOPTION.md).
 Internal in-memory aggregation tests inspect fixture counts separately from the CLI.
+The optional wire `metrics.winrm_exec.winrmReasons` axis is admitted only on
+WinRM, with the existing fourteen finite reasons, positive safe integers and a
+total equal to its outcome marginal. Unknown/private fields, malformed axes and
+reason axes on other tools refuse the whole report, including outside-window
+rows. Old reasonless events remain valid. In the aggregate output,
+`toolMetrics.winrm_exec.winrmReasons.uninstrumented` accounts only for metric
+calls lacking the axis; `unknown` remains a recorded reason. These labels never
+add calls or describe legacy count-stream coverage. Default whole-report
+suppression also checks reason cells, missing-axis complements and outcomes minus
+known reason groups. There is no private small-count override for this CLI.
+Reason/outcome mappings protect disclosure; they do not create a joint table or
+prove an underlying cause. Historical `_ip` remains ignored and never output;
+other unexpected envelope fields refuse rather than being copied to a report.
+
 The report consumes receipt-time-bounded enrollment entries as well as the legacy
 explicit classification arrays; keep exact protected registry snapshots with reports.
 

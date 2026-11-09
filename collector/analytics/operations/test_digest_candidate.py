@@ -87,10 +87,10 @@ class CandidateTests(unittest.TestCase):
                 script = '''
 import sys, datetime as dt, ssl, smtplib, os
 from unittest.mock import patch
-from test_weekly_digest import w, fixture, Conn, result_rows, END
+from test_weekly_digest import w, trend_fixture, Conn, result_rows, END
 root, port, cert = sys.argv[1:]
 now=END+dt.timedelta(hours=3)
-data=fixture() | {'imported':now}
+data=trend_fixture() | {'imported':now}
 real=smtplib.SMTP
 context=ssl.create_default_context(cafile=cert)
 def local(host, port_arg, **kw):
@@ -114,6 +114,11 @@ with patch.object(w.smtplib,'SMTP',side_effect=local), patch.object(w.ssl,'creat
                     self.assertEqual(len(received),1)
                     msg=BytesParser(policy=policy.default).parsebytes(received[0])
                     self.assertEqual(msg.get_content_type(),'multipart/alternative')
+                    for part in msg.iter_parts():
+                        body = part.get_content()
+                        for value in ('Completed-week comparison', 'Error and timeout comparison',
+                                      '40/200 (20.0%)', '40/400 (10.0%)', '-10.0 pp'):
+                            self.assertIn(value, body)
                     self.assertEqual(str(msg['To']),'isak@ialogics.com')
                     self.assertEqual(anchor.read_bytes(), b'original intent preserved\n')
                     accepted=list(state.glob('*.accepted'))

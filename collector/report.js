@@ -8,10 +8,12 @@ const tools = new Set(['run_powershell', 'list_services', 'get_service', 'contro
 const outcomes = new Set(['success','nonzero','error','timeout','cancelled','unknown']);
 const durations = new Set(['lt100','lt1000','lt10000','gte10000']);
 const features = new Set(['execution','inspection','remote','transfer','lifecycle','logs']);
+const winrmReasons = new Set(['completed','remote_script_error','authentication_exception','access_exception','remoting_transport_exception','invoke_exception','wrapper_result_invalid','frame_invalid','frame_body_invalid','local_host_error','local_launch_error','timeout','cancelled','unknown']);
 const validAxis = (axis, keys) => object(axis) && Object.keys(axis).length > 0 && Object.entries(axis).every(([key,n]) => keys.has(key) && Number.isSafeInteger(n) && n > 0);
 const validMetrics = metrics => object(metrics) && Object.keys(metrics).length > 0 && Object.keys(metrics).length <= tools.size && Object.entries(metrics).every(([name,row]) => {
-  if (!tools.has(name) || !object(row) || Object.keys(row).sort().join(',') !== 'durations,features,outcomes' || !validAxis(row.outcomes,outcomes) || !validAxis(row.durations,durations) || !validAxis(row.features,features)) return false;
+  if (!tools.has(name) || !object(row) || Object.keys(row).sort().join(',') !== (own(row, 'winrmReasons') ? 'durations,features,outcomes,winrmReasons' : 'durations,features,outcomes') || !validAxis(row.outcomes,outcomes) || !validAxis(row.durations,durations) || !validAxis(row.features,features)) return false;
   const sum = axis => Object.values(axis).reduce((a,b) => a+b, 0);
+  if (own(row, 'winrmReasons') && (name !== 'winrm_exec' || !validAxis(row.winrmReasons, winrmReasons) || sum(row.winrmReasons) !== sum(row.outcomes))) return false;
   return Number.isSafeInteger(sum(row.outcomes)) && sum(row.outcomes) === sum(row.durations) && sum(row.outcomes) === sum(row.features);
 });
 const own = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
@@ -60,10 +62,14 @@ export function aggregate(text, classification, from, to) {
     let r;
     try { r = JSON.parse(rows[i]); } catch { throw Error('invalid row'); }
     if (!object(r) || typeof r.hostId !== 'string' || !r.hostId || r.hostId.length > 256 || !['startup', 'tool_counts', 'tool_metrics'].includes(r.event) || !validDate(r.ts) || typeof r.version !== 'string' || r.version.length > 256 || !['win32', 'linux', 'darwin', 'freebsd', 'openbsd', 'sunos', 'aix', 'android'].includes(r.os) || (own(r, '_receivedAt') && !validDate(r._receivedAt))) throw Error('invalid row');
+    const allowed = ['hostId', 'event', 'ts', 'version', 'os', 'eventId', 'schemaVersion', 'userId', 'cohort', '_receivedAt', '_ip'];
+    if (r.event === 'tool_metrics') allowed.push('metrics');
+    if (r.event === 'tool_counts') allowed.push('counts');
+    if (Object.keys(r).some(k => !allowed.includes(k))) throw Error('invalid row fields');
     if (r.event === 'tool_metrics' && (r.schemaVersion !== 2 || !validMetrics(r.metrics))) throw Error('invalid metrics');
     if (r.event === 'tool_counts' && (!object(r.counts) || !Object.keys(r.counts).length || Object.entries(r.counts).some(([name, count]) => !tools.has(name) || !Number.isSafeInteger(count) || count <= 0))) throw Error('invalid counts');
-    if (r.ts < from || r.ts >= to) continue;
     if (own(r, 'userId') && (typeof r.userId !== 'string' || !userToken.test(r.userId)) || own(r, 'cohort') && r.cohort !== 'external_self_declared') throw Error('invalid privacy fields');
+    if (r.ts < from || r.ts >= to) continue;
     let bucket = classification.internal.has(r.hostId) ? 'internal' : classification.test.has(r.hostId) ? 'test' : 'unknownOrigin';
     const entry = classification.enrollments.get(r.hostId);
     if (entry && validDate(r._receivedAt) && r._receivedAt >= entry.fromReceiptUtc) bucket = entry.cohort;
@@ -79,11 +85,17 @@ export function aggregate(text, classification, from, to) {
       // Independent aggregate; do not double count versioned metrics as legacy calls.
       for (const [name, row] of Object.entries(r.metrics)) {
         const target = groups[bucket].toolMetrics[name] ??= { outcomes: Object.create(null), durations: Object.create(null), features: Object.create(null) };
-        for (const axis of ['outcomes','durations','features']) for (const [label, count] of Object.entries(row[axis])) {
+        const axes = { ...row };
+        if (name === 'winrm_exec') {
+          target.winrmReasons ??= Object.create(null);
+          axes.winrmReasons ??= { uninstrumented: Object.values(row.outcomes).reduce((a,b) => a+b, 0) };
+        }
+        for (const [axis, values] of Object.entries(axes)) for (const [label, count] of Object.entries(values)) {
           const next = (target[axis][label] ?? 0) + count;
           if (!Number.isSafeInteger(next)) throw Error('metric overflow');
           target[axis][label] = next;
         }
+        if (!Number.isSafeInteger(Object.values(target.outcomes).reduce((a,b) => a+b, 0))) throw Error('metric overflow');
       }
     } else {
       h.active = true;
@@ -111,7 +123,18 @@ export function suppress(report) {
   const small = n => n > 0 && n < 10;
   const partition = values => values.some(small) || values.some(n => small(values.reduce((a,b) => a+b,0)-n));
   for (const g of Object.values(report.groups)) {
-    if ([g.observedInstallations,g.activeInstallations,g.startupOnlyInstallations,g.observedInstallations-g.activeInstallations,g.observedInstallations-g.startupOnlyInstallations,g.observedInstallations-g.activeInstallations-g.startupOnlyInstallations,g.coveredInstallations,g.unknownUserInstallations,g.userProxies,g.coveredInstallations-g.userProxies].some(small) || [g.versions,g.os,g.toolCounts].some(p => partition(Object.values(p))) || Object.values(g.toolMetrics).some(m => Object.values(m).some(p => partition(Object.values(p))))) {
+    const winrm = g.toolMetrics.winrm_exec;
+    const known = {};
+    for (const [reason, n] of Object.entries(winrm?.winrmReasons ?? {})) {
+      if (reason === 'unknown' || reason === 'uninstrumented') continue;
+      const outcome = reason === 'completed' ? 'success' : ['timeout','cancelled'].includes(reason) ? reason : 'error';
+      known[outcome] = (known[outcome] ?? 0) + n;
+    }
+    const unsafeReasonComplement = winrm && Object.keys({...winrm.outcomes, ...known}).some(b => {
+      const remainder = (winrm.outcomes[b] ?? 0) - (known[b] ?? 0);
+      return remainder < 0 || small(remainder);
+    });
+    if (unsafeReasonComplement || [g.observedInstallations,g.activeInstallations,g.startupOnlyInstallations,g.observedInstallations-g.activeInstallations,g.observedInstallations-g.startupOnlyInstallations,g.observedInstallations-g.activeInstallations-g.startupOnlyInstallations,g.coveredInstallations,g.unknownUserInstallations,g.userProxies,g.coveredInstallations-g.userProxies].some(small) || [g.versions,g.os,g.toolCounts].some(p => partition(Object.values(p))) || Object.values(g.toolMetrics).some(m => Object.values(m).some(p => partition(Object.values(p))))) {
       return { windowUtc: report.windowUtc, withheld: true, note: 'Counts withheld: small cells or derivable complements; no zero implied. External is self-declared. User proxies are optional pseudonyms, not verified humans.' };
     }
   }

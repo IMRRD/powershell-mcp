@@ -4,6 +4,18 @@ Issue 64 adds [bounded WinRM diagnostics](WINRM-DIAGNOSTICS.md) and the repeatab
 `migrate_issue64.sql` migration after issue 63. Existing report axes stay compatible;
 diagnostic coverage and reasons use a separate restricted aggregate function.
 
+Issue 75's consumer candidate queries that function in the weekly digest and in
+both dashboard definitions. The reason table is a separate marginal, never a
+join to outcome rows or an extra call total. `unknown` means recorded without
+specific evidence; `uninstrumented` means metric calls without a reason axis.
+Empty results mean unavailable or withheld, never zero. Existing issue64 SQL and
+restricted function grants are prerequisites; no schema or grant changes are
+part of this candidate. The overview builder preserves half-open UTC windows and
+default privacy guards on regeneration. Existing dashboard UIDs and datasource
+bindings remain unchanged. These files are review candidates, not installed or
+frontend acceptance; the parent owns promotion in the established organization.
+See [weekly report limits and remaining work](operations/WEEKLY-DIGEST-review.md).
+
 Issue 63 extends this contract with an additive migration, protected future-receipt
 enrollment, explicit self-declared external/conflict cohorts and optional user-token
 coverage. Read [PRIVACY-ADOPTION.md](PRIVACY-ADOPTION.md) before operating the new

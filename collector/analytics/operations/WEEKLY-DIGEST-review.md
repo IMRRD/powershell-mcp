@@ -1,5 +1,163 @@
 # Issue 43: readable private digest candidate
 
+Issue 75 adds a bounded consumer repair, developed against synthetic fixtures.
+The first screen now distinguishes observed, active and startup-only installations
+by origin, names the largest recorded error volume and highest error proportion
+independently, and offers at most three evidence-backed review actions. Error,
+nonzero, timeout, cancellation and unknown remain separate in the detail table.
+Outcome coverage describes complete metric tool/origin marginals, not the share
+of all executed calls. Groups with fewer than 100 recorded outcomes are labelled
+small samples; this is a descriptive caution, not a statistical confidence bound.
+
+The same read-only repeatable-read snapshot now requests
+`winrm_diagnostics_utc(start,end)` separately from general metric axes. Both
+alternatives render only validated finite reasons and same-window reason coverage
+when disclosed. `unknown` is instrumented without a specific reason;
+`uninstrumented` is a missing reason axis. Reasons are independent marginals,
+never extra calls or error-specific rates, and observed boundaries do not prove
+authentication, permission, transport or script root causes. Empty results are
+unavailable or withheld; the renderer never reconstructs suppressed reasons from
+other totals. Diagnostic small-cell, missing-axis and outcome-minus-known-reason
+complement protection applies even with private small-count permission. The
+existing audience opt-in continues to govern other private aggregate counts.
+
+The trend correction queries adjacent complete Monday-to-Monday UTC weeks and
+`(origin, version_bucket, event)` batch counts in the **same** read-only
+repeatable-read transaction, using half-open windows. Prior-week hourly receipts
+and valid timestamp quality are required for comparison. Prior-week health
+refusal preserves the current report's existing health admission. Both MIME
+alternatives compare actual version/instrumentation batch coverage and flag
+changed version shares, distinguishing batches from calls.
+
+Call changes and error/timeout percentage-point changes require positive
+same-stream tool/origin denominators and the **same single known client version
+within that origin/stream** in both weeks. This permits tool/version attribution
+without joining the versionless tool/axis views to event rows. Legacy and metric
+streams can qualify independently at different versions. Matching multi-version
+batch shares do **not** establish matching per-tool call shares; such call/rate
+comparisons refuse even with stable batch mix. `other`, missing cohorts,
+missing/zero denominators and missing outcome axes have explicit refusals.
+Complete outcome marginals supply error/timeout denominators; absent outcomes
+never become zero. Samples below 100 are flagged. Changes remain descriptive:
+batching, workload, selection and late arrivals preclude statistical or causal
+improvement claims. A later reconstruction may include late arrivals; this does
+not freeze historical delivery or establish complete upstream collection.
+
+Before findings render, cells, partition complements, outcome-coverage
+complements and absolute cross-week differences are checked. Composite changes
+are checked for every union of cells within six maximal disjoint partitions:
+all `(origin,version,event)` batch cells; `(origin,tool)` calls separately for
+each of the counts and metrics streams; and `(origin,tool,bucket)` metric calls
+separately for each outcome, duration and feature axis. Each metric axis spans
+all tools and origins, with a whole-tool cell for groups missing that axis.
+Thus local tool/origin totals, their remainders and cross-tool same-axis unions
+are covered without adding overlapping streams or independent axes.
+This includes `total - error - timeout`, failure totals
+(`nonzero + error + timeout`) and their remainders, rather than just one-cell
+complements. Source cells are nonnegative; once each endpoint cell is zero or at
+least ten, their unions and complements also meet that endpoint threshold. The
+cross-week guard checks signed sums of cell changes, including unions whose
+individual changes cancel to a positive absolute value below ten.
+
+The signed subset search is bounded per partition: at most 1,024 distinct cells
+across both windows, 128 bits per cell change, 8,192 retained partial sums and
+262,144 partial-sum expansions. Candidate sets contain at most twice the
+retained-state limit. Exceeding any bound withholds comparison and current
+numeric detail for both audiences; it never admits an unchecked partition.
+GCD, same-sign and remaining-sum pruning retain exact admission within budget.
+Large safe partitions may therefore be conservatively withheld. These are
+search bounds, not database query-result or end-to-end memory/time limits.
+
+A positive value below ten withholds both
+windows' numeric surfaces, including current findings/details that would reveal
+a suppressed delta. The private small-count opt-in does not bypass new trend
+suppression. Existing audience validation and SQL diagnostic suppression retain
+their behavior. No installation linkage across weeks is inferred. This is
+conservative partition protection, not a general differential-privacy guarantee
+across unlimited independently retained reports. It does not establish privacy
+for arbitrary relations between different partitions or link installations
+across weeks. Optional-user and installation complements and the independent
+WinRM reason/outcome guards retain their existing scope; no joint distribution
+is inferred from overlapping marginals.
+
+The privacy correction is exercised through the actual JSONL importer and
+restricted PostgreSQL queries, then the sender entrypoint and both serialized
+MIME alternatives using a memory sink. The reproduced remainder is 120 versus
+121, despite all source cells, individual changes and one-cell complement
+changes meeting ten. Default and approved private output both withhold it;
+a remainder of 120 versus 130 still publishes useful comparisons. Unit MIME
+regressions also cover zero and nine, three-cell failure complements, other
+metric axes, tool partitions and version batches. Independent review of the
+replacement exact tree remains required before any PR.
+
+The residual cross-tool regression uses actual non-superuser importer and reader
+LOGIN connections: two metric tools each record 1,000 calls per week, with
+errors 100 + 20 versus 79 + 42. All local changes pass ten, but the same-axis
+union is 120 versus 121. Both serialized MIME parts and both audiences withhold
+comparison endpoints and reconstructing current findings/detail. Zero and ten
+union changes remain useful. Sibling controls cover origins, other axes,
+missing instrumentation, the joint event-batch table, search exhaustion and
+separation of overlapping streams/independent axes.
+
+Mixed-version per-tool comparisons and per-version WinRM reasons remain an
+explicit parent SQL dependency described below. The implemented batch and
+eligible same-stream comparisons are substantive supported comparisons, not an
+unconditional unavailable claim. Release/deployment status remains unavailable.
+Remaining parent acceptance includes independent review, real restricted preview,
+installed dashboard/frontend acceptance and hosted CI/release gates. No timer,
+recipient, transport, configuration or original intent ledger is changed.
+
+### Minimal restricted SQL dependency (proposal only; not installed)
+
+For mixed-version tool comparisons, add exactly one restricted function after
+parent review: `tool_version_outcomes_utc(from_utc timestamptz, to_utc timestamptz)`
+returning `(origin text, version_bucket text, stream text, tool text, axis text,
+bucket text, calls numeric)`. Its aggregate core is:
+
+```sql
+WITH e AS (
+  SELECT event_key, origin, version_bucket FROM telemetry_event
+  WHERE event_at >= from_utc AND event_at < to_utc
+), cells AS (
+  SELECT e.origin, e.version_bucket, t.stream, t.tool,
+         'calls'::text AS axis, 'total'::text AS bucket, sum(t.calls)::numeric AS calls
+  FROM e JOIN telemetry_tool t USING (event_key)
+  GROUP BY e.origin, e.version_bucket, t.stream, t.tool
+  UNION ALL
+  SELECT e.origin, e.version_bucket, 'metrics', a.tool, 'outcomes', a.bucket,
+         sum(a.calls)::numeric
+  FROM e JOIN telemetry_metric_axis a USING (event_key)
+  WHERE a.axis = 'outcomes'
+  GROUP BY e.origin, e.version_bucket, a.tool, a.bucket
+)
+SELECT * FROM cells;
+```
+
+That core is **not** safe as a standalone grant. The parent-owned function must
+be `STABLE SECURITY DEFINER SET search_path = public, pg_temp`, revoke PUBLIC
+execution, and admit only `0 < to_utc-from_utc <= interval '31 days'` with the
+existing `privacy_window_safe_utc` gate. Before returning **any** row, suppress
+the entire result on a negative or positive-below-ten cell/complement in:
+`(origin,stream,tool,axis)` partitioned by `(version_bucket,bucket)`;
+`(origin,version_bucket,stream,axis,bucket)` partitioned by tool; and
+`(origin,version_bucket,tool)` call total minus summed outcome coverage. Retain
+all six finite outcome buckets as separate marginals and validate totals; emit
+no invented zero outcomes for absent instrumentation. Consumer admission must
+check version-specific complete outcome coverage and the two-window complement
+guard before publishing. Grant only function execution to the existing restricted
+reporting role after parent review; never grant raw tables, keys or payloads.
+
+This is the exact minimal new grouping required; extending the identifier-free
+views cannot safely recover the missing join. A version-specific reason marginal
+would separately require a sibling restricted function
+`winrm_diagnostics_version_utc(from_utc timestamptz, to_utc timestamptz)` returning
+`(origin text, version_bucket text, reason text, calls numeric)`, retaining the
+existing `winrm_diagnostics_utc` consumer contract and all its current
+reason/outcome complement checks at the new grain. Neither proposal creates a
+reason/outcome **joint** distribution: no conditional per-version error-reason
+rate is supported by these stored independent marginals. No migration, schema,
+grant or deployment change is included in this correction.
+
 This source is prepared for parent review. No deployment, timer activation, production authentication or mail submission is performed here. The operator confirmed receipt of the original 12–19 October 2026 UTC email. Preserve its intent permanently; presentation changes never authorize a resend. Issue 43 remains open until an actual timer-triggered delivery is confirmed separately from the manual one-shot.
 
 The report uses the existing restricted PostgreSQL views and repeatable-read, read-only snapshot. It renders matching plain-text and HTML alternatives, readable UTC dates, separate legacy-count and metric-stream totals, per-tool bars, installation proxies and startup-only segmentation, failure numerators and compatible outcome denominators, cancellations, unknown outcomes, and recorded duration buckets. Investigation rows rank observed failures and slow operations without asserting root causes. Missing outcomes are unavailable, including weeks preceding instrumentation; no synthetic zeros, averages or percentiles fill missing evidence. HTML escapes dynamic values and has no remote assets or tracking.

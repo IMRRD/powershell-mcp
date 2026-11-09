@@ -6,6 +6,7 @@ from decimal import Decimal
 import hashlib
 import html
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -19,8 +20,15 @@ RECIPIENT = 'isak@ialogics.com'
 # Same finite dimensions as the client/importer contract; never echo arbitrary SQL labels.
 TOOLS = {'run_powershell', 'list_services', 'get_service', 'control_service', 'system_info', 'ssh_exec', 'winrm_exec', 'sftp_upload', 'sftp_download', 'run_program', 'runtime_capabilities', 'start_execution', 'execution_status', 'read_execution_output', 'cancel_execution', 'read_output_log', 'delete_output_log', 'start_remote_batch', 'remote_batch_status', 'cancel_remote_batch'}
 AXES = {'outcomes': {'success', 'nonzero', 'error', 'timeout', 'cancelled', 'unknown'}, 'durations': {'lt100', 'lt1000', 'lt10000', 'gte10000'}, 'features': {'execution', 'inspection', 'remote', 'transfer', 'lifecycle', 'logs'}}
+WINRM_REASONS = {'completed', 'remote_script_error', 'authentication_exception', 'access_exception', 'remoting_transport_exception', 'invoke_exception', 'wrapper_result_invalid', 'frame_invalid', 'frame_body_invalid', 'local_host_error', 'local_launch_error', 'timeout', 'cancelled', 'unknown', 'uninstrumented'}
 DURATION_LABELS = {'lt100': 'under 100 ms', 'lt1000': '100–999 ms', 'lt10000': '1–9.999 seconds', 'gte10000': '10 seconds or more'}
 ADDRESS = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\Z")
+# Hard limits on each of the six disjoint partitions below. Exhaustion is a
+# privacy refusal, including for an approved private audience.
+COMPOSITE_MAX_CELLS = 1024
+COMPOSITE_MAX_BITS = 128
+COMPOSITE_MAX_STATES = 8192
+COMPOSITE_MAX_WORK = 262144
 
 
 def private_counts(config):
@@ -65,7 +73,23 @@ def aggregates(connection, start, end):
         imported = cur.fetchone()[0]
         cur.execute('SELECT * FROM user_proxy_utc(%s,%s)', (start, end))
         users = cur.fetchall()
-    return dict(adoption=adoption, users=users, events=events, tools=tools, axes=axes, quality=quality, unknown_receipt_count=unknown_receipt_count, receipts=receipts, imported=imported)
+        cur.execute('SELECT origin, reason, calls FROM winrm_diagnostics_utc(%s,%s)', (start, end))
+        winrm_reasons = cur.fetchall()
+        cohort_sql = 'SELECT origin,version_bucket,event,count(*) FROM dashboard_events WHERE event_at >= %s AND event_at < %s GROUP BY origin,version_bucket,event'
+        cur.execute(cohort_sql, (start, end))
+        cohorts = cur.fetchall()
+        prior_start = start - dt.timedelta(days=7)
+        cur.execute(cohort_sql, (prior_start, start))
+        previous = dict(start=prior_start, end=start, cohorts=cur.fetchall())
+        cur.execute('SELECT origin,stream,tool,sum(calls) FROM dashboard_tools WHERE event_at >= %s AND event_at < %s GROUP BY origin,stream,tool', (prior_start, start))
+        previous['tools'] = cur.fetchall()
+        cur.execute('SELECT origin,tool,axis,bucket,sum(calls) FROM dashboard_metric_axes WHERE event_at >= %s AND event_at < %s GROUP BY origin,tool,axis,bucket', (prior_start, start))
+        previous['axes'] = cur.fetchall()
+        cur.execute('SELECT event_time_quality,receipt_time_quality,count(*) FROM dashboard_events WHERE received_at >= %s AND received_at < %s GROUP BY event_time_quality,receipt_time_quality', (prior_start, start))
+        previous['quality'] = cur.fetchall()
+        cur.execute("SELECT date_trunc('hour',received_at,'UTC'),count(*) FROM dashboard_events WHERE received_at >= %s AND received_at < %s GROUP BY 1 ORDER BY 1", (prior_start, start))
+        previous['receipts'] = cur.fetchall()
+    return dict(adoption=adoption, users=users, events=events, tools=tools, axes=axes, winrm_reasons=winrm_reasons, quality=quality, unknown_receipt_count=unknown_receipt_count, receipts=receipts, imported=imported, cohorts=cohorts, previous=previous)
 
 
 def render(data, start, end, now, config=None):
@@ -74,6 +98,185 @@ def render(data, start, end, now, config=None):
 
 def render_html(data, start, end, now, config=None):
     return report(data, start, end, now, config)[1]
+
+
+def small_composite_change(before, after):
+    """Refuse unsafe unions or partitions whose safety exceeds the search budget."""
+    if max(len(before), len(after)) > COMPOSITE_MAX_CELLS:
+        return True
+    keys = before.keys() | after.keys()
+    if len(keys) > COMPOSITE_MAX_CELLS:
+        return True
+    changes = [int(after.get(k, 0) - before.get(k, 0)) for k in keys]
+    if any(abs(n).bit_length() > COMPOSITE_MAX_BITS for n in changes):
+        return True
+    changes = sorted((n for n in changes if n), key=lambda n: (abs(n), n), reverse=True)
+    if any(0 < abs(n) < 10 for n in changes):
+        return True
+    if (not changes or min(changes) > 0 or max(changes) < 0 or math.gcd(*changes) >= 10):
+        return False
+    # Use signed changes, not endpoint subsets: each union's change is the sum
+    # of its cells' changes. Zero changes do not add states. Discard partial sums
+    # that the remaining cells cannot bring into [-9, 9]. This includes the
+    # complement of every union without materializing all endpoint surfaces.
+    lower = sum(n for n in changes if n < 0)
+    upper = sum(n for n in changes if n > 0)
+    reachable = {0}
+    work = 0
+    for change in changes:
+        work += len(reachable)
+        if work > COMPOSITE_MAX_WORK:
+            return True
+        lower -= min(change, 0)
+        upper -= max(change, 0)
+        candidates = reachable | {n + change for n in reachable}
+        if any(0 < abs(n) < 10 for n in candidates):
+            return True
+        reachable = {n for n in candidates if n + lower <= 9 and n + upper >= -9}
+        if len(reachable) > COMPOSITE_MAX_STATES:
+            return True
+    return False
+
+
+def completed_week_trends(data, start, end, now):
+    """Compare observable streams only; event versions are not tool-version joins."""
+    result = dict(notes=[], coverage=[], calls=[], rates=[], unsafe=False)
+    notes = result['notes']
+    previous = data.get('previous')
+    if previous is None:
+        notes.append('Comparison unavailable: equivalent completed UTC weeks require prior-week version/instrumentation coverage.')
+        return result
+    prior_start = start - dt.timedelta(days=7)
+    if ((start, end) != closed_week(now) or previous.get('start') != prior_start or
+            previous.get('end') != start):
+        notes.append('Comparison refused: windows must be adjacent complete Monday-to-Monday UTC weeks.')
+        return result
+    notes.append(f'Completed-week comparison: {prior_start:%d %b %Y} to {start:%d %b %Y} versus {start:%d %b %Y} to {end:%d %b %Y} UTC; each window start inclusive and end exclusive; same repeatable-read snapshot.')
+    notes.append('Rates and changes are descriptive, not evidence of improvement or a deployed fix. Calls within batches may be dependent; workload and late arrivals can revise event-time totals. Receipt coverage does not prove complete upstream delivery.')
+    hours = {h for h, n in previous.get('receipts', []) if n > 0}
+    quality = previous.get('quality', [])
+    if (any(prior_start + dt.timedelta(hours=i) not in hours for i in range(168)) or
+            not quality or any(a != 'valid' or b != 'valid' for a, b, n in quality if n)):
+        notes.append('Comparison refused: prior-week receipt coverage or timestamp quality is incomplete.')
+        return result
+    cohorts, totals, axes = [], [], []
+    for period in (previous, data):
+        c, t, a = {}, {}, {}
+        for o, v, event, n in period.get('cohorts', []):
+            if (o not in ORIGINS or not isinstance(v, str) or
+                    not (v == 'other' or re.fullmatch(r'(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})\.(?:0|[1-9]\d{0,3})', v)) or
+                    event not in ('startup', 'tool_counts', 'tool_metrics', 'historical_other') or (o,v,event) in c):
+                raise ValueError('invalid version/instrumentation cohort')
+            c[o,v,event] = n
+        for o, s, tool, n in period.get('tools', []):
+            if o not in ORIGINS or s not in ('counts', 'metrics') or tool not in TOOLS or (o,s,tool) in t:
+                raise ValueError('invalid comparison tool dimension')
+            t[o,s,tool] = n
+        for o, tool, axis, bucket, n in period.get('axes', []):
+            if o not in ORIGINS or tool not in TOOLS or axis not in AXES or bucket not in AXES[axis] or (o,tool,axis,bucket) in a:
+                raise ValueError('invalid comparison metric dimension')
+            a[o,tool,axis,bucket] = n
+        for n in (*c.values(), *t.values(), *a.values()):
+            if (isinstance(n, bool) or not isinstance(n, (int, Decimal)) or
+                    (isinstance(n, Decimal) and not n.is_finite()) or n < 0 or n != int(n)):
+                raise ValueError('invalid comparison count')
+        for o, tool, axis in {k[:3] for k in a}:
+            if (o,'metrics',tool) not in t or sum(n for (co,ct,ca,b),n in a.items() if (co,ct,ca) == (o,tool,axis)) != t[o,'metrics',tool]:
+                raise ValueError('incomplete comparison metric marginal')
+        cohorts.append(c); totals.append(t); axes.append(a)
+    # Guard each published partition, its composite cells/complements, and their
+    # changes between windows. Withhold current detail as well:
+    # suppressing a delta alone still releases it via the two endpoint counts.
+    surfaces = []
+    partition_windows = []
+    for c, t, a in zip(cohorts, totals, axes):
+        # All rendered batch cells are disjoint, across origins, versions and
+        # event types. Local version/event tables are unions of these cells.
+        partitions = {('events',): c.copy()}
+        for (o,s,tool),n in t.items():
+            partitions.setdefault(('stream',s),{})[o,tool] = n
+        # Refine the metric stream by ONE axis at a time across all tools and
+        # origins. Tool totals and their complements are unions in each refined
+        # partition. Never add overlapping streams or independent axes.
+        for (o,tool,axis,b),n in a.items():
+            partitions.setdefault(('axis',axis),{})[o,tool,b] = n
+        instrumented = {k[:3] for k in a}
+        for (o,s,tool),n in t.items():
+            if s != 'metrics': continue
+            for axis in AXES:
+                if (o,tool,axis) not in instrumented:
+                    # Missing instrumentation is a whole tool-call cell, not
+                    # an observed zero bucket; its total is still published.
+                    partitions.setdefault(('axis',axis),{})[o,tool,None] = n
+        surface = {}
+        for partition, cells in partitions.items():
+            total = sum(cells.values())
+            surface[partition, 'total'] = total
+            for cell,n in cells.items():
+                surface[partition, 'cell', cell] = n
+                surface[partition, 'complement', cell] = total-n
+        for (o,s,tool),n in t.items():
+            if s == 'metrics':
+                covered = sum(v for (co,ct,ca,b),v in a.items() if (co,ct,ca) == (o,tool,'outcomes'))
+                surface[('coverage',o,tool), 'missing'] = n-covered
+        surfaces.append(surface)
+        partition_windows.append(partitions)
+    before, after = partition_windows
+    if (any(0 < n < 10 for surface in surfaces for n in surface.values()) or
+            any(0 < abs(surfaces[1].get(k,0)-surfaces[0].get(k,0)) < 10
+                for k in surfaces[0].keys() | surfaces[1].keys()) or
+            any(small_composite_change(before.get(p, {}), after.get(p, {}))
+                for p in before.keys() | after.keys())):
+        result['unsafe'] = True
+        notes.append('Comparison and numeric details withheld: small cells or cross-window complementary disclosure risk. Private small-count permission does not override trend suppression.')
+        return result
+    for o, event in sorted({(o,e) for c in cohorts for o,v,e in c if e in ('tool_counts','tool_metrics')}):
+        mixes = [{v:n for (co,v,e),n in c.items() if (co,e) == (o,event)} for c in cohorts]
+        denoms = [sum(m.values()) for m in mixes]
+        if not all(denoms):
+            notes.append(f'Version/instrumentation mix unavailable for {o} ({event}): batches missing in one week.')
+        else:
+            changed = any(mixes[0].get(v,0)*denoms[1] != mixes[1].get(v,0)*denoms[0] for v in mixes[0].keys() | mixes[1].keys())
+            notes.append(f'Version/instrumentation mix {"changed" if changed else "stable at event-batch level"} for {o} ({event}); batch shares do not establish per-tool call shares.')
+    for o, v, event in sorted(cohorts[0].keys() | cohorts[1].keys()):
+        cells = []
+        for c in cohorts:
+            count = c.get((o,v,event))
+            denominator = sum(n for (co,cv,ce),n in c.items() if (co,ce) == (o,event))
+            cells.append(f'{count}/{denominator} batches ({count/denominator:.1%})' if count is not None and denominator else 'not recorded')
+        result['coverage'].append((o,v,event,*cells))
+    for o,s,tool in sorted(totals[0].keys() | totals[1].keys()):
+        event = 'tool_metrics' if s == 'metrics' else 'tool_counts'
+        versions = [{v for (co,v,e),n in c.items() if co == o and e == event and n > 0} for c in cohorts]
+        label = f'{tool} ({o}, {s})'
+        if any(not vs or 'other' in vs for vs in versions):
+            notes.append(f'Call/rate comparison refused for {label}: missing or unknown version/instrumentation coverage.')
+            continue
+        if any(len(vs) != 1 for vs in versions) or versions[0] != versions[1]:
+            notes.append(f'Call/rate comparison refused for {label}: version mix or version changed; event-batch shares cannot establish per-tool call cohorts. A restricted version/tool/outcome aggregate is required.')
+            continue
+        counts = [t.get((o,s,tool)) for t in totals]
+        if any(n is None or n <= 0 for n in counts):
+            notes.append(f'Call/rate comparison refused for {label}: zero or missing same-stream denominator; absence is not zero activity.')
+            continue
+        version = next(iter(versions[0]))
+        old, new = counts
+        result['calls'].append((o,s,tool,version,old,new,f'{new-old:+} ({(new-old)/old:+.1%})'))
+        if s != 'metrics': continue
+        outcomes = [{b:n for (co,ct,ca,b),n in a.items() if (co,ct,ca) == (o,tool,'outcomes')} for a in axes]
+        notes.append(f'Outcome instrumentation coverage for {label}: {sum(outcomes[0].values())}/{old} previous and {sum(outcomes[1].values())}/{new} current metric calls; coverage of all executed calls is unknown.')
+        if any(not b for b in outcomes):
+            notes.append(f'Error/timeout comparison refused for {label}: missing outcome instrumentation; duration or legacy counts cannot supply outcomes.')
+            continue
+        if min(counts) < 100:
+            notes.append(f'Small sample for {label}: fewer than 100 recorded outcomes in at least one week; no statistical improvement claim.')
+        for bucket in ('error', 'timeout'):
+            a, b = [out.get(bucket, 0) for out in outcomes]
+            result['rates'].append((o,tool,version,bucket,f'{a}/{old} ({a/old:.1%})',f'{b}/{new} ({b/new:.1%})',f'{100*(b/new-a/old):+.1f} pp'))
+    if not result['coverage']:
+        notes.append('Comparison unavailable: version/instrumentation batches are missing in both weeks.')
+    notes.append('Per-version WinRM reason/outcome comparison is unavailable from the existing independent marginals; no joint data is inferred.')
+    return result
 
 
 def report(data, start, end, now, config=None):
@@ -120,7 +323,7 @@ def report(data, start, end, now, config=None):
             for n in (row[1:] if key == 'adoption' else row[-1:]):
                 if isinstance(n, bool) or not isinstance(n, (int, Decimal)) or n < 0 or n != int(n):
                     raise ValueError('invalid aggregate count')
-    small = not exact and any(0 < n < 10 for key in ('adoption', 'events', 'tools', 'axes')
+    policy_small = any(0 < n < 10 for key in ('adoption', 'events', 'tools', 'axes')
                 for row in data[key] for n in (row[1:] if key == 'adoption' else row[-1:]))
     seen = set()
     for origin, observed, active, startup in data['adoption']:
@@ -131,9 +334,9 @@ def report(data, start, end, now, config=None):
             raise ValueError('inconsistent installation aggregates')
         # Active and startup-only are disjoint subsets. Published proxies also
         # disclose their complements, including installations in neither subset.
-        if not exact and any(0 < n < 10 for n in
+        if any(0 < n < 10 for n in
                              (observed - active, observed - startup, observed - active - startup)):
-            small = True
+            policy_small = True
     for key, prefix in (('events', 2), ('tools', 3)):
         dimensions = [tuple(row[:prefix]) for row in data[key]]
         if len(dimensions) != len(set(dimensions)):
@@ -156,6 +359,90 @@ def report(data, start, end, now, config=None):
     for (o,t,a), buckets in distributions.items():
         if (o,t) not in metrics or sum(buckets.values()) != metrics[o,t]:
             raise ValueError('incomplete metric marginal')
+    reasons = {}
+    for row in data.get('winrm_reasons', []):
+        if not isinstance(row, (tuple, list)) or len(row) != 3:
+            raise ValueError('invalid WinRM diagnostic row')
+        o, reason, n = row
+        if isinstance(n, Decimal) and not n.is_finite():
+            raise ValueError('invalid WinRM diagnostic count')
+        if isinstance(n, bool) or not isinstance(n, (int, Decimal)) or n <= 0 or n != int(n):
+            raise ValueError('invalid WinRM diagnostic count')
+        if not isinstance(o, str) or not isinstance(reason, str) or o not in ORIGINS or reason not in WINRM_REASONS:
+            raise ValueError('invalid WinRM diagnostic dimension')
+        buckets = reasons.setdefault(o, {})
+        if reason in buckets:
+            raise ValueError('duplicate WinRM diagnostic dimension')
+        buckets[reason] = n
+    reason_unsafe = policy_small
+    if reasons and set(reasons) != {o for o, t in metrics if t == 'winrm_exec'}:
+        raise ValueError('incomplete WinRM diagnostic marginal')
+    for o, buckets in reasons.items():
+        total = metrics[o, 'winrm_exec']
+        if sum(buckets.values()) != total:
+            raise ValueError('incomplete WinRM diagnostic marginal')
+        # Same protections as the restricted SQL function, even with private
+        # small-count permission. These mappings guard disclosure, not joint rates.
+        if any(0 < n < 10 for count in buckets.values() for n in (count, total - count)):
+            reason_unsafe = True
+        known = {}
+        for reason, n in buckets.items():
+            if reason in ('unknown', 'uninstrumented'): continue
+            outcome = 'success' if reason == 'completed' else reason if reason in ('timeout', 'cancelled') else 'error'
+            known[outcome] = known.get(outcome, 0) + n
+        outcomes = distributions.get((o, 'winrm_exec', 'outcomes'))
+        if outcomes is None:
+            reason_unsafe = True
+        elif any(n < 0 or 0 < n < 10 for n in
+                 (outcomes.get(b, 0) - known.get(b, 0) for b in set(outcomes) | set(known))):
+            reason_unsafe = True
+    trends = completed_week_trends(data, start, end, now)
+    small = (policy_small and not exact) or trends['unsafe']
+    reason_unsafe = reason_unsafe or trends['unsafe']
+    note('Weekly findings')
+    if small:
+        note('Usage and reliability findings withheld by default privacy policy; no zero activity or improvement is implied.')
+    else:
+        for o, observed, active, startup in sorted(data['adoption']):
+            note(f'{o}: {observed} observed, {active} active, {startup} startup-only installations, not people.')
+        evidence = [(o, t, b, sum(b.values())) for (o, t, a), b in distributions.items() if a == 'outcomes']
+        errors = [(o, t, b.get('error', 0), n) for o, t, b, n in evidence if b.get('error', 0)]
+        actions = []
+        if errors:
+            volume = sorted(errors, key=lambda r: (-r[2], r[0], r[1]))[0]
+            rate = sorted(errors, key=lambda r: (-r[2]/r[3], r[0], r[1]))[0]
+            for label, (o, t, n, total) in (('Largest error volume', volume), ('Highest error rate', rate)):
+                note(f'{label}: {t} ({o}), {n}/{total} recorded outcomes ({n/total:.1%}).')
+            actions.append(f'Action: review {volume[1]} ({volume[0]}) for its recorded error volume; these outcomes do not establish a product defect or cause.')
+            if rate[:2] != volume[:2]:
+                actions.append(f'Action: review {rate[1]} ({rate[0]}) separately for its recorded error proportion and workload.')
+        elif evidence:
+            note('No recorded errors in the available outcome marginals; this does not establish reliability for missing instrumentation.')
+        else:
+            note('Outcomes unavailable; reliability cannot be inferred from legacy counts or duration buckets.')
+        missing = sum((o, t, 'outcomes') not in distributions for o, t in metrics)
+        note(f'Outcome coverage: {len(evidence)}/{len(metrics)} metric tool/origin groups have a complete outcome marginal; coverage of all executed calls is unknown.')
+        if missing or not evidence:
+            actions.append('Action: review outcome instrumentation coverage before drawing a reliability conclusion.')
+        timeouts = sorted([(o, t, b['timeout'], n) for o, t, b, n in evidence if b.get('timeout')], key=lambda r: (-r[2], r[0], r[1]))
+        if timeouts:
+            o, t, n, total = timeouts[0]
+            actions.append(f'Action: review {t} ({o}) timeout observations: {n}/{total} recorded outcomes; remote termination is unproven.')
+        for action in actions[:3]: note(action)
+        if any(n < 100 for o, t, b, n in evidence):
+            note('Small sample: fewer than 100 recorded outcomes in at least one tool/origin group; rates are descriptive, not evidence of improvement.')
+    if small and not trends['unsafe']:
+        note('Comparison withheld by default privacy policy; no change is inferred.')
+    else:
+        for value in trends['notes']: note(value)
+    if not small:
+        if trends['coverage']:
+            table('Version/instrumentation coverage (event batches, not calls)', ['Origin','Version','Event','Previous week','Current week'], trends['coverage'])
+        if trends['calls']:
+            table('Same-stream call comparison', ['Origin','Stream','Tool','Version','Previous calls','Current calls','Change'], trends['calls'])
+        if trends['rates']:
+            table('Error and timeout comparison (complete outcome marginals only)', ['Origin','Tool','Version','Outcome','Previous week','Current week','Change'], trends['rates'])
+    note('Release/deployment status unavailable from these aggregates; no fix or rollout is inferred. Reporting health passed the checkpoint and hourly receipt gates; complete upstream delivery remains unproven.')
     if small:
         note('Detailed adoption, event, tool and axis counts withheld: small cells or complementary disclosure risk; no zero is implied.')
     else:
@@ -171,10 +458,13 @@ def report(data, start, end, now, config=None):
             failures = sum(outcomes.get(b,0) for b in ('nonzero','error','timeout')) if outcomes else None
             rate = f'{failures/total:.1%}' if total else 'unavailable'
             reliability.append((o,t, str(failures) + '/' + str(total) + ' ('+rate+')' if total else 'Outcomes unavailable',
+                                str(outcomes.get('error',0)) if outcomes else 'unavailable',
+                                str(outcomes.get('nonzero',0)) if outcomes else 'unavailable',
+                                str(outcomes.get('timeout',0)) if outcomes else 'unavailable',
                                 str(outcomes.get('cancelled',0)) if outcomes else 'unavailable',
                                 str(outcomes.get('unknown',0)) if outcomes else 'unavailable',
                                 str(durations.get('gte10000',0)) if durations else 'unavailable'))
-        table('Reliability: metric stream only', ['Origin','Tool','Failures / recorded outcomes','Cancelled','Unknown','10 seconds or more'], reliability)
+        table('Reliability: metric stream only', ['Origin','Tool','Failures / recorded outcomes','Error','Nonzero','Timeout','Cancelled','Unknown','10 seconds or more'], reliability)
         note('Failures include nonzero, error and timeout; cancelled and unknown are separate. Outcomes unavailable means reliability cannot be inferred, including weeks before instrumentation. Slow buckets are observations, not averages or a diagnosed root cause.')
         priorities = []
         for o,t in metrics:
@@ -202,6 +492,18 @@ def report(data, start, end, now, config=None):
         table('Recorded events', ['Origin','Event','Batches / events'], sorted(data['events']))
         axes = [(o,t,a,DURATION_LABELS[b] if a == 'durations' else b,n) for o,t,a,b,n in sorted(data['axes'])]
         table('Recorded metric distributions (separate marginals)', ['Origin','Tool','Axis','Bucket','Calls'], axes)
+    if reasons and not reason_unsafe and not small:
+        table('WinRM diagnostics (separate reason marginal)', ['Origin', 'Reason', 'Calls'],
+              [(o, r, n) for o, buckets in sorted(reasons.items()) for r, n in sorted(buckets.items())])
+        for o, buckets in sorted(reasons.items()):
+            total = metrics[o, 'winrm_exec']
+            covered = total - buckets.get('uninstrumented', 0)
+            note(f'Reason coverage: {o}: {covered}/{total} metric WinRM calls ({covered/total:.1%}); includes instrumented unknown.')
+        note('unknown is an instrumented reason without specific evidence; uninstrumented means no reason axis. Reasons describe observed boundaries, not a root cause. Reasons and outcomes are independent marginals; no error-specific reason rate is inferred.')
+    elif any(t == 'winrm_exec' for o, s, t, n in data['tools']):
+        note('WinRM diagnostics unavailable or withheld; no zero or cause is implied. Private small-count permission does not override diagnostic suppression.')
+    elif 'winrm_reasons' in data:
+        note('WinRM diagnostics unavailable; no reason coverage is inferred.')
     users = data.get('users', [])
     for origin, observed, covered, unknown, proxies in users:
         if origin not in ORIGINS or any(isinstance(n, bool) or not isinstance(n, int) or n < 0 for n in (observed,covered,unknown,proxies)) or covered + unknown != observed or proxies > covered:
