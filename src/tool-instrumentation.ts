@@ -1,5 +1,6 @@
 /** Fixed, private telemetry dimensions. Never pass arguments or response text to the recorder. */
 import { WINRM_REASONS, type WinRmReason } from './winrm-reason.js';
+import { beginDiagnostic } from './internal-diagnostics.js';
 export const TOOL_NAMES = ['run_powershell','list_services','get_service','control_service','system_info','ssh_exec','winrm_exec','sftp_upload','sftp_download','run_program','runtime_capabilities','start_execution','execution_status','read_execution_output','cancel_execution','read_output_log','delete_output_log','start_remote_batch','remote_batch_status','cancel_remote_batch'] as const;
 export const OUTCOMES = ['success','nonzero','error','timeout','cancelled','unknown'] as const;
 export const DURATIONS = ['lt100','lt1000','lt10000','gte10000'] as const;
@@ -40,11 +41,14 @@ function outcome(result: unknown): Outcome {
 export function instrumentTool<T extends (...args: any[]) => any>(name: ToolName, handler: T, record: (name: ToolName, outcome: Outcome, duration: Duration, feature: Feature, winrmReason?: WinRmReason) => void): T {
   return (async (...args: Parameters<T>) => {
     const started = performance.now();
-    let result: unknown, failed = false;
+    let diagnostic: ReturnType<typeof beginDiagnostic>;
+    try { diagnostic = beginDiagnostic(name); } catch { /* diagnostics cannot break RPC */ }
+    let result: unknown, failure: unknown, failed = false;
     try { result = await handler(...args); return result; }
-    catch (error) { failed = true; throw error; }
+    catch (error) { failed = true; failure = error; throw error; }
     finally {
       const elapsed = performance.now() - started;
+      try { diagnostic?.(elapsed, result, failure, failed); } catch { /* diagnostics cannot break RPC */ }
       const bucket: Duration = elapsed < 100 ? 'lt100' : elapsed < 1000 ? 'lt1000' : elapsed < 10000 ? 'lt10000' : 'gte10000';
       let reason: WinRmReason | undefined;
       if (name === 'winrm_exec') {

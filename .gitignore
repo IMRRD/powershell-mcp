@@ -8,6 +8,7 @@ test-evidence/
 *.bat
 *.ps1
 !assets/linux-supervisor.ps1
+!scripts/restricted-diagnostics.ps1
 tidy_done.txt
 
 collector/analytics/__pycache__/

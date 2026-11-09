@@ -17,6 +17,7 @@
     "scripts/provision-credential.ps1",
     "scripts/read-credential.ps1",
     "scripts/ProtectedCredentialStore.cs",
+    "scripts/restricted-diagnostics.ps1",
     "LICENSE"
   ],
   "engines": {

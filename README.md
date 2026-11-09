@@ -218,6 +218,103 @@ OK (9129 bytes, 714ms)
 - **`ssh_exec`** uses the pure-JS [`ssh2`](https://github.com/mscdex/ssh2) client (no external binary), so it works headless and needs nothing on the target beyond an SSH server. Ideal for Linux hosts.
 - **`winrm_exec`** uses native PowerShell Remoting, so a Windows fleet needs only WinRM enabled â€” no per-server install.
 
+## Restricted local diagnostics (inactive)
+
+Internal diagnostics are a separate, **default-off**, Windows-only operator API.
+They have no public MCP tool, endpoint, telemetry payload, cohort enrollment or
+user-token linkage. Parent/integrator approval of the exact named installation,
+local account, directory, policy and canary window is required before operational
+consent or activation. This implementation does not grant that approval.
+
+The fixed `restricted-local-v1` contract contains only `schemaVersion: 1`, a fresh
+random UUIDv4 `correlationId`, finite `stage`/`type`, nullable signed 32-bit
+`nativeCode`, and integer `elapsedMs` (0–300000, saturated at five minutes).
+Each completed handler contributes an atomic pair: `<tool>.handler` / `started`
+at zero elapsed time, then `<tool>.result` with its observed terminal type or
+exception class and total handler elapsed time. The first row is published with
+the result; it is not evidence of a durably recorded start before a crash.
+Stages are limited to the ten execution tools listed above; result types are the
+eight schema-v1 termination statuses or `Error`, `TypeError`, `RangeError`,
+`SyntaxError`, `other_exception`. Exception names/messages/stacks are not read;
+`nativeCode` comes only from a numeric own `errno` property of a thrown error,
+otherwise null. Missing structured results remain `unknown`. No inner execution
+stage, remote-batch target or durable lifecycle instrumentation is claimed.
+
+Commands, arguments, output, stacks, error messages/records, targets, paths,
+authentication context, customer data and existing execution/telemetry IDs are
+excluded, rather than filtered with a best-effort text redactor. No free-text
+field is admitted. Neither public metrics nor MCP results acquire diagnostic
+IDs or extra fields. Engine/version labels are also outside this narrow contract.
+
+The backend reuses `scripts/ProtectedCredentialStore.cs`: pinned ancestry,
+reparse-point refusal, current-owner protected DACL checks on every operation,
+private files, and atomic no-overwrite publication. Entire consent and record
+objects use DPAPI CurrentUser with separate diagnostic entropy. Only an explicitly
+chosen fixed local Windows drive is accepted; POSIX, UNC and remote stores fail
+closed. The creating Windows account is the access boundary; this does not
+isolate other programs running as that same account. Existing directories are
+never adopted or have their ACL repaired by consent.
+
+Proposed activation policy, **pending parent approval**:
+
+| Control | Fixed maximum / rule |
+| --- | --- |
+| Scope | One explicitly named internal installation and its existing service account per isolated store; no auto-enrollment or identity inference |
+| Consent | Explicit `restricted-local-v1` approval; expires after one hour; no renewal/re-enable in the same store |
+| Storage / transport | Local DPAPI CurrentUser + private ACL only; no upload, export automation or remote transport |
+| Rate | Six call pairs (12 records) per rolling minute, checked across processes under an exclusive file lock; six admission attempts/minute per process |
+| Capacity | 128 pairs; 256 KiB logical file bytes including metadata (4 KiB reserved for tombstones), plus filesystem allocation overhead; 1024 plaintext bytes / 2048 encrypted bytes per object |
+| Disk | At least 64 MiB available before consent or record publication; errors drop diagnostics and preserve RPC results |
+| Runtime | At most eight queued pairs, five seconds per helper call, no RPC wait for persistence; 4 KiB request / 32 KiB reply |
+| Retrieval | Same local account and exact consent scope; at most 16 pairs per page, opaque correlation cursor; no filesystem paths returned |
+| Retention | One hour per pair, pruned on active store operations; consent expiry denies further capture/retrieval. Operator must revoke at canary end, within one hour; there is no idle cleanup service or power-loss deletion guarantee |
+| Disable / revoke | Durable disable blocks capture **and retrieval**, retaining encrypted data. Revoke writes a permanent tombstone before deleting only this store's diagnostic records/recognized interrupted temporary files. Both are idempotent |
+
+Unknown, oversized, corrupt or interrupted entries block admission/retrieval;
+they cannot become partial records or be overwritten to make space. Lock
+contention fails fast. Revocation remains possible for recognized protected
+temporary files; unsafe ACLs/types require operator reconciliation, with failure
+reported as a fixed status. Process restart recovers committed pairs and consent.
+Atomic publication is process-interruption handling, not a hardware power-loss
+durability claim. Aggregate telemetry history, receipt/replay state and existing
+credential/output/lifecycle stores are never touched by diagnostics cleanup.
+
+After separate approval, a local operator can call the built API
+`RestrictedDiagnosticsStore` from `dist/diagnostics-store.js` (`consent`, `read`,
+`disable`, `revoke`); capture is connected to the existing tool wrapper. The local
+CLI accepts one JSON object on stdin, with `operation`, absolute `directory` and
+exact `installation` alias. `consent` additionally requires
+`"policy":"restricted-local-v1"`; `read` accepts `limit` (1–16, default 16) and
+optional `after` UUID cursor. For example, in the **approved private operator
+session only**, after replacing the placeholders:
+
+```powershell
+$scope = @{ directory = '<fresh-approved-local-directory>'; installation = '<approved-alias>' }
+(@{ operation = 'consent'; policy = 'restricted-local-v1' } + $scope) | ConvertTo-Json -Compress | node dist/diagnostics-cli.js
+```
+
+Activation also requires all three **server process** settings:
+`POWERSHELL_MCP_DIAGNOSTICS=1`, `POWERSHELL_MCP_DIAGNOSTICS_DIR` set to that
+directory, and `POWERSHELL_MCP_DIAGNOSTICS_INSTALLATION` set to that alias
+(lowercase ASCII letter followed by up to 63 lowercase letters/digits/hyphens).
+These are operator configuration, never caller-provided tool arguments.
+An activation flag without matching, unexpired protected consent cannot capture.
+Public `POWERSHELL_MCP_NO_TELEMETRY` remains independent and unchanged.
+
+```powershell
+# Local retrieval contains restricted records: keep it in the approved private session.
+(@{ operation = 'read'; limit = 16 } + $scope) | ConvertTo-Json -Compress | node dist/diagnostics-cli.js
+(@{ operation = 'disable' } + $scope) | ConvertTo-Json -Compress | node dist/diagnostics-cli.js
+(@{ operation = 'revoke' } + $scope) | ConvertTo-Json -Compress | node dist/diagnostics-cli.js
+```
+
+Remove the activation settings on disable/revoke. `disableDiagnostics()` in
+`dist/internal-diagnostics.js` stops new process-local capture and discards queued
+work; `drainDiagnostics()` waits for already submitted storage. Use the persistent
+store operations to close the cross-process policy gate: after successful return,
+previously admitted writes have finished and later appends/retrieval are denied.
+No automatic retry or remote command probe is performed.
+
 ## Telemetry (pseudonymous, opt-out)
 
 WinRM metrics may include finite failure-boundary reasons, with no raw errors or
