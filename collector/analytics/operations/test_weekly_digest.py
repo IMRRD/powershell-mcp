@@ -191,6 +191,68 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(msg.get_content_type(), 'multipart/alternative')
         return [p.get_content() for p in msg.iter_parts()]
 
+    def test_composite_partition_changes_withhold_current_details_for_both_audiences(self):
+        audience = dict(sender='fixture@example.invalid', recipient=w.RECIPIENT, approved_recipients=[w.RECIPIENT])
+        private = audience | dict(enabled=True, host='mail.ialogics.co.uk', port=587,
+                                  username='fixture', private_small_counts=audience.copy())
+        # Each source cell, direct change and one-cell complement change is safe.
+        # A union of cells nevertheless changes by one (or nine). Include the
+        # sibling failure remainder, other metric axes, tool and batch tables.
+        cases = [
+            ('outcomes', [100,20,40,40], [79,42,140,139]),
+            ('outcomes', [79,42,140,139], [100,20,40,40]),
+            ('outcomes', [100,20,40,40], [87,42,132,139]),
+            ('outcomes', [100,20,40,40,20,20], [79,42,140,117,31,31]),
+            ('durations', [100,20,40,40], [79,42,140,139]),
+            ('features', [100,20,40,40], [79,42,140,139]),
+            ('tools', [100,20,40,40], [79,42,140,139]),
+            ('streams', [100,20,40,40], [79,42,140,139]),
+            ('versions', [100,20,40,40], [79,42,140,139]),
+        ]
+        for partition, old, new in cases:
+            f = trend_fixture()
+            for period, cells in zip((f['previous'], f), (old, new)):
+                if partition == 'versions':
+                    period['cohorts'] = [('unknown_origin', f'0.8.{i}', 'tool_metrics', n) for i,n in enumerate(cells)]
+                elif partition in ('tools', 'streams'):
+                    period['tools'] = [('unknown_origin', 'counts', t, n) for t,n in
+                                       zip(('ssh_exec','winrm_exec','sftp_upload','sftp_download'), cells)]
+                    if partition == 'streams':
+                        period['tools'] = [(o,'counts','ssh_exec',n) for o,n in
+                                           zip(('internal','test','unknown_origin','external_self_declared'), cells)]
+                        period['cohorts'] = [(o,'0.8.0','tool_counts',20) for o,s,t,n in period['tools']]
+                    period['axes'] = []
+                else:
+                    buckets = (('success','nonzero','error','timeout','cancelled','unknown') if partition == 'outcomes'
+                               else ('lt100','lt1000','lt10000','gte10000') if partition == 'durations'
+                               else ('execution','inspection','remote','transfer'))
+                    period['tools'][0] = ('unknown_origin', 'metrics', 'ssh_exec', sum(cells))
+                    period['axes'] = [('unknown_origin','ssh_exec',partition,b,n) for b,n in zip(buckets,cells)]
+            self.assertTrue(all(n >= 10 for n in old + new))
+            self.assertTrue(all(abs(b-a) >= 10 for a,b in zip(old,new)))
+            self.assertTrue(all(abs((sum(new)-b)-(sum(old)-a)) >= 10 for a,b in zip(old,new)))
+            for cfg in (None, private):
+                for mime, body in zip(('text/plain','text/html'), self.mime_bodies(f, cfg)):
+                    with self.subTest(partition=partition, new=new, private=bool(cfg), mime=mime):
+                        self.assertIn('Comparison and numeric details withheld', body)
+                        for forbidden in ('ssh_exec', '0.8.0', '<table', 'recorded calls',
+                                          'Largest error', 'Outcome instrumentation coverage'):
+                            self.assertNotIn(forbidden, body)
+
+    def test_composite_partition_zero_and_threshold_changes_keep_useful_comparisons(self):
+        for new in ([78,42,140,140], [88,42,131,139]):
+            f = trend_fixture()
+            for period, cells in ((f['previous'], [100,20,40,40]), (f, new)):
+                period['axes'] = [('unknown_origin','ssh_exec','outcomes',b,n) for b,n in
+                                  zip(('success','nonzero','error','timeout'), cells)]
+            for body in self.mime_bodies(f):
+                with self.subTest(new=new):
+                    self.assertIn('Error and timeout comparison', body)
+                    self.assertIn('40/200 (20.0%)', body)
+                    self.assertIn(f'{new[2]}/400', body)
+                    self.assertIn('Reliability: metric stream only', body)
+                    self.assertNotIn('Comparison and numeric details withheld', body)
+
     def test_stable_version_streams_compare_calls_error_and_timeout_in_both_mime_parts(self):
         for body in self.mime_bodies(trend_fixture()):
             summary = body.split('Legacy count stream', 1)[0]

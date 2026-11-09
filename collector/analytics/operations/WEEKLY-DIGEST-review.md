@@ -43,15 +43,39 @@ batching, workload, selection and late arrivals preclude statistical or causal
 improvement claims. A later reconstruction may include late arrivals; this does
 not freeze historical delivery or establish complete upstream collection.
 
-Before findings render, new cells, partition complements, outcome-coverage
-complements and absolute cross-week differences of corresponding
-cells/totals/complements are checked. A positive value below ten withholds both
+Before findings render, cells, partition complements, outcome-coverage
+complements and absolute cross-week differences are checked. Composite changes
+are checked for every union of cells within each guarded partition: version
+batches by origin/event, instrumentation by origin/version, event/version cells
+by origin, tools by origin/stream and by stream across origins, and each separate
+tool/origin metric axis. This includes `total - error - timeout`, failure totals
+(`nonzero + error + timeout`) and their remainders, rather than just one-cell
+complements. Source cells are nonnegative; once each endpoint cell is zero or at
+least ten, their unions and complements also meet that endpoint threshold. The
+cross-week guard checks signed sums of cell changes, including unions whose
+individual changes cancel to a positive absolute value below ten.
+
+A positive value below ten withholds both
 windows' numeric surfaces, including current findings/details that would reveal
 a suppressed delta. The private small-count opt-in does not bypass new trend
 suppression. Existing audience validation and SQL diagnostic suppression retain
 their behavior. No installation linkage across weeks is inferred. This is
 conservative partition protection, not a general differential-privacy guarantee
-across unlimited independently retained reports.
+across unlimited independently retained reports. It does not establish privacy
+for arbitrary relations between different partitions or link installations
+across weeks. Optional-user and installation complements and the independent
+WinRM reason/outcome guards retain their existing scope; no joint distribution
+is inferred from overlapping marginals.
+
+The privacy correction is exercised through the actual JSONL importer and
+restricted PostgreSQL queries, then the sender entrypoint and both serialized
+MIME alternatives using a memory sink. The reproduced remainder is 120 versus
+121, despite all source cells, individual changes and one-cell complement
+changes meeting ten. Default and approved private output both withhold it;
+a remainder of 120 versus 130 still publishes useful comparisons. Unit MIME
+regressions also cover zero and nine, three-cell failure complements, other
+metric axes, tool partitions and version batches. Independent review of the
+replacement exact tree remains required before any PR.
 
 Mixed-version per-tool comparisons and per-version WinRM reasons remain an
 explicit parent SQL dependency described below. The implemented batch and

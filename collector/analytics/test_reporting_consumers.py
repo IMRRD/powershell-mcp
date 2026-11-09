@@ -1,8 +1,12 @@
 """Synthetic importer -> restricted snapshot -> report/dashboard acceptance; never sends mail."""
 import datetime as dt
+from email import policy
+from email.parser import BytesParser
 import importlib.util
 import json
 import os
+from pathlib import Path
+import tempfile
 import unittest
 
 import test_analytics as fixture
@@ -19,6 +23,98 @@ class ReportingConsumers(unittest.TestCase):
     setUp = fixture.AnalyticsTest.setUp
     tearDownDb = fixture.AnalyticsTest.tearDownDb
     append = fixture.AnalyticsTest.append
+
+    def seed_composite_trends(self, current):
+        start, end = digest.closed_week(dt.datetime.now(dt.timezone.utc))
+        stamp = lambda at: at.strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        rows = []
+        previous = dict(success=100, nonzero=20, error=40, timeout=40)
+        for at, outcomes in ((start-dt.timedelta(days=7), previous), (start, current)):
+            base = dict(version='0.8.0', os='win32', ts=stamp(at), _receivedAt=stamp(at))
+            rows.extend(dict(base, hostId='composite-0', event='startup',
+                             ts=stamp(at+dt.timedelta(hours=i)), _receivedAt=stamp(at+dt.timedelta(hours=i)))
+                        for i in range(168))
+            for i in range(20):
+                # Split each aggregate across 20 real schema-v2 metric batches.
+                cells = {b:n//20 + (i < n%20) for b,n in outcomes.items()}
+                total = sum(cells.values())
+                rows.append(dict(base, hostId=f'composite-{i}', event='tool_metrics', schemaVersion=2,
+                                 metrics={'ssh_exec': dict(outcomes=cells, durations={'lt100':total},
+                                                          features={'remote':total})}))
+        self.append(rows)
+        self.assertEqual(ingest(self.db, self.source, self.classes), 376)
+        self.assertEqual(ingest(self.db, self.source, self.classes), 0)
+        self.restricted()
+        with self.db.transaction():
+            data = digest.aggregates(self.db, start, end)
+            self.assertEqual(self.db.execute('SHOW transaction_read_only').fetchone()[0], 'on')
+            self.assertEqual(self.db.execute('SHOW transaction_isolation').fetchone()[0], 'repeatable read')
+        self.assertEqual(data['previous']['tools'], [('unknown_origin','metrics','ssh_exec',200)])
+        self.assertEqual(data['tools'], [('unknown_origin','metrics','ssh_exec',sum(current.values()))])
+        self.assertEqual(data['adoption'], [('unknown_origin',20,20,0)])
+        for period, expected in ((data['previous'], previous), (data, current)):
+            self.assertEqual({b:int(n) for o,t,a,b,n in period['axes'] if a == 'outcomes'}, expected)
+            self.assertEqual([r for r in period['cohorts'] if r[2] == 'tool_metrics'],
+                             [('unknown_origin','0.8.0','tool_metrics',20)])
+        for a,b in ((start-dt.timedelta(days=7),start), (start,end)):
+            self.assertEqual(self.db.execute('SELECT privacy_window_safe_utc(%s,%s)',(a,b)).fetchone(), (True,))
+        with self.assertRaises(fixture.psycopg.errors.InsufficientPrivilege):
+            self.db.execute('SELECT * FROM telemetry_event')
+        return data, start, end
+
+    def composite_mime_bodies(self, private):
+        audience = dict(sender='composite@example.invalid', recipient=digest.RECIPIENT,
+                        approved_recipients=[digest.RECIPIENT])
+        config = dict(enabled=True, host='mail.ialogics.co.uk', port=587, username='synthetic', **audience)
+        if private: config['private_small_counts'] = audience.copy()
+        # Run the production sender's real aggregate queries as the restricted
+        # role, then serialize to a memory sink. No SMTP connection is made.
+        class Reader:
+            def __enter__(inner):
+                inner.tx = self.db.transaction()
+                inner.tx.__enter__()
+                return self.db
+            def __exit__(inner, *args): return inner.tx.__exit__(*args)
+        messages = []
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/'config.json'
+            path.write_text(json.dumps(config), encoding='utf8')
+            digest.main(['--config',str(path),'--state-dir',str(Path(tmp)/'state')],
+                        dt.datetime.now(dt.timezone.utc), Reader,
+                        lambda m,*args: messages.append(m.as_bytes()))
+        self.assertEqual(len(messages), 1)
+        message = BytesParser(policy=policy.default).parsebytes(messages[0])
+        self.assertEqual(message.get_content_type(), 'multipart/alternative')
+        parts = list(message.iter_parts())
+        self.assertEqual([p.get_content_type() for p in parts], ['text/plain','text/html'])
+        return [(p.get_content_type(),p.get_content()) for p in parts]
+
+    def test_composite_outcome_remainder_restricted_importer_mime_suppression(self):
+        current = dict(success=79, nonzero=42, error=140, timeout=139)
+        data, start, end = self.seed_composite_trends(current)
+        old = {b:int(n) for o,t,a,b,n in data['previous']['axes'] if a == 'outcomes'}
+        self.assertTrue(all(n >= 10 for n in [*old.values(), *current.values()]))
+        self.assertTrue(all(abs(current[b]-old[b]) >= 10 for b in old))
+        self.assertTrue(all(abs((400-current[b])-(200-old[b])) >= 10 for b in old))
+        self.assertEqual((200-old['error']-old['timeout'],400-current['error']-current['timeout']), (120,121))
+        for private in (False, True):
+            for mime,body in self.composite_mime_bodies(private):
+                with self.subTest(private=private, mime=mime):
+                    self.assertIn('Comparison and numeric details withheld', body)
+                    for forbidden in ('40/200','140/400','139/400','ssh_exec','<table',
+                                      'Largest error','Outcome instrumentation coverage'):
+                        self.assertNotIn(forbidden, body)
+
+    def test_composite_outcome_above_threshold_restricted_importer_mime_control(self):
+        self.seed_composite_trends(dict(success=88, nonzero=42, error=131, timeout=139))
+        # The other-outcome remainder changes from 120 to 130: ten is allowed.
+        for private in (False, True):
+            for mime,body in self.composite_mime_bodies(private):
+                with self.subTest(private=private, mime=mime):
+                    self.assertIn('Error and timeout comparison', body)
+                    for value in ('40/200 (20.0%)','131/400','139/400','Reliability: metric stream only'):
+                        self.assertIn(value, body)
+                    self.assertNotIn('Comparison and numeric details withheld', body)
 
     def seed_trends(self):
         now = dt.datetime.now(dt.timezone.utc)

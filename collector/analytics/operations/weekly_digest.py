@@ -6,6 +6,7 @@ from decimal import Decimal
 import hashlib
 import html
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -93,6 +94,31 @@ def render_html(data, start, end, now, config=None):
     return report(data, start, end, now, config)[1]
 
 
+def small_composite_change(before, after):
+    """Detect a below-ten change in any union of disjoint partition cells."""
+    changes = [int(after.get(k, 0) - before.get(k, 0)) for k in before.keys() | after.keys()]
+    changes = sorted((n for n in changes if n), key=abs, reverse=True)
+    if any(0 < abs(n) < 10 for n in changes):
+        return True
+    if (not changes or min(changes) > 0 or max(changes) < 0 or math.gcd(*changes) >= 10):
+        return False
+    # Use signed changes, not endpoint subsets: each union's change is the sum
+    # of its cells' changes. Zero changes do not add states. Discard partial sums
+    # that the remaining cells cannot bring into [-9, 9]. This includes the
+    # complement of every union without materializing all endpoint surfaces.
+    lower = sum(n for n in changes if n < 0)
+    upper = sum(n for n in changes if n > 0)
+    reachable = {0}
+    for change in changes:
+        lower -= min(change, 0)
+        upper -= max(change, 0)
+        candidates = reachable | {n + change for n in reachable}
+        if any(0 < abs(n) < 10 for n in candidates):
+            return True
+        reachable = {n for n in candidates if n + lower <= 9 and n + upper >= -9}
+    return False
+
+
 def completed_week_trends(data, start, end, now):
     """Compare observable streams only; event versions are not tool-version joins."""
     result = dict(notes=[], coverage=[], calls=[], rates=[], unsafe=False)
@@ -139,10 +165,11 @@ def completed_week_trends(data, start, end, now):
             if (o,'metrics',tool) not in t or sum(n for (co,ct,ca,b),n in a.items() if (co,ct,ca) == (o,tool,axis)) != t[o,'metrics',tool]:
                 raise ValueError('incomplete comparison metric marginal')
         cohorts.append(c); totals.append(t); axes.append(a)
-    # Guard each published partition, its complements, and differences of the
-    # same cells/complements between windows. Withhold current detail as well:
+    # Guard each published partition, its composite cells/complements, and their
+    # changes between windows. Withhold current detail as well:
     # suppressing a delta alone still releases it via the two endpoint counts.
     surfaces = []
+    partition_windows = []
     for c, t, a in zip(cohorts, totals, axes):
         partitions = {}
         for (o,v,e),n in c.items():
@@ -150,6 +177,8 @@ def completed_week_trends(data, start, end, now):
                 partitions.setdefault(partition,{})[cell] = n
         for (o,s,tool),n in t.items():
             partitions.setdefault(('tools',o,s),{})[tool] = n
+            # The current detail also publishes a stream total across origins.
+            partitions.setdefault(('stream',s),{})[o,tool] = n
         for (o,tool,axis,b),n in a.items():
             partitions.setdefault(('axes',o,tool,axis),{})[b] = n
         surface = {}
@@ -164,9 +193,13 @@ def completed_week_trends(data, start, end, now):
                 covered = sum(v for (co,ct,ca,b),v in a.items() if (co,ct,ca) == (o,tool,'outcomes'))
                 surface[('coverage',o,tool), 'missing'] = n-covered
         surfaces.append(surface)
+        partition_windows.append(partitions)
+    before, after = partition_windows
     if (any(0 < n < 10 for surface in surfaces for n in surface.values()) or
             any(0 < abs(surfaces[1].get(k,0)-surfaces[0].get(k,0)) < 10
-                for k in surfaces[0].keys() | surfaces[1].keys())):
+                for k in surfaces[0].keys() | surfaces[1].keys()) or
+            any(small_composite_change(before.get(p, {}), after.get(p, {}))
+                for p in before.keys() | after.keys())):
         result['unsafe'] = True
         notes.append('Comparison and numeric details withheld: small cells or cross-window complementary disclosure risk. Private small-count permission does not override trend suppression.')
         return result
