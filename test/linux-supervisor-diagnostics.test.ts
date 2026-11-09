@@ -87,5 +87,5 @@ it('requires repeated Linux completion in CI and retains failing test evidence',
   expect(gate).toContain('/linux-supervisor-eof.test.ts');
   expect(gate).toContain("t.status === 'passed'");
   expect(workflow).toMatch(/if: failure\(\)\s+uses: actions\/upload-artifact@v4/);
-  expect(workflow).toMatch(/path: \|\s+vitest-report\.json\s+test-evidence\/packaged-client\.json\s+if-no-files-found: warn/);
+  expect(workflow).toMatch(/path: \|\s+vitest-report\.json\s+test-evidence\/packaged-client\.json\s+test-evidence\/protected-artifact\.json\s+if-no-files-found: warn/);
 });

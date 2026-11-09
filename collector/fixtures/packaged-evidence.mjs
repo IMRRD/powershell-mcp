@@ -9,7 +9,7 @@ import { performance } from 'node:perf_hooks';
 const phases = new Set(['acceptance', 'pack', 'install', 'proof', 'proxyClose', 'proxyConnectionsClose', 'proxyWaitClose', 'collectorClose', 'directoryRemove',
   'collectorReady', 'proxyReady', 'wrongAckClient', 'replayClient', 'positiveClient', 'metricClient',
   'clientReady', 'clientProof', 'clientRelease', 'clientClose', 'retainedClaim', 'durableReceipt', 'wrongAckResponse',
-  'replayDeletion', 'positiveDeletion', 'metricDeletion', 'metricReceipts']);
+  'replayDeletion', 'positiveDeletion', 'metricDeletion', 'metricReceipts', 'commandWait', 'commandClose', 'commandAbort']);
 const timers = new Set(['npm', 'command:install', 'idealTree', 'idealTree:init', 'idealTree:buildDeps', 'idealTree:fixDepFlags', 'reify', 'reify:loadTrees', 'reify:diffTrees', 'reify:retireShallow', 'reify:createSparse', 'reify:unpack', 'reify:unretire', 'reify:build', 'reify:trash', 'reify:save', 'build', 'build:deps', 'build:run:install', 'build:run:postinstall']);
 const duration = value => Number.isSafeInteger(value) && value >= 0 && value <= 86400000;
 

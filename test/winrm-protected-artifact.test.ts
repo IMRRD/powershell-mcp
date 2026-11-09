@@ -1,40 +1,36 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { selectIntegrationEngines } from './integration-engine.js';
+import { npm } from './artifact-npm.mjs';
+import { installEvidence } from '../collector/fixtures/packaged-evidence.mjs';
+import { cleanup } from '../collector/fixtures/packaged-process.mjs';
 
 const engines = process.platform === 'win32' ? selectIntegrationEngines() : [];
 const root = resolve(import.meta.dirname, '..');
 let directory: string, installed: string;
-const npmCli = [process.env.npm_execpath, join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js')].find(p => p && existsSync(p))!;
-async function npm(args: string[], cwd: string, signal: AbortSignal) {
-  return new Promise<string>((resolve, reject) => {
-    const child = spawn(process.execPath, [npmCli, ...args], { cwd, signal, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '', err = '', failure: Error | undefined;
-    child.stdout.on('data', b => out = (out + b).slice(-65536)); child.stderr.on('data', b => err = (err + b).slice(-4096));
-    child.once('error', error => { failure = error; });
-    // Drain close before removing the owned install directory, including abort.
-    child.once('close', code => !failure && code === 0 ? resolve(out) : reject(failure ?? Error(`artifact setup failed (${code}): ${err.slice(-512)}`)));
-  });
-}
+const evidenceDirectory = join(root, 'test-evidence');
+// Best effort, outside the removed fixture; only allowlisted phase/status/duration.
+try { mkdirSync(evidenceDirectory, { recursive: true }); } catch {}
+const evidence = installEvidence(join(evidenceDirectory, 'protected-artifact.json'));
 beforeAll(async () => {
   if (!engines.length) return;
   directory = mkdtempSync(join(tmpdir(), 'mcp-protected-artifact-'));
   const signal = AbortSignal.timeout(150000);
   const pack = join(directory, 'pack'); mkdirSync(pack);
-  const packed = JSON.parse(await npm(['pack', root, '--json', '--pack-destination', pack], root, signal))[0];
+  const packed = JSON.parse(await evidence.measure('pack', () => npm(['pack', root, '--json', '--pack-destination', pack], root, signal, evidence)))[0];
   writeFileSync(join(directory, 'package.json'), '{"private":true,"type":"module"}');
-  await npm(['install', '--no-audit', '--no-fund', '--cache', join(root, 'node_modules/.npm-cache'), join(pack, packed.filename)], directory, signal);
+  await evidence.measure('install', () => npm(['install', '--no-audit', '--no-fund', '--cache', join(root, 'node_modules/.npm-cache'), join(pack, packed.filename)], directory, signal, evidence));
   installed = join(directory, 'node_modules/@imrrd/powershell-mcp');
   expect(readFileSync(join(installed, 'dist/winrm-credential.js'), 'utf8')).toBe(readFileSync(join(root, 'dist/winrm-credential.js'), 'utf8'));
   console.log(`PROTECTED_ARTIFACT sha256=${createHash('sha256').update(readFileSync(join(pack, packed.filename))).digest('hex')}`);
 }, 180000);
-afterAll(() => { if (directory) rmSync(directory, { recursive: true, force: true }); });
+afterAll(async () => { if (directory) await evidence.measure('directoryRemove', () => rm(directory, { recursive: true, force: true })); });
 
 // Pinned synthetic loader doubles only native remoting, inside the child. No
 // network occurs. All installed MCP handlers/providers/adapters remain real.
@@ -71,6 +67,8 @@ for (const engine of engines.length ? engines : [{ exe: 'Windows required' }]) d
     const client = new Client({ name: 'synthetic-protected-acceptance', version: '1' });
     const stdio = new StdioClientTransport({ command: process.execPath, args: [join(installed, 'dist/index.js')],
       env: { ...process.env as Record<string, string>, POWERSHELL_MCP_NO_TELEMETRY: '1', PWSH_MCP_EXE: engine.exe, POWERSHELL_MCP_WINRM_CREDENTIAL_MAP: map, POWERSHELL_MCP_WINRM_CREDENTIAL_MAP_SHA256: createHash('sha256').update(readFileSync(map)).digest('hex') }, stderr: 'pipe' });
+    const proofFinished = evidence.start('proof');
+    let primary: unknown, failed = true;
     try {
       await client.connect(stdio);
       const call = (name: string, args: any) => client.callTool({ name, arguments: args }, undefined, { timeout: 20000, signal });
@@ -112,6 +110,11 @@ for (const engine of engines.length ? engines : [{ exe: 'Windows required' }]) d
       const deadline = await call('winrm_exec', { ...request, credentialRef: 'deadline' });
       expect(deadline.structuredContent).toMatchObject({ terminationStatus: 'transport_error', stdout: '' });
       expect(readFileSync(invoked, 'utf8')).toBe(before);
-    } finally { await client.close(); }
+      failed = false;
+    } catch (e) { primary = e; } finally {
+      try { await cleanup(primary, [() => evidence.measure('clientClose', () => client.close())]); }
+      catch (e) { failed = true; throw e; }
+      finally { proofFinished(failed || signal.aborted); }
+    }
   }, 90000);
 });
