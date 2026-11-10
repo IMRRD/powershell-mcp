@@ -9,18 +9,22 @@ const transport = vi.hoisted(() => ({ exe: '', prefix: '', suffix: '', cleanupFa
 vi.mock('../src/powershell.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/powershell.js')>();
   return { ...actual, runPowerShell: async (script: string, opts: any) => {
+    // Keep completions attached to the fixture that launched them, even after
+    // a test deadline causes teardown to replace the shared recording arrays.
+    const records = transport.raw;
     transport.calls.push({ script, opts });
     if (transport.cleanupFault) script = script.replace('try { $item.Password.Dispose() }', "try { $item.Password.Dispose(); throw 'synthetic cleanup fault' }");
     if (transport.patch) { const payload = JSON.parse(Buffer.from(opts.stdin, 'base64').toString()); transport.patch(payload); opts = { ...opts, stdin: Buffer.from(JSON.stringify(payload)).toString('base64') }; }
     // Only the remoting boundary is local: execute the real adapter and bootstrap.
     const raw = await actual.runPowerShell(transport.prefix + script.replaceAll('Microsoft.PowerShell.Core\\Invoke-Command', 'Invoke-Command') + transport.suffix, { ...opts, exe: transport.exe });
-    transport.raw.push(raw); return raw;
+    records.push(raw); return raw;
   } };
 });
 import { configuredProvider, resolveCredential } from '../src/credentials.js';
 import { runWinRm } from '../src/winrm.js';
 import { executeBatchTarget } from '../src/remote-batch.js';
 import { logStore } from '../src/full-logs.js';
+import { runPowerShell } from '../src/powershell.js';
 
 const scope = { transport: 'winrm' as const, host: 'synthetic.invalid', port: 5985, principal: 'SYNTHETIC\\robot' };
 const directories: string[] = [];
@@ -86,7 +90,18 @@ describe.skipIf(process.platform !== 'win32')('operator mapped protected WinRM r
 });
 
 for (const engine of process.platform === 'win32' ? selectIntegrationEngines() : []) describe(`protected adapter (${engine.exe})`, () => {
-  it('binds the PSCredential on direct and batch calls and disposes it', async () => {
+  it('keeps a late transport result in its original fixture recording', async () => {
+    transport.exe = engine.exe;
+    const original = transport.raw;
+    const pending = runPowerShell("'synthetic late result'", { timeoutMs: 15000 });
+    transport.raw = [];
+    const result = await pending;
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('synthetic late result');
+    expect(transport.raw).toEqual([]);
+    expect(original).toEqual([result]);
+  });
+  it.each(['direct', 'batch'] as const)('binds the PSCredential on %s calls and disposes it', async mode => {
     const createLog = vi.spyOn(logStore, 'create');
     const f = fixture(); transport.exe = engine.exe;
     const marker = join(f.directory, 'disposed').replaceAll("'", "''");
@@ -96,14 +111,17 @@ for (const engine of process.platform === 'win32' ? selectIntegrationEngines() :
     }
     `;
     transport.suffix = `\ntry { $global:testCredential.Password.Copy().Dispose() } catch { [IO.File]::WriteAllText('${marker}', 'disposed') }`;
-    const direct = await runWinRm({ computerName: scope.host, command: "'synthetic ok'", username: scope.principal, ...await auth(), authentication: 'Kerberos', logOutput: true });
-    expect(direct, direct.stderr).toMatchObject({ invocationStatus: 'completed', exitCode: 0 });
-    expect(direct.stdout.trim()).toBe('synthetic ok');
-    expect(direct.log).toBeUndefined();
+    if (mode === 'direct') {
+      const result = await runWinRm({ computerName: scope.host, command: "'synthetic ok'", username: scope.principal, ...await auth(), authentication: 'Kerberos', logOutput: true, timeoutMs: 15000 });
+      expect(result, result.stderr).toMatchObject({ invocationStatus: 'completed', exitCode: 0 });
+      expect(result.stdout.trim()).toBe('synthetic ok');
+      expect(result.log).toBeUndefined();
+    } else {
+      const batch = await executeBatchTarget({ transport: 'winrm', host: scope.host, command: "'synthetic ok'", username: scope.principal, credentialRef: 'robot', authentication: 'Kerberos' }, 15000);
+      expect(batch).toMatchObject({ status: 'completed', output: { invocationStatus: 'completed' } });
+      expect((batch.output as any).stdout.trim()).toBe('synthetic ok');
+    }
     expect(readFileSync(join(f.directory, 'disposed'), 'utf8')).toBe('disposed');
-    const batch = await executeBatchTarget({ transport: 'winrm', host: scope.host, command: "'synthetic ok'", username: scope.principal, credentialRef: 'robot', authentication: 'Kerberos' }, 15000);
-    expect(batch).toMatchObject({ status: 'completed', output: { invocationStatus: 'completed' } });
-    expect((batch.output as any).stdout.trim()).toBe('synthetic ok');
     for (const { script, opts } of transport.calls) {
       expect(script).not.toContain(f.path);
       expect(opts.env).toBeUndefined();
