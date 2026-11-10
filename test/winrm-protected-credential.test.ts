@@ -105,15 +105,27 @@ for (const engine of process.platform === 'win32' ? selectIntegrationEngines() :
     const createLog = vi.spyOn(logStore, 'create');
     const f = fixture(); transport.exe = engine.exe;
     const marker = join(f.directory, 'disposed').replaceAll("'", "''");
+    const phasePath = (phase: string) => join(f.directory, phase).replaceAll("'", "''");
+    replaceLoader(f, `[IO.File]::WriteAllText('${phasePath('loader-entered')}', '1'); ` + readFileSync(f.path, 'utf8'));
     transport.prefix = `function Invoke-Command { param($ComputerName,$ScriptBlock,$ArgumentList,$Credential,$Authentication,$ErrorAction)
-      if ($Credential -isnot [pscredential] -or $Credential.UserName -cne 'SYNTHETIC\\robot' -or $Credential.Password.Length -ne 1 -or $Authentication -cne 'Kerberos') { throw 'binding failed' }
+      [IO.File]::WriteAllText('${phasePath('invoke-entered')}', '1')
+      if ($Credential -isnot [pscredential] -or $Credential.UserName -cne '${scope.principal}' -or $Credential.Password.Length -ne 1 -or $Authentication -cne 'Kerberos') { throw 'binding failed' }
       & $ScriptBlock @ArgumentList
     }
+    [IO.File]::WriteAllText('${phasePath('script-entered')}', '1')
     `;
     transport.suffix = `\ntry { $global:testCredential.Password.Copy().Dispose() } catch { [IO.File]::WriteAllText('${marker}', 'disposed') }`;
     if (mode === 'direct') {
       const result = await runWinRm({ computerName: scope.host, command: "'synthetic ok'", username: scope.principal, ...await auth(), authentication: 'Kerberos', logOutput: true, timeoutMs: 15000 });
-      expect(result, result.stderr).toMatchObject({ invocationStatus: 'completed', exitCode: 0 });
+      const evidence = {
+        mode, timedOut: result.timedOut, cancelled: result.cancelled,
+        durationMs: result.durationMs, exitCode: result.exitCode,
+        winrmReason: result.winrmReason,
+        phases: Object.fromEntries(['script-entered', 'loader-entered', 'invoke-entered', 'disposed'].map(phase => [phase, existsSync(join(f.directory, phase))])),
+      };
+      // Fixed structural evidence only: no scripts, paths, raw output or credentials.
+      console.log('PROTECTED_DIRECT_PHASES', JSON.stringify(evidence));
+      expect(result, JSON.stringify(evidence)).toMatchObject({ invocationStatus: 'completed', exitCode: 0 });
       expect(result.stdout.trim()).toBe('synthetic ok');
       expect(result.log).toBeUndefined();
     } else {
