@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { selectIntegrationEngines } from './integration-engine.js';
 
-const transport = vi.hoisted(() => ({ exe: '', prefix: '', suffix: '', cleanupFault: false, patch: undefined as ((p: any) => void) | undefined, calls: [] as any[], raw: [] as any[] }));
+const transport = vi.hoisted(() => ({ exe: '', prefix: '', suffix: '', cleanupFault: false, patch: undefined as ((p: any) => void) | undefined, scriptPatch: undefined as ((script: string) => string) | undefined, calls: [] as any[], raw: [] as any[] }));
 vi.mock('../src/powershell.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/powershell.js')>();
   return { ...actual, runPowerShell: async (script: string, opts: any) => {
@@ -14,6 +14,7 @@ vi.mock('../src/powershell.js', async importOriginal => {
     const records = transport.raw;
     transport.calls.push({ script, opts });
     if (transport.cleanupFault) script = script.replace('try { $item.Password.Dispose() }', "try { $item.Password.Dispose(); throw 'synthetic cleanup fault' }");
+    if (transport.scriptPatch) script = transport.scriptPatch(script);
     if (transport.patch) { const payload = JSON.parse(Buffer.from(opts.stdin, 'base64').toString()); transport.patch(payload); opts = { ...opts, stdin: Buffer.from(JSON.stringify(payload)).toString('base64') }; }
     // Only the remoting boundary is local: execute the real adapter and bootstrap.
     const raw = await actual.runPowerShell(transport.prefix + script.replaceAll('Microsoft.PowerShell.Core\\Invoke-Command', 'Invoke-Command') + transport.suffix, { ...opts, exe: transport.exe });
@@ -28,7 +29,7 @@ import { runPowerShell } from '../src/powershell.js';
 
 const scope = { transport: 'winrm' as const, host: 'synthetic.invalid', port: 5985, principal: 'SYNTHETIC\\robot' };
 const directories: string[] = [];
-afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); transport.calls = []; transport.raw = []; transport.patch = undefined; transport.cleanupFault = false; transport.prefix = ''; transport.suffix = ''; for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true }); });
+afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); transport.calls = []; transport.raw = []; transport.patch = undefined; transport.scriptPatch = undefined; transport.cleanupFault = false; transport.prefix = ''; transport.suffix = ''; for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true }); });
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), 'mcp-protected-test-')); directories.push(directory);
   const path = join(directory, 'loader.ps1');
@@ -106,11 +107,29 @@ for (const engine of process.platform === 'win32' ? selectIntegrationEngines() :
     const f = fixture(); transport.exe = engine.exe;
     const marker = join(f.directory, 'disposed').replaceAll("'", "''");
     const phasePath = (phase: string) => join(f.directory, phase).replaceAll("'", "''");
+    const mark = (phase: string) => `[IO.File]::WriteAllText('${phasePath(phase)}', '1')`;
+    // Instrument only this synthetic local Invoke-Command scriptblock. Keep the
+    // real producer bootstrap, command pipeline and result shape unchanged.
+    transport.scriptPatch = script => {
+      const phases = [
+        ["if (-not ('McpBoundedWriter' -as [type])) {", `${mark('producer-entered')}\nif (-not ('McpBoundedWriter' -as [type])) {`],
+        ['$producer = [McpBoundedWriter]::new', `${mark('producer-compiled')}\n$producer = [McpBoundedWriter]::new`],
+        ['try { & ([ScriptBlock]::Create($source)) @bound', `${mark('command-entered')}\n  try { & ([ScriptBlock]::Create($source)) @bound`],
+        ['} finally { [Console]::SetOut($consoleOut); [Console]::SetError($consoleErr) }', `} finally { [Console]::SetOut($consoleOut); [Console]::SetError($consoleErr) }\n${mark('command-returned')}`],
+        ['[pscustomobject]@{ Output = $bounded.output;', `${mark('return-entered')}\n[pscustomobject]@{ Output = $bounded.output;`],
+      ] as const;
+      for (const [needle, replacement] of phases) {
+        if (!script.includes(needle)) throw Error('Synthetic phase boundary unavailable');
+        script = script.replace(needle, replacement);
+      }
+      return script;
+    };
     replaceLoader(f, `[IO.File]::WriteAllText('${phasePath('loader-entered')}', '1'); ` + readFileSync(f.path, 'utf8'));
     transport.prefix = `function Invoke-Command { param($ComputerName,$ScriptBlock,$ArgumentList,$Credential,$Authentication,$ErrorAction)
       [IO.File]::WriteAllText('${phasePath('invoke-entered')}', '1')
       if ($Credential -isnot [pscredential] -or $Credential.UserName -cne '${scope.principal}' -or $Credential.Password.Length -ne 1 -or $Authentication -cne 'Kerberos') { throw 'binding failed' }
       & $ScriptBlock @ArgumentList
+      ${mark('invoke-returned')}
     }
     [IO.File]::WriteAllText('${phasePath('script-entered')}', '1')
     `;
@@ -121,7 +140,7 @@ for (const engine of process.platform === 'win32' ? selectIntegrationEngines() :
         mode, timedOut: result.timedOut, cancelled: result.cancelled,
         durationMs: result.durationMs, exitCode: result.exitCode,
         winrmReason: result.winrmReason,
-        phases: Object.fromEntries(['script-entered', 'loader-entered', 'invoke-entered', 'disposed'].map(phase => [phase, existsSync(join(f.directory, phase))])),
+        phases: Object.fromEntries(['script-entered', 'loader-entered', 'invoke-entered', 'producer-entered', 'producer-compiled', 'command-entered', 'command-returned', 'return-entered', 'invoke-returned', 'disposed'].map(phase => [phase, existsSync(join(f.directory, phase))])),
       };
       // Fixed structural evidence only: no scripts, paths, raw output or credentials.
       console.log('PROTECTED_DIRECT_PHASES', JSON.stringify(evidence));
