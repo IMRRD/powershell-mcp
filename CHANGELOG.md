@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.1 - release candidate (not published)
+
+- New package identity for publication without moving the immutable 0.9.0 tag. Since 0.9.0, changes are diagnostic tests only; production behavior is unchanged.
+- The historical publisher timeout cause is unproven. These diagnostics do not establish a timeout repair, publishing success, or live acceptance.
+- Keep compatible ingestion and the approved 0.8.0 production client rollback; publication and deployment remain separate reviewed gates.
+
 ## 0.9.0 — release candidate (not published)
 
 - Adds operator-mapped protected WinRM credential references for direct and batch calls, with scoped resolution, bounded redaction and disposal checks.
