@@ -1,6 +1,18 @@
 # Changelog
 
-## 0.8.0 — release candidate (not published)
+## 0.9.0 — release candidate (not published)
+
+- Adds operator-mapped protected WinRM credential references for direct and batch calls, with scoped resolution, bounded redaction and disposal checks.
+- Adds separately authorized, default-inactive local restricted diagnostics. Internal enrollment alone does not enable capture; optional user pseudonyms remain independently opt-in.
+- Preserves genuine PowerShell errors while handling native stderr correctly; partial remote batches remain unknown rather than successful.
+- Improves native program cancellation and owned-process cleanup. Fixture lifecycle and installed-package checks retain failure, timeout and unrelated-process protection.
+- Adds privacy-bounded actionable reporting and actual event/version outcome joins, preserving mixed-version coverage and small-cell/complement suppression.
+
+- Updates Zod, body-parser, @hono/node-server, fast-uri and qs within their existing major versions to address release-time dependency audit findings. Publishing workflows remain unchanged.
+
+Release ordering: apply compatible additive analytics changes before the updated reporter, then publish and activate the client only after reviewed exact-head and merged-main CI. Preserve permanent telemetry history, pending events and the approved 0.8.0 client rollback. Diagnostics activation, live WinRM acceptance and observed reliability improvement are separate gates, not claims made by this release candidate.
+
+## 0.8.0 — published October 28, 2026
 
 This minor release adds optional privacy adoption fields and finite WinRM failure diagnostics to the published 0.7.0 client. The minor increment follows [Semantic Versioning](https://semver.org/) for added functionality; package versions remain in initial development (0.y.z).
 
